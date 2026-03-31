@@ -1,0 +1,431 @@
+[vm_log_trace][coolbar] xxl: coolbar_handle xxl %d,f78550,33e1bf
+[vm_log_trace][coolbar] xxl: coolbar_nettask_handle %d,f78470,d61738
+[vm_log_trace] vMLcdInit vMLcdInit called,34002c00,837878
+[vm_log_trace] vMLcdInit vMLcdInit Enter,eb6214,d61728
+[vm_log_trace][coolbar] xxl: vmSysMemAllocIn  %d,800,0
+[vm_log_trace] vMLcdInit vMLcdInit ready,0,0
+[vm_log_trace][coolbar] xxl: pData %d,406,d61728
+[vm_log_trace][coolbar] xxl: appId %d, len %d,406,5
+[vm_log_trace][coolbar] xxl: vmSysMemAllocIn  %d,200,0
+[vm_log_trace][coolbar] xxl: vmSysMemAllocIn  %d,200,0
+[vm_log_trace]VmAppRunApByIdAndName id %d source %d, type %d,406,2
+[vm_log_trace]VmAppStoreGetAppInfo id %d, type %d,406,3
+[vm_log_trace]ven_aps_list_detail appinfo ret %d,1,d61148
+[vm_log_trace]ap name %d %d,2,0
+[vm_log_trace]ap id %d %d,406,406
+[vm_log_trace]VmAppRunApByIdAndName result %d,1,0
+[vm_log_trace]VmAppRunApByIdAndName filename %d,2,d613d0
+[vm_log_trace]VmAppRunApByIdAndName filename %s,d61644,d61644
+[vm_log_trace]CDownGetVersionByAppId:%d,406,d613d0
+[vm_log_trace]CDownGetVersionByAppId:%d,2,406
+[vm_log_trace]VmGetRunAppFileSystem dev %d,5,d61318
+[vm_log_trace]Coolbar_PreLoadAppByName:%d, device %d,406,5
+[vm_log_trace]CDownGetVersionByAppId:%d,406,d61328
+[vm_log_trace]CDownGetVersionByAppId:%d,2,406
+[vm_log_trace]VmGetAppPlaceFromInstalInfo id %d, type %d,406,3
+[vm_log_trace]VmGetAppPlaceFromInstalInfo appinfo ret %d,1,d610a0
+[vm_log_trace]VmGetAppPlaceFromInstalInfo ap name %d %d,2,6
+[vm_log_trace]VmGetAppPlaceFromInstalInfo ap id %d %d,406,406
+[vm_log_trace]VmGetAppPlaceFromInstalInfo sdtag %d,0,d610e8
+[vm_log_trace]VmAppRunApByIdAndName device %d,1,0
+[vm_log_trace]VmSetRunAppFileSystem dev %d,1,d61328
+[vm_log_trace]Coolbar_ReadCbeFileExist %x %x,d6113c,9e5868
+[vm_log_trace]VmGetRunAppFileSystem dev %d,1,d61118
+[vm_log_trace]VmGetRunAppFileSystem dev %d,1,d61110
+[vm_log_trace]111 currun=%d result=%d,1,1
+[vm_log_trace]CheckCanEnterCoolbarPlatform:%d,406,d61328
+[vm_log_trace]SMS getSrvReady sync result: %d,1,d612c0
+[vm_log_trace]vmGetCoolbarlistInit %d,1,d612f8
+[vm_log_trace]VmGetRunAppFileSystem dev %d,1,d61308
+[vm_log_trace]vm_get_freespace free=%d result=%d,eb60,1
+[vm_log_trace]vmGetCoolbarlistInit %d,1,eb60
+[vm_log_trace]vmGetCoolbarlistInit %d,1,d61308
+[vm_log_trace]CheckCanEnterCoolbarPlatform result %d,1,d61308
+[vm_log_trace]Coolbar_PreLoadAppByName11:%d,%d,406,1
+[vm_log_trace]VmGetRunAppFileSystem dev %d,1,0
+[vm_log_trace]Put file handle into slot[%d].,0,ef84b0
+[vm_log_trace]--open ok!---qsq---,2,d61120
+[vm_log_trace]vm_file_getfilesize:%d,%d,%d,0,0
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace][coolbar] xxl: vmSysMemAllocIn  %d,c,0
+[vm_log_trace]vmSysSmallmalloc alloc size %d,c,0
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,c,c
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace][coolbar] xxl: vmSysMemAllocIn  %d,2c,0
+[vm_log_trace]vmSysSmallmalloc alloc size %d,2c,0
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,2c,2c
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,4,4
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,4,4
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,4,4
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,4,4
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,4,4
+[vm_log_trace]---lyz---kernel_series[0] = %d kernel_series[1]=%d,check=%d,5,2a
+[vm_log_trace]---DL_TYPE_V1 bin--qsq---,2a,2a
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace][coolbar] xxl: vmSysMemAllocIn  %d,19004,0
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,19000,19000
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,19000,19000
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,b7ed,b7ed
+[vm_log_trace]--file check ok!---qsq---,d1be28,0
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,a0,a0
+[vm_log_trace]--12--(code_sum_check = %lx)---qsq---,60a84e3a,a84e00
+[vm_log_trace]--12--(dataLen = %lx)---qsq---,2050,2000
+[vm_log_trace]--12--(data_sum_check = %lx)---qsq---,4d7d439d,7d4300
+[vm_log_trace]--12--(iconLen=%lx)---qsq---,356,300
+[vm_log_trace]--12--(icon_sum_check = %lx)---qsq---,612037c2,203700
+[vm_log_trace]--offset = %lx----len=%lx----qsq---!!!!,20b38,356
+[vm_log_trace][coolbar] xxl: vmSysMemAllocIn  %d,1004,0
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,356,356
+[vm_log_trace]--file check ok!---qsq--- ret:%x,1,0
+[vm_log_trace]--file check ok!---qsq--- ret:%x,1,d60fc8
+[vm_log_trace]Coolbar_PreLoadAppByName cbeVersion:0x%x,menuVersion:0x%x,,2,2
+[vm_log_trace]Coolbar_LoadApplictionByNameAndId load result:%d,0,0
+[vm_log_trace]mpcmdSharMemInit:%x,0,2a
+[vm_log_trace][coolbar] xxl: vmSysMemAllocIn  %d,1c34,0
+[vm_log_trace]mpcmdSharMemInitshareMemContextp->addresLens=%d,1,c
+[vm_log_trace]VmGetRunAppFileSystem dev %d,1,0
+[vm_log_trace]VmGetRunAppFileSystem dev %d,1,0
+[vm_log_trace]Put file handle into slot[%d].,0,ef84b0
+[vm_log_trace]vm_file_getfilesize:%d,%d,%d,0,0
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace][coolbar] xxl: vmSysMemAllocIn  %d,c,0
+[vm_log_trace]vmSysSmallmalloc alloc size %d,c,0
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,c,c
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace][coolbar] xxl: vmSysMemAllocIn  %d,2c,0
+[vm_log_trace]vmSysSmallmalloc alloc size %d,2c,0
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,2c,2c
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,4,4
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,4,4
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,4,4
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,4,4
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,4,4
+[vm_log_trace]---lyz---kernel_series[0] = %d kernel_series[1]=%d,check=%d,5,2a
+[vm_log_trace]---DL_TYPE_V1 bin--qsq---,2a,2a
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,19000,19000
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,19000,19000
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,b7ed,b7ed
+[vm_log_trace]CoolbarGameSetNeedTouchPanel:%d,0,2a
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,98,98
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,8,8
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,1ea40,1ea40
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,8,8
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,2050,2050
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,8,8
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,8,8
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,4,4
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,8,8
+[vm_log_trace]DF_DataPackage_SetFullPaths:%d,%d,2e,1d
+[vm_log_trace]Coolbar_LoadApplication_Dyn:parseReturn=%d %x,%x,%x,%x,%x,0,9b54
+[vm_log_trace]vmEnterWinEnter 00:%d,%d,1,0
+[vm_log_trace]xxl vmEnterWinOpen reg_key_handler,0,0
+[vm_log_trace]reg_key_handler retKey %d,1,0
+[vm_log_trace]reg_pen_handler retTs %d,1,eb2dcc
+[vm_log_trace]xxl vmEnterWinOpen reg_key_handler End,eb6214,d61158
+[vm_log_trace]mpcmdSharMemInit:%x,16c2800,d61160
+[vm_log_trace]VmGetDlWPayManager %x,f04cfc,37b901
+[vm_log_trace] vMLcdInit vMLcdInit called,52a157,d61150
+[vm_log_trace] vMLcdInit vMLcdInit ready,eb6214,d61150
+[vm_log_trace]vmAllocKernerShareMem %d,0,d61150
+[vm_log_trace]gif_lkv2_Init %x,16e8528,0
+[vm_log_trace]vmEnterWinEnter 1:%d,1,d61150
+[vm_log_trace] ker_ver_current:%d,2e,0
+[vm_log_trace] ker_ver_current:%d,2e,0
+[vm_log_trace]VmGetDlWPayManager %x,f04cfc,16d9f45
+[vm_log_trace]game lib: vmGameInit 111
+,525e21,d61120
+[vm_log_trace]game lib: vMInitDFEnginelManager 111 
+,525e21,200
+[vm_log_trace]game lib: vMInitDFEnginelManager 222
+,525e21,d61108
+[vm_log_trace]game lib: df engineManager initDFRecord is %x,16d7c35,525e21
+[vm_log_trace]game lib: vmGameInit 222
+,525e21,0
+[vm_log_trace]vmEnterWinEnter 2:%x,%d,16c41cf,0
+[vm_log_trace]CoolbarGame_InitTouchPanel %d,0,19000f0
+[vm_log_trace]vmOpenTScreenWinScr,0,eb5f38
+[vm_log_trace]VmGetRunAppFileSystem dev %d,1,0
+[vm_log_trace]Put file handle into slot[%d].,0,ef84b0
+[vm_log_trace]DF_DataPackage_LoadFormTCard:%d,0,16e7d28
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,4,4
+[vm_log_trace]DF_DataPackage_LoadFormTCard2:%d,8,d61098
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,8,8
+[vm_log_trace]DF_DataPackage_LoadFormTCard3333:%d,%d,1,112
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,4,4
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,f65,f65
+[vm_log_trace]DF_DataPackage_InitTxt 222:%d,%d,112,112
+[vm_log_trace]DF_DataPackage_InitTxt error :%d,0,112
+[vm_log_trace]vmSCREEN_ChangeScreen:%x,16e4560,eb5f38
+[vm_log_trace]VmGetRunAppFileSystem dev %d,1,0
+[vm_log_trace][coolbar] xxl: vmSysMemAllocIn  %d,200,0
+[vm_log_trace]VmGetRunAppFileSystem dev %d,1,0
+[vm_log_trace]Put file handle into slot[%d].,1,ef84bc
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,fa,fa
+[vm_log_trace] read File SUcess,eb6214,d60e90
+[vm_log_trace]VmGetRunAppFileSystem dev %d,1,0
+[vm_log_trace][coolbar] xxl: vmSysMemAllocIn  %d,200,0
+[vm_log_trace]VmGetRunAppFileSystem dev %d,1,0
+[vm_log_trace]Put file handle into slot[%d].,1,ef84bc
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_write length=%d, iRet=%d,fa,fa
+[vm_log_trace] vm_file_write SUcess,eb6214,d60e90
+[vm_log_trace]vMGetTotalSeconds seconds %d,69c39978,69c325b0
+[vm_log_trace]vMGetTotalSeconds seconds %d,69c39978,69c325b0
+[vm_log_trace]vmEnterWinEnter 3:%d,0,d61168
+[vm_log_trace]vmScreenPatchUpdate1:%x,%x,d22f9c,16e4560
+[vm_log_trace]TryChangeSubTScreen:%x,%x,d22f9c,16e4560
+[vm_log_trace]TryChangeSubTScreen4:%x,%x,d22f9c,16e4560
+[vm_log_trace]DF_DataPackage_GetFileByID:%d,1,112
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace][coolbar] xxl: vmSysMemAllocIn  %d,3c00,0
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,95,95
+[vm_log_trace]GIF2BMP_Decode:%d,258,0
+[vm_log_trace]--------------------GIF2BMP_Decode----------------:%x,16ffa50,0
+[vm_log_trace]DF_DataPackage_GetFileByID:%d,1,112
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,1201,1201
+[vm_log_trace]GIF2BMP_Decode:%d,46a8,0
+[vm_log_trace]--------------------GIF2BMP_Decode----------------:%x,16fd350,0
+[vm_log_trace]DF_DataPackage_GetFileByID:%d,1,112
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace][coolbar] xxl: vmSysMemAllocIn  %d,4133,0
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,4133,4133
+[vm_log_trace]GIF2BMP_Decode:%d,25800,0
+[vm_log_trace]--------------------GIF2BMP_Decode----------------:%x,16fd360,0
+[vm_log_trace]DF_DataPackage_GetFileByID:%d,1,112
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,2105,2105
+[vm_log_trace]GIF2BMP_Decode:%d,e5c8,0
+[vm_log_trace]--------------------GIF2BMP_Decode----------------:%x,16fd370,0
+[vm_log_trace]DF_DataPackage_GetFileByID:%d,1,112
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,117,117
+[vm_log_trace]GIF2BMP_Decode:%d,12c0,0
+[vm_log_trace]--------------------GIF2BMP_Decode----------------:%x,16fd380,0
+[vm_log_trace]DF_DataPackage_GetFileByID:%d,1,112
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,b2,b2
+[vm_log_trace]GIF2BMP_Decode:%d,2d8,0
+[vm_log_trace]--------------------GIF2BMP_Decode----------------:%x,16fd4b0,0
+[vm_log_trace]DF_DataPackage_GetFileByID:%d,1,112
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,ae,ae
+[vm_log_trace]GIF2BMP_Decode:%d,2d8,0
+[vm_log_trace]--------------------GIF2BMP_Decode----------------:%x,16fd4c0,0
+[vm_log_trace]DF_DataPackage_GetFileByID:%d,1,112
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,755,755
+[vm_log_trace]GIF2BMP_Decode:%d,4b00,0
+[vm_log_trace]--------------------GIF2BMP_Decode----------------:%x,16fd4d0,0
+[vm_log_trace]DF_DataPackage_GetFileByID:%d,1,112
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,760,760
+[vm_log_trace]GIF2BMP_Decode:%d,4b00,0
+[vm_log_trace]--------------------GIF2BMP_Decode----------------:%x,16fd4e0,0
+[vm_log_trace]DF_DataPackage_GetFileByID:%d,1,112
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,a8,a8
+[vm_log_trace]GIF2BMP_Decode:%d,2d8,0
+[vm_log_trace]--------------------GIF2BMP_Decode----------------:%x,16fd4f0,0
+[vm_log_trace]DF_DataPackage_GetFileByID:%d,1,112
+[vm_log_trace]vm_file_seek handle %d file_pool[handle].used %d,0,1
+[vm_log_trace]vmGetCoolbarlistInit %d,1,837878
+[vm_log_trace]vm_file_read:%d,%d,44,44
+[vm_log_trace]GIF2BMP_Decode:%d,108,0
+[vm_log_trace]--------------------GIF2BMP_Decode----------------:%x,16fd500,0
+[vm_log_trace]TryChangeSubTScreen5:%x,%x,d22f9c,16e4560
+[vm_log_trace]TryChangeSubTScreen2:%x,16c67dd,d61128
+[vm_log_trace]TryChangeSubTScreen3:%x,%x,d22f9c,0
+[vm_log_trace]vmScreenPatchUpdate2:%x,%x,d22f9c,0
+[vm_log_trace]vmScreenPatchUpdate3:%x,0,2
+[vm_log_trace][coolbar] xxl: entry mainmenu end,f04dbd,61
+[vm_log_trace]vmScreenPatchUpdate1:%x,%x,d22f9c,0
+[vm_log_trace]TryChangeSubTScreen:%x,%x,d22f9c,0
+[vm_log_trace]TryChangeSubTScreen3:%x,%x,d22f9c,0
+[vm_log_trace]vmScreenPatchUpdate2:%x,%x,d22f9c,0
+[vm_log_trace]vmScreenPatchUpdate3:%x,0,2
+[vm_log_trace]vmScreenPatchUpdate1:%x,%x,d22f9c,0
+[vm_log_trace]TryChangeSubTScreen:%x,%x,d22f9c,0
+[vm_log_trace]TryChangeSubTScreen3:%x,%x,d22f9c,0
+[vm_log_trace]vmScreenPatchUpdate2:%x,%x,d22f9c,0
+[vm_log_trace]vmScreenPatchUpdate3:%x,0,2
+[vm_log_trace]vmScreenPatchUpdate1:%x,%x,d22f9c,0
+[vm_log_trace]TryChangeSubTScreen:%x,%x,d22f9c,0
+[vm_log_trace]TryChangeSubTScreen3:%x,%x,d22f9c,0
+[vm_log_trace]vmScreenPatchUpdate2:%x,%x,d22f9c,0
+[vm_log_trace]vmScreenPatchUpdate3:%x,0,2
+[vm_log_trace]vmScreenPatchUpdate1:%x,%x,d22f9c,0
+[vm_log_trace]TryChangeSubTScreen:%x,%x,d22f9c,0
+[vm_log_trace]TryChangeSubTScreen3:%x,%x,d22f9c,0
+[vm_log_trace]vmScreenPatchUpdate2:%x,%x,d22f9c,0
+[vm_log_trace]vmScreenPatchUpdate3:%x,0,2
+[vm_log_trace][coolbar] xxl: ts event %d,x[%d] ,y[%d],0,70
+[vm_log_trace][coolbar] xxl: ts event %d,x[%d] ,y[%d],1,70
+[vm_log_trace][coolbar] xxl: ts event %d,x[%d] ,y[%d],4,70
+[vm_log_trace][coolbar] xxl: ts event %d,x[%d] ,y[%d],0,70
+[vm_log_trace]vmScreenPatchUpdate1:%x,%x,d22f9c,0
+[vm_log_trace]TryChangeSubTScreen:%x,%x,d22f9c,0
+[vm_log_trace]TryChangeSubTScreen3:%x,%x,d22f9c,0
+[vm_log_trace]vmScreenPatchUpdate2:%x,%x,d22f9c,0
+[vm_log_trace]vmScreenPatchUpdate3:%x,0,0
+[vm_log_trace][coolbar] xxl: ts event %d,x[%d] ,y[%d],1,70
+[vm_log_trace]vmScreenPatchUpdate1:%x,%x,d22f9c,0
+[vm_log_trace]TryChangeSubTScreen:%x,%x,d22f9c,0
+[vm_log_trace]TryChangeSubTScreen3:%x,%x,d22f9c,0
+[vm_log_trace]vmScreenPatchUpdate2:%x,%x,d22f9c,0
+[vm_log_trace]vmScreenPatchUpdate3:%x,0,2
+[vm_log_trace][coolbar] xxl: ts event %d,x[%d] ,y[%d],0,70
+[vm_log_trace]vmScreenPatchUpdate1:%x,%x,d22f9c,0
+[vm_log_trace]TryChangeSubTScreen:%x,%x,d22f9c,0
+[vm_log_trace]TryChangeSubTScreen3:%x,%x,d22f9c,0
+[vm_log_trace]vmScreenPatchUpdate2:%x,%x,d22f9c,0
+[vm_log_trace]yangzhijieday111:%d,1e,525e21
+[vm_log_trace]vmScreenPatchUpdate3:%x,0,d61648
+[vm_log_trace][coolbar] xxl: ts event %d,x[%d] ,y[%d],1,70
+[vm_log_trace][coolbar] xxl: ts event %d,x[%d] ,y[%d],4,70
+[vm_log_trace]needCloseWin is True,1,0
+[vm_log_trace]vmEnterWinCloseIn begin,eb6214,d61708
+[vm_log_trace]vmEnterWinCloseIn xxl,1,d616f8
+[vm_log_trace]CoolbarGameSetNeedTouchPanel:%d,0,837878
+[vm_log_trace]vMAudioStop %d,0,0
+[vm_log_trace]vmEnterWinexit exitToMenu=%d,0,0
+[vm_log_trace]vmFreeKernerShareMem %d,1,d616e8
+[vm_log_trace] vMLcdExit vMLcdExit called,0,5cb17c
+[vm_log_trace]mpcmdShareMemDestory=%d,%d,%d,1,0
+[vm_log_trace]vmEnterWinexit exitToMenu00vMContinueMp3,d1be28,0
+[vm_log_trace][coolbar] xxl: vmEnterWinexit release kpd ts,eb6214,d616e8
+[vm_log_trace][coolbarsocket]:SocketDeactiveNetwork,ef7250,0
+[vm_log_trace]CloseAccountID:isAllClosed=%d,1,0
+[vm_log_trace]GetDeactiveFlag:%d,1,d616e0
+[vm_log_trace][coolbarsocket]: SocketStopQueryTimer cnetTaskContext %d,bd01,d616d8
+[vm_log_trace]vmSysSetGprsState GprsState %d,4,4a353
+[vm_log_trace]DeActiveNetwork ven_socket_close_datalink_async ,eb6214,d616d0
+[vm_log_trace]CloseAccountID:isAllClosed=%d,0,0
+[vm_log_trace]VmSetRunAppFileSystem dev %d,5,d616e0
+[vm_log_trace]VmSetInstallFileSystem dev %d,5,d616d8
+[vm_log_trace]VmSetApsMainFileSystem dev %d,5,d616d8
+[vm_log_trace]CleanWpayManager %x,f04cfc,d616d8
+[vm_log_trace]VmGetDlWPayManager %x,f04cfc,0
+[vm_log_trace]vmEnterWinexit end ,5265bd,d616d8
+
+
+
+
+
+CBE文件最后12个字节是校验用的
+ ( buffer[4] != 0x43
+    || buffer[5] != 0x6F
+    || buffer[6] != 0x6F
+    || buffer[7] != 0x6C
+    || buffer[8] != 0x42
+    || buffer[9] != 0x61
+    || buffer[10] != 0x72
+    || buffer[11] != 0x73 )
+四字节unkVarPos(大端序) + CoolBars
+buffer[3] + (*buffer << 24) + (buffer[1] << 16) + (buffer[2] << 8)
+\x00\x03\xD7\xED(这个值与cbe文件大小比对，不能大于等于文件大小)
+地址定位到unkVarPos，用文件大小减去这个值，得到0x2c，并读取0x2c
+//------------------------------------------------------------
+//-----------       Created with 010 Editor        -----------
+//------         www.sweetscape.com/010editor/          ------
+//
+// File    : E:\DevOs\MoralI9ByAi\res\Ä§Ëþ.CBE
+// Address : 251885 (0x3D7ED)
+// Size    : 44 (0x2C)
+//------------------------------------------------------------
+unsigned char hexData[44] = {
+    0xFE, 0xFE, 0xFE, 0xFE,
+    0x01, 0x1C, 0x3A, 0x1C,
+    0xCA, 0x4A, 0x7A, 0x44,
+    0x10, 0xB5, 0x48, 0x44, 
+    0x48, 0x44, 0x47, 0x68, 
+    0x02, 0x0E, 0x05,//一般2(需要<4) platFromType 一般5(需要<9)
+    0x00, 0x02, //cbeVersion[0]
+    0x04, 0x06, //cbeVersion[1]
+    0x2A, 
+    0xA0, 0x2A, 0xC8, 0x06,//大端序读取
+    0x00, 0x03, 0xD7, 0xED, 
+    0x43, 0x6F, 0x6F, 0x6C, 
+    0x42, 0x61, 0x72, 0x73 
+};
+当unkVarPos大于0x67需要下面验证：
+    再定位到0x64，读取4字节，与上面的0x2c大小的数据的前0-4字节比较，要求相等
+当unkVarPos大于0x3EB需要下面验证：
+    再定位到0x3E8，读取4字节，与上面的0x2c大小的数据的前4-8字节比较，要求相等
+当unkVarPos大于0x138B需要下面验证：
+    再定位到0x1388，读取4字节，与上面的0x2c大小的数据的前8-12字节比较，要求相等
+当unkVarPos大于0x2713需要下面验证：
+    再定位到0x2710，读取4字节，与上面的0x2c大小的数据的前12-16字节比较，要求相等
+当unkVarPos大于0x186A3需要下面验证：
+    再定位到0x186A0，读取4字节，与上面的0x2c大小的数据的前16-20字节比较，要求相等
+
+读取某些信息
+对整个文件进行SumCheckVal，验证完整性
+定位到0xA0，调用coolBar_check_file_content，0-8字节不能是0xFE
+
+Coolbar_LoadApplication_Dyn
+
+vmDlCallReg开始cbe文件中的执行

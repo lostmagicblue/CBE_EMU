@@ -1,0 +1,968 @@
+设置数据段的地址到r9
+声明一个局部变量entryPoint=0xD61184
+传入一个参数给入口(&entryPoint)，开始运行，程序内部会设置entryPoint变量
+int[] table = (int[])0xD61184是一个数据表，每4字节为一个数据
+table[0] cbe的入口方法中会设置
+table[1] cbe的入口方法中会设置
+table[2] vmManager的函数指针列表的地址 0xF04850
+table[3] vm_log_trace的地址
+table[4] curAppFileName全局变量地址
+//下面的都不清楚了
+table[5] 0
+table[6] 2
+table[7] 
+
+
+
+vmManager函数表
+
+  *a1 = vMInitIoManager;
+  a1[1] = vMGetIoManager;
+  a1[2] = vMInitLcdManager;
+  a1[3] = vMGetLcdManager;
+  a1[4] = vMInitTimeManager;
+  a1[5] = vMGetTimeManager;
+  a1[6] = vMInitCtrlManager;
+  a1[7] = vMGetCtrlManager;
+  a1[8] = vMInitMemoryManager;
+  a1[9] = vMGetMemoryManager;
+  a1[11] = vMGetBillingManager;
+  a1[10] = vMInitBillingManager;
+  a1[13] = vMGetScreenManager;
+  a1[12] = vMInitScreenManager;
+  a1[15] = vMGetNetManager;
+  a1[14] = vMInitNetManager;
+  a1[17] = vMGetUcs2StrManager;
+  a1[16] = vMInitUcs2StrManager;
+  a1[19] = vMGetSysManager;
+  a1[18] = vMInitSysManager;
+  a1[21] = vMGetDFScriptManager;
+  a1[20] = vMInitDFScriptManager;
+  a1[23] = vMGetGameLcdManager;
+  a1[22] = vMInitGameLcdManager;
+  a1[25] = vMGetGameUtilManager;
+  a1[24] = vMInitGameUtilManager;
+  a1[27] = vMGetDFEnginelManager;
+  a1[26] = vMInitDFEnginelManager;
+  a1[28] = vMInitNetAppManager;
+  a1[29] = vMGetNetAppManager;
+  a1[30] = vMInitAudioManager;
+  a1[31] = vMGetAudioManager;
+  a1[32] = vMInitGameManagerOld;
+  a1[33] = vMGetGameManagerOld;
+  a1[34] = vMInitManager;
+  a1[35] = vMInitGSensorManager;
+  a1[36] = vMGetGSensorManager;
+  a1[37] = vMInitVmStdManager;
+  a1[38] = vMGetVmStdManager;
+  a1[39] = vMInitDlLoadManager;
+  a1[40] = vMGetDlLoadManager;
+  a1[41] = vMGetDlRsManager;
+  a1[42] = vMInitDlRsManager;
+  a1[43] = vMGetDlImageManager;
+  a1[44] = vMInitDlImageManager;
+  a1[45] = vMInitVmImManager;
+  a1[46] = vMGetVmImManager;
+
+int (*__fastcall vMInitSysManager(bool (**a1)()))(int, int, int, int, int)
+{
+  _DWORD *v2; // r0
+  int (*p_vmGetGQQRunings)(); // r0
+  int (*p_vmSysSaveContactPerson)(int, int, int, int, int); // r0
+
+  *a1 = vMIsSimReady;
+  a1[1] = (bool (*)())vmSysIsHaveNetWork;
+  a1[2] = (bool (*)())vMIsSystemReady;
+  a1[3] = (bool (*)())vMGetOperator;
+  a1[4] = (bool (*)())vMGetIMEI;
+  a1[6] = (bool (*)())vMGetPrjName;
+  a1[7] = (bool (*)())vMGetPrjVersion;
+  a1[8] = (bool (*)())vMIsCallConnect;
+  a1[9] = (bool (*)())vMIsDCopen;
+  a1[10] = (bool (*)())vMGetStkCardStatus;
+  a1[11] = (bool (*)())vMGetActiveSim;
+  a1[12] = (bool (*)())vmGetCoolbarlistInit;
+  a1[13] = (bool (*)())vmEnterWinSetFPS;
+  a1[14] = (bool (*)())vmEnterWinClose;
+  a1[15] = (bool (*)())vMAudioIsSupportInCb;
+  a1[16] = (bool (*)())vMAssert;
+  a1[17] = (bool (*)())Coolbar_GetCoolbarDirPath;
+  a1[18] = (bool (*)())CoolBarDynamicGetVerByAppID;
+  a1[19] = (bool (*)())Res_GetCoolBarFullPath;
+  a1[20] = (bool (*)())vMGSenserIsSupportInCb;
+  a1[21] = (bool (*)())vMSysHandler;
+  a1[22] = (bool (*)())vMGetKeyNum;
+  a1[23] = (bool (*)())vMIsSupportTP;
+  a1[24] = (bool (*)())CDownGetCompany;
+  a1[25] = (bool (*)())CDownGetServicePhone;
+  a1[26] = (bool (*)())vMIsSupportIdleMenu;
+  a1[29] = (bool (*)())CDownGetData;
+  a1[30] = (bool (*)())GetCoolBarKernelCurrentVersion;
+  a1[31] = (bool (*)())CoolBar_DownLoad_GetFile;
+  v2 = a1 + 32;
+  a1[5] = (bool (*)())vMGetIMSI;
+  *v2 = CoolBar_DownLoad_Stop;
+  v2[1] = vmDlGetCurrAppId;
+  v2[2] = vmSysIsVisibleApp;
+  v2[3] = cDownSetForceUpdate;
+  v2[4] = cDownGetModeAndVersion;
+  v2[5] = mmiDynamicSetForceUpdate;
+  v2[6] = mmiDunamicGetModeAndVersion;
+  v2[7] = vMSwitchLog;
+  v2[8] = Coolbar_GetResStatus;
+  v2[9] = coolbar_Update_Tfold;
+  v2[10] = CoolBar_EnterDmIn;
+  v2[11] = vmInputText;
+  v2[12] = vmInputPassword;
+  v2[13] = vmInputClose;
+  v2[14] = vmInputIsOpen;
+  v2[15] = VmGetRand;
+  a1[48] = (bool (*)())srand;
+  a1[49] = (bool (*)())VmGetSmsCenterNum;
+  a1[50] = (bool (*)())VmGetPrjCustom;
+  a1[51] = (bool (*)())CBGetNetInfo;
+  a1[52] = (bool (*)())VmGetCbNum;
+  a1[53] = (bool (*)())LzssEncode;
+  a1[54] = (bool (*)())LzssDecode;
+  a1[55] = (bool (*)())DMenuUpdateMenu;
+  a1[56] = (bool (*)())CDownUpdateMenu;
+  a1[57] = (bool (*)())CbGetPlatfomName;
+  a1[58] = (bool (*)())vMInnerAppInfo;
+  a1[59] = (bool (*)())vMGetInnerAppIcon;
+  a1[60] = (bool (*)())CDownGetAppType;
+  if ( vmSupportQQIdle() == 1 )
+  {
+    a1[61] = (bool (*)())vmSetGQQRunings;
+    p_vmGetGQQRunings = vmGetGQQRunings;
+  }
+  else
+  {
+    p_vmGetGQQRunings = 0;
+    a1[61] = 0;
+  }
+  a1[62] = (bool (*)())p_vmGetGQQRunings;
+  a1[63] = (bool (*)())vmGetQQAddress;
+  a1[64] = (bool (*)())GetCurrentScreenType;
+  a1[65] = (bool (*)())GetCurrentPlatformType;
+  a1[66] = (bool (*)())VmDlGetIMEI;
+  a1[67] = (bool (*)())vMGetIMSI;
+  a1[68] = (bool (*)())Net_get_DefaultLoginInfo;
+  a1[69] = (bool (*)())Net_write_DefaultLoginInfo;
+  a1[70] = (bool (*)())coolbar_GetAppNameByIdFromList;
+  a1[71] = (bool (*)())coolbar_Update_DeleteAppInfo;
+  a1[72] = (bool (*)())VmGetDMenuFileName;
+  a1[73] = (bool (*)())VmGetCDownFileName;
+  a1[74] = (bool (*)())GetCDownAppUrl;
+  a1[75] = (bool (*)())vmDlGetPreAppId;
+  a1[76] = (bool (*)())Coolbar_ParseDownDataFile;
+  a1[77] = (bool (*)())CoolBar_DownLoad_CBE;
+  a1[78] = (bool (*)())Coolbar_PreLoadAppEx;
+  a1[79] = (bool (*)())vmDlGet_sp_bf;
+  a1[80] = (bool (*)())vMGetGameWinState;
+  a1[81] = (bool (*)())CDownGetHideText;
+  a1[82] = (bool (*)())vMPhbMultiSelectEntry;
+  a1[83] = (bool (*)())vmSetCurActiveSim;
+  a1[84] = (bool (*)())vmGetAllSimStatus;
+  a1[85] = (bool (*)())VmSendMMS;
+  a1[86] = (bool (*)())VmGetFocusWinID;
+  a1[87] = (bool (*)())VmIsWinOpen;
+  a1[88] = (bool (*)())vmIsIdleWinFocus;
+  a1[89] = (bool (*)())vmIsInnerApp;
+  a1[90] = (bool (*)())vmGetInnerAppVer;
+  a1[91] = (bool (*)())VmGetMixMenuLength;
+  a1[92] = (bool (*)())VmGetMixMenudata;
+  a1[93] = (bool (*)())VmGetWpayCBMInfo;
+  a1[94] = (bool (*)())VMGetCurVerAllInfo;
+  a1[95] = (bool (*)())vMSetFpsSleepFlag;
+  a1[96] = (bool (*)())cbSetSmsCenterNum;
+  a1[97] = (bool (*)())vmGetBuildTime;
+  a1[98] = (bool (*)())vmGetUsedTimes;
+  a1[99] = (bool (*)())vmSysGetBatteryInfo;
+  a1[100] = (bool (*)())vmSysSetLcdBright;
+  a1[101] = (bool (*)())vmSysResetLcdBright;
+  a1[102] = (bool (*)())vmSysSetPowerSaveMode;
+  a1[103] = (bool (*)())vMGetOperatorMCC;
+  a1[104] = (bool (*)())vMGetOperatorMNC;
+  a1[105] = (bool (*)())VmSupportAppSotre;
+  a1[106] = (bool (*)())CDownGetCompanyEx;
+  a1[107] = (bool (*)())vmSysGetCurrLcdLightInfo;
+  a1[108] = (bool (*)())vmSysStartVibration;
+  a1[109] = (bool (*)())vmSysStopVibration;
+  a1[110] = (bool (*)())vmSysOpenBrowser;
+  a1[111] = (bool (*)())vmSysSetSettingProfile;
+  a1[112] = (bool (*)())vmSysGetSettingProfile;
+  a1[113] = (bool (*)())vmSysGetSettingProfileName;
+  p_vmSysSaveContactPerson = vmSysSaveContactPerson;
+  a1[114] = (bool (*)())vmSysSaveContactPerson;
+  return p_vmSysSaveContactPerson;
+}
+void *(**__fastcall vMInitVmStdManager(void *(**result)(void *, const void *, size_t)))(void *, const void *, size_t)
+{
+  *result = memcpy;
+  result[1] = (void *(*)(void *, const void *, size_t))strlen;
+  result[2] = (void *(*)(void *, const void *, size_t))memset;
+  result[3] = (void *(*)(void *, const void *, size_t))sprintf;
+  result[4] = (void *(*)(void *, const void *, size_t))vm_log_trace;
+  result[5] = (void *(*)(void *, const void *, size_t))VmGetRand;
+  result[6] = (void *(*)(void *, const void *, size_t))vsprintf;
+  result[7] = (void *(*)(void *, const void *, size_t))strncpy;
+  result[8] = (void *(*)(void *, const void *, size_t))strcpy;
+  result[9] = (void *(*)(void *, const void *, size_t))strcat;
+  result[10] = (void *(*)(void *, const void *, size_t))atol;
+  result[11] = memmove;
+  result[12] = (void *(*)(void *, const void *, size_t))atoi;
+  result[13] = (void *(*)(void *, const void *, size_t))vMpow;
+  result[14] = (void *(*)(void *, const void *, size_t))strcmp;
+  result[15] = (void *(*)(void *, const void *, size_t))memcmp;
+  result[16] = (void *(*)(void *, const void *, size_t))strncmp;
+  result[17] = (void *(*)(void *, const void *, size_t))setjmp;
+  result[18] = (void *(*)(void *, const void *, size_t))longjmp;
+  result[19] = (void *(*)(void *, const void *, size_t))atof;
+  result[20] = (void *(*)(void *, const void *, size_t))vMstricmp;
+  result[21] = (void *(*)(void *, const void *, size_t))vMstrnicmp;
+  return result;
+}
+ int (__fastcall **__fastcall vMInitIoManager(int (__fastcall **result)(int n2, int, int)))(int n2, int, int)
+{
+  *result = cbfs_vm_file_open;
+  result[1] = (int (__fastcall *)(int, int, int))cbfs_vm_file_close;
+  result[2] = (int (__fastcall *)(int, int, int))vm_file_exist;
+  result[3] = (int (__fastcall *)(int, int, int))vm_file_direxist;
+  result[4] = cbfs_vm_file_read;
+  result[5] = cbfs_vm_file_write;
+  result[6] = cbfs_vm_file_seek;
+  result[7] = (int (__fastcall *)(int, int, int))cbfs_vm_file_tell;
+  result[8] = (int (__fastcall *)(int, int, int))cbfs_vm_file_getfilesize;
+  result[9] = (int (__fastcall *)(int, int, int))cbfs_vm_file_delete;
+  result[10] = (int (__fastcall *)(int, int, int))cbfs_vm_file_rename;
+  result[11] = (int (__fastcall *)(int, int, int))cbfs_vm_file_mkdir;
+  result[12] = (int (__fastcall *)(int, int, int))cbfs_vm_file_rmdir;
+  result[13] = (int (__fastcall *)(int, int, int))cbfs_vm_find_first;
+  result[14] = (int (__fastcall *)(int, int, int))cbfs_vm_find_next;
+  result[15] = (int (__fastcall *)(int, int, int))cbfs_vm_find_close;
+  result[16] = (int (__fastcall *)(int, int, int))vm_get_freespace;
+  result[17] = (int (__fastcall *)(int, int, int))vm_get_sdcardStatus;
+  result[18] = (int (__fastcall *)(int, int, int))vm_GetFilenameFromPath;
+  result[19] = (int (__fastcall *)(int, int, int))vm_file_getMp3Dir;
+  result[20] = (int (__fastcall *)(int, int, int))vm_file_getMp4Dir;
+  result[21] = (int (__fastcall *)(int, int, int))vm_file_getPicDir;
+  result[22] = (int (__fastcall *)(int, int, int))vm_file_getBookDir;
+  result[23] = (int (__fastcall *)(int, int, int))vm_file_truncate;
+  result[24] = (int (__fastcall *)(int, int, int))vm_file_RdWt;
+  result[25] = (int (__fastcall *)(int, int, int))vm_file_getSysDir;
+  result[26] = (int (__fastcall *)(int, int, int))vm_fmgr_select_entry;
+  result[27] = (int (__fastcall *)(int, int, int))vm_get_freespace_ex;
+  result[28] = (int (__fastcall *)(int, int, int))vm_get_sdcardStatusEx;
+  result[29] = (int (__fastcall *)(int, int, int))vm_get_fullname;
+  return result;
+}
+
+_DWORD *__fastcall vMInitTimeManager(_DWORD *result)
+{
+  *result = vMStartTimer;
+  result[1] = vMStopTimer;
+  result[2] = vMGetTickCount;
+  result[3] = vMGetTotalSeconds;
+  result[4] = vMGetCurrentTime;
+  result[5] = vMSysSleep;
+  result[6] = VmSetSysTime;
+  result[7] = VmSetSysDate;
+  result[8] = vMIncreaseTime;
+  result[9] = vMDecreaseTime;
+  return result;
+}
+
+_DWORD *__fastcall vMInitLcdManager(_DWORD *a1)
+{
+  _DWORD *result; // r0
+
+  *a1 = vMGetCurrMainScreenImage;
+  a1[1] = vMGetLCDBuffer;
+  a1[2] = vM_InvalidateLcd;
+  a1[3] = vMGetCurrFontType;
+  a1[4] = vMSetCurrFontType;
+  a1[5] = vMGetFontWidth;
+  a1[6] = vMGetFontHeight;
+  a1[7] = vMGetStringWidth;
+  a1[8] = vMGetStringHeight;
+  a1[9] = vMDrawString;
+  a1[10] = vMDrawStringEx;
+  a1[11] = vMDrawStringClipAlign;
+  a1[12] = vMDrawStringClip;
+  a1[13] = vMDrawStringRect;
+  a1[14] = vMDrawLineEx;
+  a1[15] = vMDrawLine;
+  a1[16] = vMDrawRect;
+  a1[17] = vMDrawRectEx;
+  a1[18] = vMFillRect;
+  a1[19] = vMFillRectEx;
+  a1[20] = vMFillRectWithImage;
+  a1[21] = vMFillRectWithImageEx;
+  a1[22] = vMCreateImage;
+  a1[23] = vMCreateImageFromInRes;
+  a1[24] = vMDrawImageWithClipEx;
+  a1[25] = vMDrawImageClipAndAlphaEx;
+  a1[26] = vMDrawImage;
+  a1[27] = vMDrawImageEx;
+  a1[28] = vMDrawImageWithAlpha;
+  a1[29] = vMDrawImageWithClip;
+  a1[30] = vMDrawImageWithClip2;
+  a1[31] = vMDrawImageClipAndAlpha;
+  a1[32] = vMDrawImageClipAndAlpha2;
+  a1[33] = vMGetImageWidth;
+  a1[34] = vMGetImageHeight;
+  a1[35] = vMDestoryImage;
+  a1[36] = vMIsBacklightOn;
+  a1[37] = vMCtrlBacklight;
+  a1[38] = vMGB2UCS2;
+  a1[39] = vMUCS2GB;
+  a1[40] = vMWinPointIsInRect;
+  a1[42] = vmResGetDefTxt;
+  a1[43] = vmResGetTxtForGame;
+  a1[41] = vmResGetTxtWithDataPackage;
+  a1[44] = IMG_InitDataPage;
+  a1[45] = IMG_InitInnerDataPageEx;
+  a1[46] = IMG_ReleaseDataPage;
+  a1[47] = IMG_InitDataPageEx;
+  a1[48] = IMG_CreateImageFormIdEx;
+  a1[49] = IMG_CreateImageFormStream;
+  a1[50] = vMDrawStandardImage;
+  a1[51] = vMGetStandardImageDimension;
+  a1[52] = vMGetStandardImageType;
+  a1[53] = vMDrawStandardImageEx;
+  a1[54] = vMDrawStringBorder;
+  a1[55] = vMDrawStringClipAlignBorder;
+  a1[56] = vMDrawStringClipBorder;
+  a1[57] = IMG_InitDataPageTxt;
+  a1[58] = gddiAllocMemory;
+  a1[59] = gddiFreeMemory;
+  a1[60] = gddiImageData;
+  a1[61] = gddiRegImageCodecHandler;
+  a1[62] = vMGetCharWidth;
+  a1[63] = vMDrawUcs2String;
+  a1[64] = vMDrawUcs2StringBorder;
+  a1[65] = vMDrawUcs2StringEx;
+  a1[66] = vMDrawUcs2StringClipAlignBorder;
+  a1[67] = vMDrawUcs2StringClipAlign;
+  a1[68] = vMDrawUcs2StringClipBorder;
+  a1[69] = vMDrawUcs2StringClip;
+  a1[70] = vMDrawUcs2StringRect;
+  a1[71] = vMGetUcs2StringWidth;
+  a1[72] = vMGetUcs2StringHeight;
+  a1[73] = vMAllowBackLight;
+  a1[74] = vM_CB_GetIsNeedRefreshLcd;
+  a1[75] = vM_CB_SetIsNeedRefreshLcd;
+  a1[76] = vM_CB_LCD_InvalidateRect_Enable;
+  a1[77] = vM_CB_SetVideoIsNeedClosed;
+  a1[78] = vM_CB_GetVideoIsNeedClosed;
+  a1[79] = vMDrawUcs2StringRectEx;
+  result = a1 + 80;
+  *result = vMSetCbeFontDataPtr;
+  result[1] = vMGetFontHeightEx;
+  result[2] = vMGetFontWidthEx;
+  result[3] = vMGetStringHeightEx;
+  result[4] = vMGetStringWidthEx;
+  result[5] = vMShowStringEx;
+  result[6] = vMShowString;
+  result[7] = vMShowStringClipAlign;
+  result[8] = vMShowStringClip;
+  result[9] = vMShowStringRect;
+  result[10] = vM_InvalidateLcdEx;
+  result[11] = vMSetFontSize;
+  result[12] = vMResetFontSize;
+  result[13] = vMUTF82UCS2;
+  result[14] = vMUCS2UTF8;
+  return result;
+}
+_DWORD *__fastcall initMemoryBlock(_DWORD *p_g_memoryBlock, int size)
+{
+  _DWORD *p_g_memoryBlock_1; // r4
+
+  p_g_memoryBlock_1 = p_g_memoryBlock;
+  if ( size > 0 )
+  {
+    p_g_memoryBlock[3] = MF_MemoryBlock_Malloc;
+    p_g_memoryBlock[4] = MF_MemoryBlock_Reset;
+    p_g_memoryBlock[5] = MF_MemoryBlock_Release;
+    *p_g_memoryBlock = (*(int (__fastcall **)(int))((char *)off_34 + (_DWORD)extVmMemoryManager))(size);
+    (*(void (**)(void))((char *)extVmStdManager[0] + (unsigned int)sub_8))();
+    p_g_memoryBlock = 0;
+    p_g_memoryBlock_1[1] = 0;
+    p_g_memoryBlock_1[2] = size;
+  }
+  return p_g_memoryBlock;
+}
+  int (*__fastcall vMInitMemoryManager(_DWORD *a1))()
+{
+  int (*p_mpcmdFreeShareMem2)(); // r0
+  int (*p_vmSysMemFreeIn)(); // r0
+
+  *a1 = DF_InitMemory;
+  a1[1] = DF_ReleaseMemory;
+  a1[2] = DF_Malloc_IN;
+  a1[3] = DF_Free;
+  a1[4] = DF_Memory_gc;
+  a1[5] = initMemoryBlock;
+  a1[6] = MF_MemoryBlock_Malloc;
+  a1[7] = MF_MemoryBlock_Reset;
+  a1[8] = getMemoryBlockPtr;
+  a1[9] = MF_InitGmemoryBlock;
+  a1[10] = MF_ReleaseGmemoryBlock;
+  a1[11] = MF_resetGmemoryBlock;
+  a1[12] = MF_MallocGmemoryBlock;
+  a1[13] = GAME_Image_malloc;
+  a1[14] = GAME_Image_free;
+  a1[15] = DF_Memory_AttachPointer;
+  a1[16] = MF_MemoryBlock_Release;
+  a1[17] = DF_InitMemoryEx;
+  a1[18] = GAME_Image_realloc;
+  a1[19] = DF_Malloc_debug;
+  a1[20] = mallocBigMen_debug;
+  a1[21] = CoolbarGetshareMemAlloced;
+  if ( vmSupportQQIdle() == 1 )
+  {
+    a1[22] = mpcmdAllocShareMem2;
+    p_mpcmdFreeShareMem2 = mpcmdFreeShareMem2;
+  }
+  else
+  {
+    p_mpcmdFreeShareMem2 = 0;
+    a1[22] = 0;
+  }
+  a1[23] = p_mpcmdFreeShareMem2;
+  a1[24] = vmSysGetShareMemInfo;
+  a1[25] = vmSysMemAllocIn;
+  p_vmSysMemFreeIn = vmSysMemFreeIn;
+  a1[26] = vmSysMemFreeIn;
+  return p_vmSysMemFreeIn;
+}
+
+_DWORD *__fastcall vMInitBillingManager(_DWORD *a1)
+{
+  _DWORD *result; // r0
+
+  *a1 = BILLING_GetPayNumByAppId;
+  a1[1] = BILLING_GetRemainDay;
+  a1[2] = BILLING_Pay;
+  a1[3] = BILLING_PayMoreTimes;
+  a1[4] = BILLING_IsRegisterBillingInfo;
+  a1[5] = BILLING_RegisterBillingInfo;
+  a1[6] = BILLING_SetBillingStatus;
+  a1[7] = BILLING_GetBillingStatus;
+  a1[8] = BILLING_IsNeedPay;
+  a1[9] = BILLING_IsInTryStatus;
+  a1[10] = BIllING_OpenBillingPromptWin;
+  a1[11] = CDownGetTryDay;
+  a1[12] = BILLING_PayForCBB;
+  a1[13] = BILLING_PayForPwd;
+  a1[14] = CDownGetOption5;
+  a1[17] = CDownIsMonthApp;
+  a1[18] = CDownGetFileNameByAppID;
+  a1[15] = Billing_SendSpecSms;
+  a1[16] = Billing_CancelSms;
+  a1[19] = CDownGetPayTimes;
+  a1[20] = BILLING_NewMonthPay;
+  a1[21] = BILLING_NewMonthCancel;
+  a1[22] = BILLING_CleanAppMonthBillInfo;
+  a1[23] = BILLING_GetValidDayByAppId;
+  a1[24] = CDownGetBillSmsAddr;
+  a1[25] = CDownGetBillSmsSuf;
+  a1[26] = BILLING_Pay2;
+  a1[27] = Billing_GetAppUsedStatus;
+  a1[28] = Billing_SetAppUsedStatus;
+  a1[29] = CDownGetPayTipContent;
+  a1[30] = BILLING_Pay3;
+  a1[31] = BILLING_SendRegisterSms;
+  result = a1 + 32;
+  *result = CDownGetOption8;
+  result[1] = CDownGetOption9;
+  result[2] = CDownGetOption10;
+  result[3] = BILLING_Register;
+  result[4] = BILLING_PayForCBB3;
+  result[5] = CDownIsWPay;
+  return result;
+}
+_DWORD *__fastcall vMInitScreenManager(_DWORD *result)
+{
+  *result = vmSCREEN_ChangeScreen;
+  result[1] = vmSCREEN_NotifyLoadResource;
+  result[2] = vmChangeScreen;
+  result[3] = vmChangeScreenEx;
+  result[4] = vmAddScreen;
+  result[5] = vmAddScreenEx;
+  result[6] = vmDeleteScreen;
+  result[7] = vmScreenLoadResource;
+  result[8] = vmScreenLoadResourceEx;
+  result[9] = vmIsScreenFocus;
+  result[10] = vmIsBottomScreen;
+  result[11] = vmScreenLogic;
+  return result;
+}
+_DWORD *__fastcall vMInitNetManager(_DWORD *a1)
+{
+  _DWORD *result; // r0
+
+  *a1 = vMNetOpenChannel;
+  a1[1] = vMNetSendData;
+  a1[2] = vMNetCloseChannel;
+  a1[3] = vMNetGetHttpData;
+  a1[4] = vMNetPostHttpData;
+  a1[5] = vMNetCancelHttpConnect;
+  a1[6] = vMNetOpenChannel2;
+  a1[7] = vMNetOpenQQChannel;
+  a1[8] = VMGetLinkSetNum;
+  a1[9] = VMGetLinkSetNameByIndex;
+  a1[10] = VMGetWapIndex;
+  a1[11] = VMGetNetIndex;
+  a1[12] = SetWapIndex;
+  a1[13] = SetNetIndex;
+  a1[14] = GetGateWayByIndex;
+  a1[15] = GetPortByIndex;
+  a1[16] = GetApnByIndex;
+  a1[17] = vMNetGetHttpDataEx;
+  a1[18] = vMNetOpenChannelEx;
+  a1[19] = vMNetPostHttpDataEx;
+  a1[20] = vMNetGetGprsStatus;
+  a1[21] = vMNetSetGprsStatus;
+  a1[22] = vMNetGetCurApn;
+  a1[23] = vMNetGetDeactiveFlag;
+  a1[24] = vMNetSetDeactiveFlag;
+  a1[25] = CoolBarHttpSetCurrentDownloadStartPos;
+  a1[26] = vMNetGetUAAgent;
+  a1[27] = vMNetGetWapProfile;
+  a1[28] = GetLastNetError;
+  a1[29] = vMNetGetHttpMassData;
+  a1[30] = vMNetPostHttpMassData;
+  a1[31] = vMIsWifiReady;
+  result = a1 + 32;
+  *result = vMGetGPRSCounter;
+  result[1] = vmSetSockQueryTime;
+  result[2] = vmResetSockQueryTime;
+  result[3] = vMNetDataReset;
+  result[4] = vMGetNetData;
+  result[5] = VmGetFlowMassage;
+  result[6] = VmClearFlowMassage;
+  result[7] = VmDeleteFlowMassage;
+  result[8] = VmGetSingleFlowmsg;
+  result[9] = VmClearAllFlowMassage;
+  result[10] = VmDeleteAllFlowMassage;
+  return result;
+}
+_DWORD *__fastcall vMInitUcs2StrManager(_DWORD *result)
+{
+  result[2] = vmutStrcatUcs2;
+  result[1] = vmutStrcpyUcs2;
+  *result = vmutStrlenUcs2;
+  result[3] = vmutExpandStrcpy;
+  result[4] = vmutStrncpyUcs2;
+  result[5] = vmutExpandStrncpy;
+  result[6] = vmutExpandMemcpy;
+  result[7] = vmutStrchrUcs2;
+  result[8] = vmutStrcmpUcs2;
+  result[9] = vmutStricmpUcs2;
+  result[10] = vmutStrncmpUcs2;
+  return result;
+}
+_DWORD *__fastcall vMInitAudioManager(_DWORD *result)
+{
+  *result = vMAudioSetVolume;
+  result[1] = vMAudioPlayByData;
+  result[2] = vMAudioPlayWithDataPackage;
+  result[3] = vMAudioPlayForGame;
+  result[4] = vMAudioPlayForApp;
+  result[5] = vMAudioPause;
+  result[6] = vMAudioResume;
+  result[7] = vMAudioStop;
+  result[8] = vMAduioGetState;
+  result[9] = vm_mp3PlayBystream;
+  result[10] = vm_mp3PauseByStream;
+  result[11] = vm_mp3ResumeByStream;
+  result[12] = vm_mp3StopBystream;
+  result[13] = vm_mp3PlayByFile;
+  result[14] = vm_mp3PauseByFile;
+  result[15] = vm_mp3ResumeByFile;
+  result[16] = vm_mp3StopByFile;
+  result[17] = vMAudioget_progress_time;
+  result[18] = vmMp3StreamInit;
+  result[19] = CB_AUD_StartPlay_Init;
+  result[20] = CB_AUD_StopPlay;
+  result[21] = CB_AUD_WriteVoiceData;
+  result[22] = vMStartAudioRecord_async;
+  result[23] = vMStopAudioRecord_async;
+  result[24] = vMSetAmrRecBS;
+  result[25] = vm_mp3PlayByFileEx;
+  result[26] = vMStartAudioRecordEx;
+  result[27] = vMStopAudioRecordEx;
+  result[28] = CB_AUD_StartPlay_InitEx;
+  result[29] = CB_AUD_StartPlayEx;
+  result[30] = CB_AUD_StopPlayEx;
+  return result;
+}
+
+_DWORD *__fastcall vMInitGSensorManager(_DWORD *result)
+{
+  *result = vmGsensorInit;
+  result[1] = vmGsensorStop;
+  result[2] = vmGsensorStartTile;
+  result[3] = vmGsensorStartShake;
+  result[4] = vmGsensorStartTurn;
+  result[6] = vmGsensorPowerOff;
+  result[5] = vmGsensorStartSwing;
+  result[7] = vMGSenserIsSupportInCb;
+  result[8] = vmGsensorGetDevInfo;
+  result[9] = vmGsensorRegistMotionChange;
+  result[10] = vmGsensorRegistNotifyChange;
+  result[11] = vmGsensorGetLastMotionInfo;
+  return result;
+}
+_DWORD *__fastcall vMInitDlLoadManager(_DWORD *result)
+{
+  *result = vlDlSetCurrContextAddress;
+  result[1] = vlDlSetContextAddress;
+  result[2] = vlDlUnLoadCurrApp;
+  result[3] = vlDlUnLoadApp;
+  result[4] = vmDlParseAndCopy;
+  result[5] = vlDlLoadApp;
+  result[6] = vlDlLoadAppEx;
+  result[7] = vlDlAppIsInDl;
+  result[8] = vmGetcurrInnerAppId;
+  result[9] = CBInnerInit_qqIn;
+  result[10] = VmGetCBEInfoByFileName;
+  return result;
+}
+_DWORD *__fastcall vMInitDlRsManager(_DWORD *result)
+{
+  *result = vmGetDataPackage;
+  result[1] = vmResGetTxtWithDataPackage;
+  result[2] = vmResGetDefTxt;
+  result[3] = vmResGetTxtForGame;
+  result[4] = IMG_InitDataPage;
+  result[5] = IMG_InitInnerDataPageEx;
+  result[6] = IMG_InitDataPageEx;
+  result[7] = IMG_InitDataPageTxt;
+  result[8] = IMG_ReleaseDataPage;
+  result[9] = IMG_CreateImageFormIdEx;
+  result[10] = IMG_CreateImageFormStream;
+  result[11] = IMG_CreateImageFormName;
+  result[12] = vMDestoryImage;
+  result[13] = vMCreateImage;
+  result[14] = IMG_SetCurrDataPackage;
+  result[15] = IMG_GetCurrDataPackage;
+  result[16] = vmFreeDataBuffer;
+  result[17] = DF_DataPackage_GetFileOffset;
+  result[18] = DF_DataPackage_GetFullPaths;
+  result[19] = DF_DataPackage_GetFileLens;
+  return result;
+}
+_DWORD *__fastcall vMInitDlImageManager(_DWORD *result)
+{
+  *result = vMDrawStandardImage;
+  result[1] = vMGetStandardImageDimension;
+  result[2] = vMGetStandardImageType;
+  result[3] = vMDrawStandardImageEx;
+  result[4] = gddiAllocMemory;
+  result[5] = gddiFreeMemory;
+  result[6] = gddiImageData;
+  result[7] = gddiRegImageCodecHandler;
+  result[8] = GameDecodePngStartExt;
+  result[10] = pnginflate;
+  result[11] = pnginflateInit;
+  result[12] = pnginflateEnd;
+  result[13] = pnginflateReset;
+  return result;
+}
+_DWORD *__fastcall VmInitVideoManager(_DWORD *a1)
+{
+  _DWORD *result; // r0
+
+  *a1 = vM_CB_ISP_ServiceOpen;
+  a1[1] = vM_CB_ISP_ServiceClose;
+  a1[2] = vM_CB_VideoParamSet;
+  a1[3] = vM_CB_VideoAFrameDisp;
+  a1[4] = vM_CB_Video_IRAM_mem_Init;
+  a1[5] = vM_CB_Video_IRAM_mem_malloc;
+  a1[6] = vM_CB_Video_IRAM_mem_Free;
+  a1[7] = vM_CB_Video_Iram_mem_Close;
+  a1[8] = vMOpenVideoMedia;
+  a1[9] = vMCloseVideoMedia;
+  a1[10] = vMStartCameraCaptureImage;
+  a1[11] = vMStopCameraCaptureImage;
+  a1[12] = vMIsDoubleCamera;
+  a1[13] = vMSetCamearaLocation;
+  a1[14] = CoolbarVideoDec_Init;
+  a1[15] = CoolbarVideoDecoding_Frame;
+  a1[16] = CoolbarVideoDec_Output;
+  a1[17] = CoolbarVideoDec_OutputEx;
+  a1[18] = CoolbarVideoDec_Parm;
+  a1[19] = CoolbarVideoDec_ParmEx;
+  a1[20] = CoolbarVideoDec_Close;
+  a1[21] = CoolbarVideoEnc_Init;
+  a1[22] = CoolbarVideoEnc_frame;
+  a1[23] = CoolbarVideoEnc_Close;
+  a1[24] = CoolbarVideoEnc_ExWH;
+  a1[25] = CoolBar_VPP_PicScaling;
+  a1[26] = CoolBar_VPP_PicUpturn;
+  a1[27] = vMSetCamSampTime;
+  a1[28] = vMIsVideoPlayerRun;
+  a1[29] = vMPlayVideo;
+  a1[30] = vMRegPlayVideoCb;
+  a1[31] = vMGetMediaFileInfo;
+  result = a1 + 32;
+  *result = vMPlayStreamingVideo;
+  result[1] = vMStopStreamingVideo;
+  result[2] = vMSetDownloadInterface;
+  result[3] = vMGetStreamingVideoHandle;
+  result[4] = vMGetStreamingInfo;
+  result[5] = vMStreamingFileChange;
+  return result;
+}
+_DWORD *__fastcall VmInitAppStoreManager(bool (__fastcall **a1)(int a1))
+{
+  _DWORD *result; // r0
+
+  *a1 = VmAppStoreInstall;
+  a1[2] = (bool (__fastcall *)(int))VmAppStoreUninstall;
+  a1[1] = (bool (__fastcall *)(int))VmAppStoreUninstallEx;
+  a1[4] = (bool (__fastcall *)(int))VmAppStoreGetAppInfo;
+  a1[5] = (bool (__fastcall *)(int))VmAppStoreGetInstalledAppInfos;
+  a1[6] = (bool (__fastcall *)(int))VmAppStoreReleaseAppInfos;
+  a1[7] = (bool (__fastcall *)(int))VmAppStorePushMsg;
+  a1[8] = (bool (__fastcall *)(int))VmAppStoreRunJavaAp;
+  a1[9] = (bool (__fastcall *)(int))VmAppStoreRunJavaApEx;
+  a1[10] = (bool (__fastcall *)(int))VmAppStoreRunCbeAp;
+  a1[11] = (bool (__fastcall *)(int))VmAppStoreSupportJava;
+  a1[12] = (bool (__fastcall *)(int))VmAppStoreGetPath;
+  a1[13] = (bool (__fastcall *)(int))VmGetPhoneType;
+  a1[14] = (bool (__fastcall *)(int))VmGetAppNumByType;
+  a1[15] = (bool (__fastcall *)(int))VmGetPhoneSupportApType;
+  a1[16] = (bool (__fastcall *)(int))VmAppGetHasLocalIcon;
+  a1[17] = (bool (__fastcall *)(int))VmAppRunApByIdAndName;
+  a1[18] = (bool (__fastcall *)(int))VmAppAddShortCutMenu;
+  a1[19] = (bool (__fastcall *)(int))VmAppDelShortCutMenu;
+  a1[20] = (bool (__fastcall *)(int))CoolBar_DownLoad_AppFile;
+  a1[21] = (bool (__fastcall *)(int))GetApsDownAppUrl;
+  a1[22] = (bool (__fastcall *)(int))Coolbar_PreLoadAppByName;
+  a1[23] = (bool (__fastcall *)(int))Coolbar_ParseApsDownDataFile;
+  a1[24] = (bool (__fastcall *)(int))CoolBar_DownLoad_Stop;
+  a1[25] = (bool (__fastcall *)(int))VmAppQueryStcExist;
+  a1[26] = (bool (__fastcall *)(int))VmPreCheckInstallAppPlace;
+  a1[27] = (bool (__fastcall *)(int))VmGetInstallFileSystem;
+  a1[28] = (bool (__fastcall *)(int))VmSetInstallFileSystem;
+  a1[29] = (bool (__fastcall *)(int))VmSetRunAppFileSystem;
+  a1[30] = (bool (__fastcall *)(int))VmGetRunAppFileSystem;
+  a1[31] = (bool (__fastcall *)(int))VmAutoSelectAppDownPlace;
+  result = a1 + 32;
+  *result = VmGetApsVerNum;
+  result[1] = VmReadAppStoreCbeVersion;
+  result[2] = VmWriteAppStoreCbeVersion;
+  result[3] = VmGetSecurityCode;
+  result[4] = VmGetSecurityCodeEx;
+  result[5] = VmSetAppStoreName;
+  result[6] = VmGetAppStoreName;
+  return result;
+}
+_DWORD *__fastcall vMInitVmImManager(_DWORD *result)
+{
+  *result = vmDlFuncSms;
+  result[1] = vmDlFuncMakeCall;
+  result[2] = vmDlFuncNvRead;
+  result[3] = vmDlFuncNvWrite;
+  result[4] = vmDlFuncReleaseCall;
+  result[5] = vmDlFuncMakeCallEx;
+  result[6] = vmDlFuncGetApsManager;
+  return result;
+}
+_DWORD *__fastcall vMInitCtrlManager(_DWORD *result)
+{
+  result[9] = vmPubDrawWinTitleWithColor;
+  *result = vmPubDrawSoftkeyBar;
+  result[1] = vmPubDrawSoftkeyBarEx;
+  result[2] = vmPubDrawWinTitle;
+  result[3] = vmPubDrawWinTitleEx;
+  result[4] = vmPubTpPressSoftkeyBar;
+  result[15] = vmPubDrawUcs2SoftkeyBar;
+  result[16] = vmPubDrawUcs2SoftkeyBarEx;
+  result[17] = vmPubTpPressUcs2SoftkeyBar;
+  result[18] = vmPubDrawUcs2WinTitle;
+  result[19] = vmPubDrawUcs2WinTitleWithColor;
+  result[20] = vmPubDrawUcs2WinTitleEx;
+  return result;
+}
+_DWORD *__fastcall vMInitGameLcdManager(_DWORD *result)
+{
+  result[20] = GetStreamDataFormRes;
+  *result = IMG_CreateImageFormRes;
+  result[11] = IMG_Destory;
+  return result;
+}
+_DWORD *__fastcall vMInitGameUtilManager(_DWORD *a1)
+{
+  _DWORD *result; // r0
+
+  a1[8] = Sqrt;
+  a1[1] = CdRectPoint;
+  a1[9] = DF_SetDataPackage;
+  a1[10] = DF_GetDataPackage;
+  a1[11] = DF_GetResourceByResourceID;
+  a1[12] = DF_GetResourceByFileName;
+  a1[13] = DF_GetResourceNameByID;
+  a1[14] = DF_GetResourceIDByFileName;
+  a1[15] = DF_GetTResource;
+  a1[16] = DF_GetStreamTResource;
+  a1[17] = DF_DataPackage_ShowFileList;
+  a1[18] = DF_String_Equal;
+  a1[19] = DF_ReadShort;
+  a1[20] = DF_ReadInt;
+  a1[21] = DF_File_ReadShort;
+  a1[22] = DF_File_ReadInt;
+  a1[23] = DF_WriteShort;
+  a1[24] = DF_WriteInt;
+  a1[25] = DF_ReadString;
+  a1[26] = DF_ReadStringEx;
+  a1[27] = DF_File_ReadString;
+  a1[28] = DF_File_ReadToBuffer;
+  a1[29] = DF_ReadString2;
+  a1[30] = DF_GetMemoryBlock;
+  a1[31] = DF_Sin;
+  result = a1 + 32;
+  *result = DF_Cos;
+  result[1] = DF_Degree;
+  result[2] = DF_CollectionTest;
+  result[3] = DF_SwapVal;
+  result[4] = DF_GetFormatString;
+  result[5] = Storage_Date;
+  result[6] = vMstricmp;
+  result[7] = vMstrnicmp;
+  return result;
+}
+int __fastcall vMInitDFEnginelManager(int result)
+{
+  *(_DWORD *)(result + 32) = initDreamFactoryEngine;
+  *(_DWORD *)(result + 40) = initDFDataPackage;
+  return result;
+}
+void *(**__fastcall vMInitGameManagerOldIn(_DWORD *a1))(void *, const void *, size_t)
+{
+  void *(**result)(void *, const void *, size_t); // r0
+
+  *a1 = IMG_CreateImageFormRes;
+  a1[10] = IMG_Destory;
+  a1[11] = GAME_isKeyDown;
+  a1[12] = GAME_isKeyHold;
+  a1[23] = GetStreamDataFormRes;
+  a1[50] = CdRectPoint;
+  a1[57] = Sqrt;
+  a1[58] = initMemoryBlock;
+  a1[60] = SCREEN_ChangeScreen;
+  a1[61] = SCREEN_NotifyLoadResource;
+  a1[62] = SCREEN_IsPointerHold;
+  a1[63] = SCREEN_IsPointerDown;
+  a1[64] = SCREEN_IsPointerUp;
+  a1[65] = SCREEN_IsPointerDrag;
+  a1[66] = SCREEN_GetPointerX;
+  a1[67] = SCREEN_GetPointerY;
+  a1[68] = Get_CurKeyDownState;
+  a1[80] = initDreamFactoryEngine;
+  a1[81] = DF_SetDataPackage;
+  a1[82] = DF_GetDataPackage;
+  a1[83] = DF_GetResourceByResourceID;
+  a1[84] = DF_GetResourceByFileName;
+  a1[85] = DF_GetResourceNameByID;
+  a1[86] = DF_GetResourceIDByFileName;
+  a1[87] = DF_GetTResource;
+  a1[88] = DF_GetStreamTResource;
+  a1[89] = DF_DataPackage_ShowFileList;
+  a1[90] = DF_String_Equal;
+  a1[91] = DF_ReadShort;
+  a1[92] = DF_ReadInt;
+  a1[93] = DF_File_ReadShort;
+  a1[94] = DF_File_ReadInt;
+  a1[95] = DF_WriteShort;
+  a1[96] = DF_WriteInt;
+  a1[97] = DF_ReadString;
+  a1[98] = DF_ReadStringEx;
+  a1[99] = DF_File_ReadString;
+  a1[100] = DF_File_ReadToBuffer;
+  a1[101] = DF_ReadString2;
+  a1[102] = DF_GetMemoryBlock;
+  a1[103] = DF_Sin;
+  a1[104] = DF_Cos;
+  a1[105] = DF_Degree;
+  a1[106] = DF_CollectionTest;
+  a1[107] = DF_SwapVal;
+  a1[108] = DF_GetFormatString;
+  a1[110] = initDFDataPackage;
+  a1[133] = memcpy;
+  a1[134] = strlen;
+  a1[135] = memset;
+  a1[136] = sprintf;
+  a1[137] = vm_log_trace;
+  a1[138] = VmGetRand;
+  a1[139] = vsprintf;
+  a1[140] = strncpy;
+  a1[141] = strcpy;
+  a1[142] = strcat;
+  a1[143] = atol;
+  result = (void *(**)(void *, const void *, size_t))(a1 + 144);
+  *result = memmove;
+  result[1] = (void *(*)(void *, const void *, size_t))atoi;
+  result[2] = (void *(*)(void *, const void *, size_t))BILLING_GetPayNumByAppId;
+  result[3] = (void *(*)(void *, const void *, size_t))BILLING_GetRemainDay;
+  result[4] = (void *(*)(void *, const void *, size_t))BILLING_Pay;
+  result[5] = (void *(*)(void *, const void *, size_t))BILLING_PayMoreTimes;
+  result[6] = (void *(*)(void *, const void *, size_t))BILLING_IsRegisterBillingInfo;
+  result[7] = (void *(*)(void *, const void *, size_t))BILLING_RegisterBillingInfo;
+  result[8] = (void *(*)(void *, const void *, size_t))BILLING_SetBillingStatus;
+  result[9] = (void *(*)(void *, const void *, size_t))BILLING_GetBillingStatus;
+  result[10] = (void *(*)(void *, const void *, size_t))BILLING_IsNeedPay;
+  result[11] = (void *(*)(void *, const void *, size_t))BILLING_IsInTryStatus;
+  result[12] = (void *(*)(void *, const void *, size_t))Game_OpenBillingPromptWin;
+  result[13] = (void *(*)(void *, const void *, size_t))vMstricmp;
+  return result;
+}
+void vMInitDFScriptManager()
+{
+  ;
+}
+int __fastcall vMInitNetAppManager(int a1)
+{
+  int result; // r0
+
+  result = a1 + 192;
+  *(_DWORD *)(result + 48) = NET_GetAppInfo;
+  return result;
+}
+
+
+0x98 + 0x1ea40 = 0x1EAD8 代码段结束位置
+0x1EAD8 + 8 + 0x2050 = 0x20B30 //数据段1结束地址
+0x20B30 + 8 + 0x356  = 0x20E8E //数据段2结束地址
+!4字节cbeFileLen
+>>>DF_PACKAGE数据区域开始
+!信息1的长度//4字节
+!信息1内容
+!信息2的长度//4字节
+!信息2的内容
+>>>信息2的结构
+!读取4字节
+!列表项的数量
+!读取[列表项的数量]个4字节
+!读取[列表项的数量]个string
+
+
+固件中CBE的开始地址：
+
+0x16C2620 - 0x98 =  0x16C2588
+
+0x16C4D60 - 0x16C2588 = 0x27D8
+0x16C65FD - 0x16C2588 = 0x4065
+0x16C6356 - 0x16C2588 = 0x3DCE
+0x16C61D0 - 0x16C2588 = 0x3C48 这个对上，是cbe里面的函数
+
+0x6ed + 0x16C2588 = 0x16C2C75
+0x153F8 + 0x16C2588 = 0x16D7970
+0x154CC + 0x16C2588 =
+0x176C8 + 0x16C2588 = 0x16DC250
+
+0x122B2 + 0x16C2588 = 0x16D483A
+
