@@ -57,15 +57,52 @@ void hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_
 }
 void hookCpuIntr(uc_engine *uc, uint32_t intno, void *user_data)
 {
+    if (intno == 2)
+    {
+        u32 reason = 0;
+        u32 arg = 0;
+        uc_reg_read(uc, UC_ARM_REG_R0, &reason);
+        uc_reg_read(uc, UC_ARM_REG_R1, &arg);
+        if (reason == 3)
+        {
+            u8 ch = 0;
+            uc_mem_read(uc, arg, &ch, 1);
+            putchar(ch);
+            return;
+        }
+        if (reason == 4)
+        {
+            vm_readStringByPtr(arg, cbeTextString);
+            printf("%s", cbeTextString);
+            return;
+        }
+    }
     printf("未处理的CPU中断:%x\n", intno);
+    if (intno == 2)
+    {
+        u32 reason = 0;
+        u32 arg = 0;
+        uc_reg_read(uc, UC_ARM_REG_R0, &reason);
+        uc_reg_read(uc, UC_ARM_REG_R1, &arg);
+        printf("semihosting reason:%x arg:%x\n", reason, arg);
+    }
     // u32 pc;
     // uc_reg_read(uc, UC_ARM_REG_PC, &pc);
     // pc += 4;
     // uc_reg_write(uc, UC_ARM_REG_PC, &pc);
 
-    vm_readStringByReg(UC_ARM_REG_R5, cbeTextString);
-    printf("%s", cbeTextString);
     dumpCpuInfo();
+    u32 sp;
+    uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+    if (sp >= STACK_ADDRESS && sp <= STACK_ADDRESS + 0x100000)
+        dumpVirtMemory(sp, 128);
+    u32 r5;
+    uc_reg_read(MTK, UC_ARM_REG_R5, &r5);
+    if (r5 >= ROM_ADDRESS && r5 < ROM_ADDRESS + 0x1000000)
+    {
+        vm_readStringByReg(UC_ARM_REG_R5, cbeTextString);
+        printf("%s", cbeTextString);
+    }
     assert(0);
 }
 

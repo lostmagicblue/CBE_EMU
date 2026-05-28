@@ -13,6 +13,7 @@ u8 *Lcd_Cache_Buffer;
 void InitLcd()
 {
     Lcd_Cache_Buffer = SDL_malloc(LCD_WIDTH * LCD_HEIGHT * PIXEL_PER_BYTE);
+    memset(Lcd_Cache_Buffer, 0, LCD_WIDTH * LCD_HEIGHT * PIXEL_PER_BYTE);
 }
 
 void UpdateLcd()

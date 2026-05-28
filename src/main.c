@@ -1,7 +1,7 @@
 #define GDB_SERVER_SUPPORT_
 #define GDI_LAYER_DEBUG_
 
-#define DEBUG_PRINT(...) printf(__VA_ARGS__)
+#define DEBUG_PRINT(...) ((void)0)
 
 #include "main.h"
 #include "lcd.h"
@@ -106,8 +106,330 @@ int simulateTouchX = 0;
 int simulateTouchY = 0;
 u32 screenStructChange = 0;
 u32 screenStructNotifyLoadRes = 0;
+u32 vmAddedScreen = 0;
 
 u32 lastSprintfPtr = 0;
+static u8 *g_cbeFileBuffer = NULL;
+static u32 g_cbeFileSize = 0;
+
+#define VM_SCHED_MAX_NET_TASKS 8
+#define VM_SCHED_MAX_TIMERS 20
+#define VM_SCHED_TIMER_BASE_ID 100
+#define VM_SCHED_FRAME_MS 100
+
+typedef struct
+{
+    u8 active;
+    u8 fired;
+    u16 delayTicks;
+    u32 r0;
+    u32 r1;
+    u32 callback;
+    u32 context;
+} vm_net_task;
+
+typedef struct
+{
+    u8 active;
+    u16 handle;
+    u32 remainingTicks;
+    u32 callback;
+    u32 context;
+} vm_timer_task;
+
+static u32 g_schedulerTick = 0;
+static vm_net_task g_netTasks[VM_SCHED_MAX_NET_TASKS];
+static vm_timer_task g_timerTasks[VM_SCHED_MAX_TIMERS];
+static u32 g_schedulerStartTicks = 0;
+
+static u32 vm_read_host_le32(const u8 *p)
+{
+    return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
+}
+
+static u32 vm_load_resource_blob_from_cbe(const char *name)
+{
+    if (g_cbeFileBuffer == NULL || g_cbeInfo.DF_Data_Pacakage_Offset + 4 >= g_cbeFileSize)
+        return 0;
+
+    u32 dfBase = g_cbeInfo.DF_Data_Pacakage_Offset;
+    u8 *rootBlock = g_cbeFileBuffer + dfBase;
+    u32 rootSize = vm_read_host_le32(rootBlock);
+    if (rootSize < 8 || dfBase + 4 + rootSize > g_cbeFileSize)
+        return 0;
+
+    u8 *root = rootBlock + 4;
+    u32 childCount = vm_read_host_le32(root + 4);
+    u32 pos = 8;
+    for (u32 i = 1; i < childCount && pos + 5 <= rootSize; ++i)
+    {
+        u8 childNameLen = root[pos++];
+        if (pos + childNameLen + 4 > rootSize)
+            return 0;
+        pos += childNameLen;
+        u32 childOffset = vm_read_host_le32(root + pos);
+        pos += 4;
+
+        u32 childAbs = dfBase + childOffset;
+        if (childAbs + 4 >= g_cbeFileSize)
+            continue;
+        u8 *childBlock = g_cbeFileBuffer + childAbs;
+        u32 childSize = vm_read_host_le32(childBlock);
+        if (childSize < 8 || childAbs + 4 + childSize > g_cbeFileSize)
+            continue;
+
+        u8 *child = childBlock + 4;
+        u32 dataSize = vm_read_host_le32(child);
+        u32 itemCount = vm_read_host_le32(child + 4);
+        if (8 + itemCount * 4 > childSize)
+            continue;
+        u32 namesPos = 8 + itemCount * 4;
+        u32 dataBase = childAbs + 4 + childSize;
+
+        for (u32 n = 0; n < itemCount && namesPos < childSize; ++n)
+        {
+            u8 len = child[namesPos++];
+            if (namesPos + len > childSize)
+                break;
+            const char *resName = (const char *)(child + namesPos);
+            namesPos += len;
+            if (strlen(name) == len && memcmp(resName, name, len) == 0)
+            {
+                u32 dataOffset = vm_read_host_le32(child + 8 + n * 4);
+                u32 nextOffset = (n + 1 < itemCount) ? vm_read_host_le32(child + 8 + (n + 1) * 4) : dataSize;
+                if (nextOffset <= dataOffset || dataBase + nextOffset > g_cbeFileSize)
+                    return 0;
+                u32 blobSize = nextOffset - dataOffset;
+                u32 vmPtr = vm_malloc(blobSize);
+                uc_mem_write(MTK, vmPtr, g_cbeFileBuffer + dataBase + dataOffset, blobSize);
+                return vmPtr;
+            }
+        }
+    }
+    return 0;
+}
+
+static const char *vm_fake_resource_name_from_id(u32 id)
+{
+    switch (id)
+    {
+    case 0x70000000:
+        return "flowerStyle.gif";
+    case 0x70000001:
+        return "loading.gif";
+    case 0x70000002:
+        return "UI2.gif";
+    case 0x70000003:
+        return "UI7.gif";
+    case 0x70000004:
+        return "UI8.gif";
+    default:
+        return NULL;
+    }
+}
+
+static u32 vm_fake_resource_id_from_name(const char *name)
+{
+    if (strcmp(name, "flowerStyle.gif") == 0)
+        return 0x70000000;
+    if (strcmp(name, "loading.gif") == 0)
+        return 0x70000001;
+    if (strcmp(name, "UI2.gif") == 0)
+        return 0x70000002;
+    if (strcmp(name, "UI7.gif") == 0)
+        return 0x70000003;
+    if (strcmp(name, "UI8.gif") == 0)
+        return 0x70000004;
+    return 0;
+}
+
+static u32 vm_df_get_resource_by_id(u32 id)
+{
+    const char *name = vm_fake_resource_name_from_id(id);
+    if (name)
+        return vm_set_call_result(vm_load_resource_blob_from_cbe(name));
+    return vm_DF_GetResourceByResourceID(id);
+}
+
+static u32 vm_df_get_resource_by_file_name(u32 namePtr)
+{
+    vm_readStringByPtr(namePtr, cbeTextString);
+    if (vm_fake_resource_id_from_name(cbeTextString))
+        return vm_set_call_result(vm_load_resource_blob_from_cbe(cbeTextString));
+    return vm_DF_GetResourceByFileName(namePtr);
+}
+
+static u32 vm_df_get_resource_name_by_id(u32 id)
+{
+    const char *name = vm_fake_resource_name_from_id(id);
+    if (name)
+    {
+        uc_mem_write(MTK, VM_DreamFactory_CharBuffer_ADDRESS, name, strlen(name) + 1);
+        return vm_set_call_result(VM_DreamFactory_CharBuffer_ADDRESS);
+    }
+    vm_DF_GetResourceNameByID(id);
+    return 0;
+}
+
+static u32 vm_df_get_resource_id_by_file_name(u32 namePtr)
+{
+    vm_readStringByPtr(namePtr, cbeTextString);
+    u32 fakeId = vm_fake_resource_id_from_name(cbeTextString);
+    if (fakeId)
+        return vm_set_call_result(fakeId);
+    return vm_DF_GetResourceIDByFileName(namePtr);
+}
+
+static u32 vm_df_get_t_resource(u32 namePtr, int stream)
+{
+    vm_readStringByPtr(namePtr, cbeTextString);
+    if (vm_fake_resource_id_from_name(cbeTextString))
+    {
+        u32 resource = vm_load_resource_blob_from_cbe(cbeTextString);
+        uc_mem_write(MTK, VM_DreamFactoryResourceBuffer_ADDRESS, &resource, 4);
+        return vm_set_call_result(resource);
+    }
+    return stream ? vm_DF_GetStreamTResource(namePtr) : vm_DF_GetTResource(namePtr);
+}
+
+static u32 vm_create_image_from_resource_name(const char *name)
+{
+    u32 namePtr = vm_malloc(strlen(name) + 1);
+    u32 imageInfo = vm_malloc(0x80);
+    uc_mem_write(MTK, namePtr, name, strlen(name) + 1);
+    uc_mem_write(MTK, imageInfo, emptyBuff, 0x80);
+    u32 dataPackage = 0;
+    uc_mem_read(MTK, VM_DreamFactory_DataPackage_ADDRESS, &dataPackage, 4);
+    if (dataPackage == 0)
+    {
+        u32 dataPtr = vm_load_resource_blob_from_cbe(name);
+        vm_free(namePtr);
+        if (dataPtr == 0)
+        {
+            vm_free(imageInfo);
+            return 0;
+        }
+        vm_IMG_CreateImageFormStream(dataPtr, imageInfo);
+        u32 pixels = 0;
+        uc_mem_read(MTK, imageInfo, &pixels, 4);
+        if (pixels == 0)
+        {
+            vm_free(imageInfo);
+            return 0;
+        }
+        return imageInfo;
+    }
+    int fileId = vm_DF_DataPackage_GetFileID(dataPackage, namePtr);
+    u32 dataPtr = 0;
+    if (fileId < 0)
+    {
+        dataPtr = vm_load_resource_blob_from_cbe(name);
+    }
+    else
+    {
+        dataPtr = vm_DF_DataPackage_GetFileByID(dataPackage, fileId);
+    }
+    vm_free(namePtr);
+    if (dataPtr == 0 || dataPtr == (u32)-1)
+    {
+        vm_free(imageInfo);
+        return 0;
+    }
+    vm_IMG_CreateImageFormStream(dataPtr, imageInfo);
+    u32 pixels = 0;
+    uc_mem_read(MTK, imageInfo, &pixels, 4);
+    if (pixels == 0)
+    {
+        vm_free(imageInfo);
+        return 0;
+    }
+    u32 widthFunc = VM_FAKE_IMAGE_WIDTH_FUNC_ADDRESS | 1;
+    u32 heightFunc = VM_FAKE_IMAGE_HEIGHT_FUNC_ADDRESS | 1;
+    u32 drawFunc = VM_FAKE_IMAGE_DRAW_FUNC_ADDRESS | 1;
+    uc_mem_write(MTK, imageInfo + 0x20, &widthFunc, 4);
+    uc_mem_write(MTK, imageInfo + 0x24, &heightFunc, 4);
+    uc_mem_write(MTK, imageInfo + 0x40, &drawFunc, 4);
+    uc_mem_write(MTK, imageInfo + 0x60, &widthFunc, 4);
+    uc_mem_write(MTK, imageInfo + 0x64, &heightFunc, 4);
+    uc_mem_write(MTK, imageInfo + 0x78, &drawFunc, 4);
+    return imageInfo;
+}
+
+static void scheduler_prepare_debug_picture_library(void)
+{
+    u32 debugUiRoot = Global_R9 + 0x9928;
+    u32 debugUiObj = 0;
+    u32 debugItems = 0;
+    uc_mem_read(MTK, debugUiRoot + 0x10, &debugUiObj, 4);
+    if (debugUiObj == 0)
+        return;
+
+    u16 defaultItemIndex = 2; // UI7.gif, used by the lower-right cancel button.
+    uc_mem_write(MTK, debugUiObj + 0x38, &defaultItemIndex, 2);
+
+    u32 widthFunc = VM_FAKE_IMAGE_WIDTH_FUNC_ADDRESS | 1;
+    u32 heightFunc = VM_FAKE_IMAGE_HEIGHT_FUNC_ADDRESS | 1;
+    u32 drawFunc = VM_FAKE_IMAGE_DRAW_FUNC_ADDRESS | 1;
+    u32 lookupFunc = VM_FAKE_IMAGE_LOOKUP_FUNC_ADDRESS | 1;
+
+    u32 callback = 0;
+    uc_mem_read(MTK, debugUiObj + 0x20, &callback, 4);
+    if (callback == 0)
+    {
+        uc_mem_write(MTK, debugUiObj + 0x20, &widthFunc, 4);
+        uc_mem_write(MTK, debugUiObj + 0x24, &heightFunc, 4);
+        uc_mem_write(MTK, debugUiObj + 0x60, &widthFunc, 4);
+        uc_mem_write(MTK, debugUiObj + 0x64, &heightFunc, 4);
+        uc_mem_write(MTK, debugUiObj + 0x78, &drawFunc, 4);
+    }
+
+    uc_mem_read(MTK, debugUiObj + 0x50, &debugItems, 4);
+    if (debugItems != 0)
+        return;
+
+    const char *names[] = {"UI2.gif", "UI8.gif", "UI7.gif", "flowerStyle.gif", "loading.gif"};
+    u32 itemTable = vm_malloc(sizeof(names) / sizeof(names[0]) * 4);
+    u32 itemCount = 0;
+    for (u32 n = 0; n < sizeof(names) / sizeof(names[0]); ++n)
+    {
+        u32 imageInfo = vm_create_image_from_resource_name(names[n]);
+        if (imageInfo)
+        {
+            uc_mem_write(MTK, itemTable + itemCount * 4, &imageInfo, 4);
+            itemCount++;
+        }
+    }
+    if (itemCount == 0)
+    {
+        u32 imageInfo = vm_malloc(0x80);
+        u32 pixelBuffer = vm_malloc(240 * 32 * 2);
+        u16 imageWidth = 240;
+        u16 imageHeight = 32;
+        for (u32 off = 0; off < 240 * 32 * 2; off += sizeof(emptyBuff))
+            uc_mem_write(MTK, pixelBuffer + off, emptyBuff, SDL_min((u32)sizeof(emptyBuff), 240 * 32 * 2 - off));
+        uc_mem_write(MTK, imageInfo, emptyBuff, 0x80);
+        uc_mem_write(MTK, imageInfo, &pixelBuffer, 4);
+        uc_mem_write(MTK, imageInfo + 4, &imageWidth, 2);
+        uc_mem_write(MTK, imageInfo + 6, &imageHeight, 2);
+        uc_mem_write(MTK, itemTable, &imageInfo, 4);
+        itemCount = 1;
+    }
+    if (itemCount == 1)
+    {
+        u32 imageInfo = 0;
+        uc_mem_read(MTK, itemTable, &imageInfo, 4);
+        for (u32 n = 1; n < 4; ++n)
+            uc_mem_write(MTK, itemTable + n * 4, &imageInfo, 4);
+        itemCount = 4;
+    }
+    uc_mem_write(MTK, debugUiObj + 0x50, &itemTable, 4);
+    uc_mem_write(MTK, debugUiObj + 0x54, &itemCount, 4);
+    uc_mem_write(MTK, debugUiObj + 0x58, &itemCount, 4);
+    uc_mem_write(MTK, debugUiObj + 0x5c, &lookupFunc, 4);
+    uc_mem_write(MTK, debugUiObj + 0x60, &widthFunc, 4);
+    uc_mem_write(MTK, debugUiObj + 0x64, &heightFunc, 4);
+    uc_mem_write(MTK, debugUiObj + 0x78, &drawFunc, 4);
+}
 
 u32 size_128mb = 1024 * 1024 * 128;
 u32 size_32mb = 1024 * 1024 * 32;
@@ -149,6 +471,175 @@ void vm_bx(u32 addr)
         cpsr &= ~0x20u;
     uc_reg_write(MTK, UC_ARM_REG_CPSR, &cpsr);
     uc_reg_write(MTK, UC_ARM_REG_PC, &addr);
+}
+
+static u32 g_currentEmuEntry = 0;
+
+static void normalize_program_exit_pc(u32 fallbackPc)
+{
+    u32 pc = 0;
+    uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
+    if ((pc & ~1u) == PROGRAM_EXIT_ADDR)
+    {
+        if (fallbackPc != 0 && (fallbackPc & ~1u) != PROGRAM_EXIT_ADDR)
+            uc_reg_write(MTK, UC_ARM_REG_PC, &fallbackPc);
+        else if (lastAddress != 0 && (lastAddress & ~1u) != PROGRAM_EXIT_ADDR)
+            uc_reg_write(MTK, UC_ARM_REG_PC, &lastAddress);
+    }
+}
+
+static uc_err vm_emu_start(u32 begin, u32 until)
+{
+    g_currentEmuEntry = begin;
+    uc_err err = uc_emu_start(MTK, begin, until, 0, 0);
+    normalize_program_exit_pc(begin);
+    return err;
+}
+
+static uc_err vm_emu_start_count(u32 begin, u32 until, uint64_t count)
+{
+    g_currentEmuEntry = begin;
+    uc_err err = uc_emu_start(MTK, begin, until, 0, count);
+    normalize_program_exit_pc(begin);
+    return err;
+}
+
+static uc_err vm_call4(u32 entry, u32 r0, u32 r1, u32 r2, u32 r3)
+{
+    u32 lr = PROGRAM_EXIT_ADDR | 1;
+    uc_reg_write(MTK, UC_ARM_REG_LR, &lr);
+    uc_reg_write(MTK, UC_ARM_REG_R0, &r0);
+    uc_reg_write(MTK, UC_ARM_REG_R1, &r1);
+    uc_reg_write(MTK, UC_ARM_REG_R2, &r2);
+    uc_reg_write(MTK, UC_ARM_REG_R3, &r3);
+    return vm_emu_start(entry | 1, PROGRAM_EXIT_ADDR);
+}
+
+static u32 scheduler_get_tick_ms(void)
+{
+    u32 now = SDL_GetTicks();
+    if (g_schedulerStartTicks == 0)
+        g_schedulerStartTicks = now;
+    return now - g_schedulerStartTicks;
+}
+
+static u32 scheduler_start_timer(u32 delayMs, u32 callback, u32 context)
+{
+    if (callback == 0)
+        return vm_set_call_result(0);
+    for (u32 i = 0; i < VM_SCHED_MAX_TIMERS; ++i)
+    {
+        if (!g_timerTasks[i].active)
+        {
+            g_timerTasks[i].active = 1;
+            g_timerTasks[i].handle = (u16)(VM_SCHED_TIMER_BASE_ID + i);
+            g_timerTasks[i].remainingTicks = (delayMs + VM_SCHED_FRAME_MS - 1) / VM_SCHED_FRAME_MS;
+            if (g_timerTasks[i].remainingTicks == 0)
+                g_timerTasks[i].remainingTicks = 1;
+            g_timerTasks[i].callback = callback;
+            g_timerTasks[i].context = context;
+            return vm_set_call_result(g_timerTasks[i].handle);
+        }
+    }
+    printf("vMStartTimer: timer pool full\n");
+    assert(0);
+    return vm_set_call_result(0);
+}
+
+static u32 scheduler_stop_timer(u32 handle)
+{
+    if (handle >= VM_SCHED_TIMER_BASE_ID && handle < VM_SCHED_TIMER_BASE_ID + VM_SCHED_MAX_TIMERS)
+    {
+        vm_timer_task *task = &g_timerTasks[handle - VM_SCHED_TIMER_BASE_ID];
+        task->active = 0;
+        task->remainingTicks = 0;
+        task->callback = 0;
+        task->context = 0;
+    }
+    return vm_set_call_result(0);
+}
+
+static uc_err scheduler_dispatch_timers(void)
+{
+    for (u32 i = 0; i < VM_SCHED_MAX_TIMERS; ++i)
+    {
+        vm_timer_task *task = &g_timerTasks[i];
+        if (!task->active)
+            continue;
+        if (task->remainingTicks > 0)
+        {
+            task->remainingTicks--;
+            if (task->remainingTicks > 0)
+                continue;
+        }
+        u32 callback = task->callback;
+        u32 context = task->context;
+        task->active = 0;
+        task->remainingTicks = 0;
+        task->callback = 0;
+        task->context = 0;
+        uc_err err = vm_call4(callback, context, 0, 0, 0);
+        if (err != UC_ERR_OK)
+            return err;
+    }
+    return UC_ERR_OK;
+}
+
+static void scheduler_queue_net_task(u32 r0, u32 r1, u32 callback, u32 context)
+{
+    for (u32 i = 0; i < VM_SCHED_MAX_NET_TASKS; ++i)
+    {
+        if (g_netTasks[i].active && g_netTasks[i].callback == callback && g_netTasks[i].context == context)
+            return;
+    }
+    for (u32 i = 0; i < VM_SCHED_MAX_NET_TASKS; ++i)
+    {
+        if (!g_netTasks[i].active)
+        {
+            g_netTasks[i].active = 1;
+            g_netTasks[i].fired = 0;
+            g_netTasks[i].delayTicks = 6;
+            g_netTasks[i].r0 = r0;
+            g_netTasks[i].r1 = r1;
+            g_netTasks[i].callback = callback;
+            g_netTasks[i].context = context;
+            return;
+        }
+    }
+}
+
+static uc_err scheduler_dispatch_net_tasks(void)
+{
+    for (u32 i = 0; i < VM_SCHED_MAX_NET_TASKS; ++i)
+    {
+        vm_net_task *task = &g_netTasks[i];
+        if (!task->active)
+            continue;
+        if (task->delayTicks > 0)
+        {
+            task->delayTicks--;
+            continue;
+        }
+        if (!task->fired && task->callback)
+        {
+            task->fired = 1;
+            task->active = 0;
+            uc_err err = vm_call4(task->callback, task->r0, task->r1, task->callback, task->context);
+            if (err != UC_ERR_OK)
+                return err;
+        }
+    }
+    return UC_ERR_OK;
+}
+
+static uc_err scheduler_tick(void)
+{
+    g_schedulerTick++;
+    currentTime = clock();
+    uc_err err = scheduler_dispatch_timers();
+    if (err != UC_ERR_OK)
+        return err;
+    return scheduler_dispatch_net_tasks();
 }
 
 /**
@@ -342,16 +833,16 @@ u8 *SimpleRamMatch(u8 *start, u8 *end, u8 *matchStart, int matchLen)
 #define LOAD_CBE_PATH "CBE/愤怒的小鸟.CBE"
 #define LOAD_CBE_PATH "CBE/众神之战.CBE"
 #define LOAD_CBE_PATH "CBE/钻石迷情3.CBE"
-#define LOAD_CBE_PATH "CBE/涂鸦跳跃.CBE"
 #define LOAD_CBE_PATH "CBE/枪之荣誉.CBE"
 #define LOAD_CBE_PATH "CBE/僵尸先生.CBE"
 #define LOAD_CBE_PATH "CBE/捕鱼猎人.CBE"
 #define LOAD_CBE_PATH "CBE/战争机器.CBE"
-#define LOAD_CBE_PATH "CBE/皇牌空战.CBE"
-#define LOAD_CBE_PATH "CBE/鬼吹灯.CBE"
 #define LOAD_CBE_PATH "CBE/魔塔.CBE"
 #define LOAD_CBE_PATH "CBE/孤岛.CBE"
 #define LOAD_CBE_PATH "CBE/恶魔城.CBE"
+#define LOAD_CBE_PATH "CBE/鬼吹灯.CBE"
+#define LOAD_CBE_PATH "CBE/皇牌空战.CBE"
+#define LOAD_CBE_PATH "CBE/涂鸦跳跃.CBE"
 #define LOAD_CBE_PATH "CBE/江湖OL.CBE"
 
 void RunArmProgram(void *param)
@@ -392,24 +883,143 @@ void RunArmProgram(void *param)
     u32 exitAddr = PROGRAM_EXIT_ADDR;
     u32 thumbExitAddr = PROGRAM_EXIT_ADDR | 1;
     uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);     // 程序退出点
-    p = uc_emu_start(MTK, startAddr + 1, exitAddr, 0, 0); // thumb模式
+    p = vm_emu_start(startAddr + 1, exitAddr); // thumb模式
 
     // 第二次初始化
     if (p == UC_ERR_OK)
     {
         uc_mem_read(MTK, VM_Manager_Table_ADDRESS, &startAddr, 4);
         uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
-        p = uc_emu_start(MTK, startAddr, exitAddr, 0, 0);
+        p = vm_emu_start(startAddr, exitAddr);
     }
 
     if (p == UC_ERR_OK)
     {
         if (screenStructChange != 1)
         {
-            printf("第二次初始化未设置Screen，停止运行以避免执行未初始化入口\n");
-            assert(0);
+            if (vmAddedScreen == 0)
+            {
+                printf("第二次初始化未设置Screen，停止运行以避免执行未初始化入口\n");
+                assert(0);
+            }
+            u32 tScreenRenderEntry = 0;
+            u32 tScreenLogicEntry = 0;
+            u32 tScreenInitEntry = 0;
+            u32 tScreenInitedPtr = 0;
+            while (p == UC_ERR_OK && screenStructChange != 1)
+            {
+                p = scheduler_tick();
+                if (p != UC_ERR_OK)
+                    break;
+                if (tScreenInitedPtr != vmAddedScreen)
+                {
+                    scheduler_prepare_debug_picture_library();
+                    uc_mem_read(MTK, vmAddedScreen, &tScreenInitEntry, 4);
+                    if (tScreenInitEntry)
+                    {
+                        uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
+                        uc_reg_write(MTK, UC_ARM_REG_R0, &vmAddedScreen);
+                        p = vm_emu_start_count(tScreenInitEntry, exitAddr, 200000);
+                        if (p != UC_ERR_OK)
+                        {
+                            printf("TScreen init异常:%s\n", uc_strerror(p));
+                            break;
+                        }
+                    }
+                    tScreenInitedPtr = vmAddedScreen;
+                }
+                scheduler_prepare_debug_picture_library();
+                u32 debugUiRoot = Global_R9 + 0x9928;
+                u32 debugUiObj = 0;
+                u32 debugItems = 0;
+                uc_mem_read(MTK, debugUiRoot + 0x10, &debugUiObj, 4);
+                if (debugUiObj)
+                {
+                    u16 defaultItemIndex = 2; // UI7.gif, used by the lower-right cancel button.
+                    uc_mem_write(MTK, debugUiObj + 0x38, &defaultItemIndex, 2);
+                    u32 callback = 0;
+                            uc_mem_read(MTK, debugUiObj + 0x20, &callback, 4);
+                    if (callback == 0)
+                    {
+                        u32 widthFunc = VM_FAKE_IMAGE_WIDTH_FUNC_ADDRESS | 1;
+                        u32 heightFunc = VM_FAKE_IMAGE_HEIGHT_FUNC_ADDRESS | 1;
+                        u32 drawFunc = VM_FAKE_IMAGE_DRAW_FUNC_ADDRESS | 1;
+                        uc_mem_write(MTK, debugUiObj + 0x20, &widthFunc, 4);
+                        uc_mem_write(MTK, debugUiObj + 0x24, &heightFunc, 4);
+                        uc_mem_write(MTK, debugUiObj + 0x60, &widthFunc, 4);
+                        uc_mem_write(MTK, debugUiObj + 0x64, &heightFunc, 4);
+                        uc_mem_write(MTK, debugUiObj + 0x78, &drawFunc, 4);
+                    }
+                    uc_mem_read(MTK, debugUiObj + 0x50, &debugItems, 4);
+                    if (debugItems == 0)
+                    {
+                        const char *names[] = {"UI2.gif", "UI8.gif", "UI7.gif", "flowerStyle.gif"};
+                        u32 itemTable = vm_malloc(16);
+                        u32 itemCount = 0;
+                        u32 widthFunc = VM_FAKE_IMAGE_WIDTH_FUNC_ADDRESS | 1;
+                        u32 heightFunc = VM_FAKE_IMAGE_HEIGHT_FUNC_ADDRESS | 1;
+                        u32 drawFunc = VM_FAKE_IMAGE_DRAW_FUNC_ADDRESS | 1;
+                        u32 lookupFunc = VM_FAKE_IMAGE_LOOKUP_FUNC_ADDRESS | 1;
+                        for (u32 n = 0; n < sizeof(names) / sizeof(names[0]); ++n)
+                        {
+                            u32 imageInfo = vm_create_image_from_resource_name(names[n]);
+                            if (imageInfo)
+                            {
+                                uc_mem_write(MTK, itemTable + itemCount * 4, &imageInfo, 4);
+                                itemCount++;
+                            }
+                        }
+                        if (itemCount == 0)
+                        {
+                            u32 imageInfo = vm_malloc(0x80);
+                            u32 pixelBuffer = vm_malloc(240 * 32 * 2);
+                            u16 imageWidth = 240;
+                            u16 imageHeight = 32;
+                            for (u32 off = 0; off < 240 * 32 * 2; off += sizeof(emptyBuff))
+                                uc_mem_write(MTK, pixelBuffer + off, emptyBuff, SDL_min((u32)sizeof(emptyBuff), 240 * 32 * 2 - off));
+                            uc_mem_write(MTK, imageInfo, emptyBuff, 0x80);
+                            uc_mem_write(MTK, imageInfo, &pixelBuffer, 4);
+                            uc_mem_write(MTK, imageInfo + 4, &imageWidth, 2);
+                            uc_mem_write(MTK, imageInfo + 6, &imageHeight, 2);
+                            uc_mem_write(MTK, itemTable, &imageInfo, 4);
+                            itemCount = 1;
+                        }
+                        if (itemCount == 1)
+                        {
+                            u32 imageInfo = 0;
+                            uc_mem_read(MTK, itemTable, &imageInfo, 4);
+                            for (u32 n = 1; n < 4; ++n)
+                                uc_mem_write(MTK, itemTable + n * 4, &imageInfo, 4);
+                            itemCount = 4;
+                        }
+                        uc_mem_write(MTK, debugUiObj + 0x50, &itemTable, 4);
+                        uc_mem_write(MTK, debugUiObj + 0x54, &itemCount, 4);
+                        uc_mem_write(MTK, debugUiObj + 0x58, &itemCount, 4);
+                        uc_mem_write(MTK, debugUiObj + 0x5c, &lookupFunc, 4);
+                        uc_mem_write(MTK, debugUiObj + 0x60, &widthFunc, 4);
+                        uc_mem_write(MTK, debugUiObj + 0x64, &heightFunc, 4);
+                        uc_mem_write(MTK, debugUiObj + 0x78, &drawFunc, 4);
+                    }
+                }
+                uc_mem_read(MTK, vmAddedScreen + 0x08, &tScreenLogicEntry, 4);
+                uc_mem_read(MTK, vmAddedScreen + 0x0c, &tScreenRenderEntry, 4);
+                if (tScreenRenderEntry == 0)
+                {
+                    printf("TScreen未设置render入口\n");
+                    assert(0);
+                }
+                uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
+                uc_reg_write(MTK, UC_ARM_REG_R0, &vmAddedScreen);
+                p = vm_emu_start(tScreenRenderEntry, exitAddr);
+                if (p != UC_ERR_OK)
+                    break;
+                UpdateLcd();
+                if (tScreenLogicEntry)
+                    uc_reg_write(MTK, UC_ARM_REG_PC, &tScreenLogicEntry);
+                SDL_Delay(100);
+            }
         }
-        while (true)
+        while (p == UC_ERR_OK)
         {
 
             u32 screenFuncPtr;
@@ -420,9 +1030,12 @@ void RunArmProgram(void *param)
             u32 screenPauseEntry;
             u32 screenRemuseEntry;
             u32 screenResouceLoadEntry;
+            u32 screenThisPtr = 0;
             if (screenStructChange == 1)
             {
                 uc_mem_read(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &screenFuncPtr, 4); // 得到screen函数表地址的指针
+                if (screenFuncPtr >= Global_R9 && screenFuncPtr < ROM_ADDRESS + size_16mb)
+                    screenThisPtr = screenFuncPtr - 0x94;
                 uc_mem_read(MTK, screenFuncPtr, &screenInitEntry, 4);
                 uc_mem_read(MTK, screenFuncPtr + 4, &screenDestoryEntry, 4);
                 uc_mem_read(MTK, screenFuncPtr + 8, &screenLogicEntry, 4);
@@ -435,19 +1048,26 @@ void RunArmProgram(void *param)
             }
 
             uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr); // 程序退出点
-            p = uc_emu_start(MTK, screenInitEntry, exitAddr, 0, 0);
+            if (screenThisPtr)
+                uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
+            p = vm_emu_start(screenInitEntry, exitAddr);
             printf("ScreenInit Ok\n");
             if (p == UC_ERR_OK)
             {
                 while (true)
                 {
+                    p = scheduler_tick();
+                    if (p != UC_ERR_OK)
+                        break;
                     if (screenStructChange == 1)
                         break;
                     if (screenStructNotifyLoadRes == 1)
                     {
                         screenStructNotifyLoadRes = 0;
                         uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr); // 程序退出点
-                        p = uc_emu_start(MTK, screenResouceLoadEntry, exitAddr, 0, 0);
+                        if (screenThisPtr)
+                            uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
+                        p = vm_emu_start(screenResouceLoadEntry, exitAddr);
                         if (p != UC_ERR_OK)
                         {
                             printf("SCR_ResourceLoad异常:%s\n", uc_strerror(p));
@@ -480,7 +1100,9 @@ void RunArmProgram(void *param)
                     if (1)
                     {
                         uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
-                        p = uc_emu_start(MTK, screenLogicEntry, exitAddr, 0, 0);
+                        if (screenThisPtr)
+                            uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
+                        p = vm_emu_start(screenLogicEntry, exitAddr);
                         if (p != UC_ERR_OK)
                         {
                             printf("SCR_Logic异常:%s\n", uc_strerror(p));
@@ -488,7 +1110,9 @@ void RunArmProgram(void *param)
                         }
 
                         uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
-                        p = uc_emu_start(MTK, screenRenderEntry, exitAddr, 0, 0);
+                        if (screenThisPtr)
+                            uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
+                        p = vm_emu_start(screenRenderEntry, exitAddr);
                         if (p != UC_ERR_OK)
                         {
                             dumpCpuInfo();
@@ -500,7 +1124,9 @@ void RunArmProgram(void *param)
                     SDL_Delay(100);
                 }
                 uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
-                p = uc_emu_start(MTK, screenDestoryEntry, exitAddr, 0, 0);
+                if (screenThisPtr)
+                    uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
+                p = vm_emu_start(screenDestoryEntry, exitAddr);
                 if (p != UC_ERR_OK)
                 {
                     printf("SCR_Destory异常\n");
@@ -580,12 +1206,20 @@ int main(int argc, char *args[])
         printf("Window could not be created! SDL_Error: %s\n", SDL_GetError());
         return -1;
     }
+    SDL_Surface *startupSurface = SDL_GetWindowSurface(window);
+    if (startupSurface)
+    {
+        SDL_FillRect(startupSurface, NULL, SDL_MapRGB(startupSurface->format, 0, 0, 0));
+        SDL_UpdateWindowSurface(window);
+    }
 
     InitVmEvent();
 
     char nameBuff[64] = LOAD_CBE_PATH;
     utf8_to_gbk(nameBuff, cbeTextString, mySizeOf(cbeTextString));
     char *fileBuffer = readFile(cbeTextString, &changeTmp1);
+    g_cbeFileBuffer = (u8 *)fileBuffer;
+    g_cbeFileSize = changeTmp1;
     // 分析前150字节
     parseCbeHeader(fileBuffer, changeTmp1);
 
@@ -614,6 +1248,7 @@ int main(int argc, char *args[])
 
     InitVmMalloc();
     InitLcd();
+    UpdateLcd();
     InitFontEngine();
 
     if (err)
@@ -658,8 +1293,6 @@ int main(int argc, char *args[])
         uc_mem_write(MTK, VM_Manager_Table_ADDRESS + 12, &changeTmp3, 4); // vm_log_trace函数地址
         changeTmp3 = VM_CURR_APP_INFO_ADDRESS;
         uc_mem_write(MTK, VM_Manager_Table_ADDRESS + 16, &changeTmp3, 4); // vcurAppFileName全局变量地址
-
-        SDL_free(fileBuffer);
 
         vm_initManagerTable();
 
@@ -740,8 +1373,206 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
 #endif
     if (((u32)address & ~1u) == PROGRAM_EXIT_ADDR)
     {
+        normalize_program_exit_pc(g_currentEmuEntry);
         uc_emu_stop(MTK);
         return;
+    }
+    if (((u32)address & ~1u) == VM_FAKE_IMAGE_WIDTH_FUNC_ADDRESS)
+    {
+        u32 picLib = 0;
+        u32 index = 0;
+        u32 itemTable = 0;
+        u32 imageObj = 0;
+        u16 imageWidth = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &picLib);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &index);
+        if (picLib)
+        {
+            uc_mem_read(MTK, picLib + 0x10, &itemTable, 4);
+            if (itemTable)
+                uc_mem_read(MTK, itemTable + index * 4, &imageObj, 4);
+        }
+        if (imageObj == 0)
+            imageObj = picLib;
+        if (imageObj)
+            uc_mem_read(MTK, imageObj + 4, &imageWidth, 2);
+        tmp1 = (imageWidth > 0 && imageWidth <= LCD_WIDTH) ? imageWidth : 240;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+        vm_bx(tmp1);
+        return;
+    }
+    if (((u32)address & ~1u) == VM_FAKE_IMAGE_HEIGHT_FUNC_ADDRESS)
+    {
+        u32 picLib = 0;
+        u32 index = 0;
+        u32 itemTable = 0;
+        u32 imageObj = 0;
+        u16 imageHeight = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &picLib);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &index);
+        if (picLib)
+        {
+            uc_mem_read(MTK, picLib + 0x10, &itemTable, 4);
+            if (itemTable)
+                uc_mem_read(MTK, itemTable + index * 4, &imageObj, 4);
+        }
+        if (imageObj == 0)
+            imageObj = picLib;
+        if (imageObj)
+            uc_mem_read(MTK, imageObj + 6, &imageHeight, 2);
+        tmp1 = (imageHeight > 0 && imageHeight <= LCD_HEIGHT) ? imageHeight : 32;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+        vm_bx(tmp1);
+        return;
+    }
+    if (((u32)address & ~1u) == VM_FAKE_IMAGE_DRAW_FUNC_ADDRESS)
+    {
+        u32 picLib = 0;
+        u32 index = 0;
+        u32 itemTable = 0;
+        u32 imageObj = 0;
+        u32 pixels = 0;
+        u16 imageWidth = 0;
+        u16 imageHeight = 0;
+        int dstX = 0;
+        int dstY = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &picLib);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &index);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &dstX);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &dstY);
+        if (picLib)
+        {
+            uc_mem_read(MTK, picLib + 0x10, &itemTable, 4);
+            if (itemTable)
+                uc_mem_read(MTK, itemTable + index * 4, &imageObj, 4);
+        }
+        if (imageObj == 0)
+            imageObj = picLib;
+        if (imageObj)
+        {
+            uc_mem_read(MTK, imageObj, &pixels, 4);
+            uc_mem_read(MTK, imageObj + 4, &imageWidth, 2);
+            uc_mem_read(MTK, imageObj + 6, &imageHeight, 2);
+        }
+        if (pixels && imageWidth && imageHeight)
+        {
+            u32 srcPitch = (((4 - imageWidth) & 3) + imageWidth) * 2;
+            int startX = dstX < 0 ? -dstX : 0;
+            int startY = dstY < 0 ? -dstY : 0;
+            int copyW = imageWidth - startX;
+            int copyH = imageHeight - startY;
+            if (dstX + startX + copyW > LCD_WIDTH)
+                copyW = LCD_WIDTH - (dstX + startX);
+            if (dstY + startY + copyH > LCD_HEIGHT)
+                copyH = LCD_HEIGHT - (dstY + startY);
+            if (copyW > 0 && copyH > 0)
+            {
+                u8 rowBuffer[480];
+                for (int row = 0; row < copyH; ++row)
+                {
+                    u32 srcOff = (startY + row) * srcPitch + startX * 2;
+                    u32 dstOff = ((dstY + startY + row) * LCD_WIDTH + dstX + startX) * 2;
+                    uc_mem_read(MTK, pixels + srcOff, rowBuffer, copyW * 2);
+                    u16 *dst = (u16 *)(Lcd_Cache_Buffer + dstOff);
+                    u16 *src = (u16 *)rowBuffer;
+                    for (int col = 0; col < copyW; ++col)
+                    {
+                        if (src[col] != 0)
+                            dst[col] = src[col];
+                    }
+                    uc_mem_write(MTK, VM_screenImage_ADDRESS + dstOff, Lcd_Cache_Buffer + dstOff, copyW * 2);
+                }
+            }
+        }
+        tmp1 = 0;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+        vm_bx(tmp1);
+        return;
+    }
+    if (((u32)address & ~1u) == VM_FAKE_IMAGE_LOOKUP_FUNC_ADDRESS)
+    {
+        u32 namePtr = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R1, &namePtr);
+        tmp1 = 0;
+        if (namePtr)
+        {
+            vm_readStringByPtr(namePtr, cbeTextString);
+            if (strcmp((char *)cbeTextString, "UI8.gif") == 0)
+                tmp1 = 1;
+            else if (strcmp((char *)cbeTextString, "UI7.gif") == 0)
+                tmp1 = 2;
+            else if (strcmp((char *)cbeTextString, "flowerStyle.gif") == 0)
+                tmp1 = 3;
+            else if (strcmp((char *)cbeTextString, "loading.gif") == 0)
+                tmp1 = 4;
+        }
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+        vm_bx(tmp1);
+        return;
+    }
+    if (address == 0x10189e4)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp1);
+        if (tmp1 == 0)
+        {
+            tmp1 = 240;
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+            tmp1 = 0x10189e7;
+            vm_bx(tmp1);
+            return;
+        }
+    }
+    if (address == 0x10189f2)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp1);
+        if (tmp1 == 0)
+        {
+            tmp1 = 32;
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+            tmp1 = 0x10189f5;
+            vm_bx(tmp1);
+            return;
+        }
+    }
+    if (address == 0x1039e2c || address == 0x1039e3a)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp1);
+        if (tmp1 == 0)
+        {
+            tmp1 = (address == 0x1039e2c) ? 240 : 32;
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+            tmp1 = ((u32)address + 2) | 1;
+            vm_bx(tmp1);
+            return;
+        }
+    }
+    if (address == 0x1018946 || address == 0x1018966 || address == 0x1018984 || address == 0x10189a4)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R6, &tmp1);
+        if (tmp1 == 0)
+        {
+            tmp2 = 0;
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp2);
+            tmp2 = ((u32)address + 2) | 1;
+            vm_bx(tmp2);
+            return;
+        }
+    }
+    if (address == 0x103ab4c || address == 0x103ab9a || address == 0x103abe0 || address == 0x103ac1a || address == 0x103ac6e)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R6, &tmp1);
+        if (tmp1 == 0)
+        {
+            tmp2 = 0;
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp2);
+            tmp2 = ((u32)address + 2) | 1;
+            vm_bx(tmp2);
+            return;
+        }
     }
     if (address == 0x10025c6)
     {
@@ -767,9 +1598,10 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     // }
     if (address == VM_LOG_TRACE_ADDRESS)
     {
-        vm_readStringByReg(UC_ARM_REG_R0, cbeTextString);
-        printf("[vm_log_trace]");
-        vm_sprintf();
+        // vm_log_trace only emits firmware-side diagnostics; keep it silent during normal emulation.
+        // vm_readStringByReg(UC_ARM_REG_R0, cbeTextString);
+        // printf("[vm_log_trace]");
+        // vm_sprintf();
         // bx lr实现
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
@@ -835,7 +1667,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
             uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
             if (tmp1)
             {
-                for (tmp2 = 0; tmp2 < 16; tmp2++)
+                for (tmp2 = 0; tmp2 < 43; tmp2++)
                 {
                     tmp3 = VM_MANAGER_NETWORK_FUNC_LIST_ADDRESS + tmp2 * 4;
                     uc_mem_write(MTK, tmp1 + tmp2 * 4, &tmp3, 4);
@@ -893,6 +1725,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
             tmp1 = VM_MANAGER_DF_ENGINE_TABLE_ADDRESS;
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
             DEBUG_PRINT("[call]vMGetDFEnginelManager\n");
+        }
+        else if (idx == 28)
+        {
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            if (tmp1)
+            {
+                tmp3 = VM_MANAGER_NETAPP_FUNC_LIST_ADDRESS + 60 * 4;
+                uc_mem_write(MTK, tmp1 + 60 * 4, &tmp3, 4);
+            }
+            vm_set_call_result(0);
         }
         else if (idx == 29)
         {
@@ -1148,12 +1990,15 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         }
         else if (idx == 17)
         {
-            DEBUG_PRINT("[call]Coolbar_GetCoolbarDirPath\n");
+            // DEBUG_PRINT("[call]Coolbar_GetCoolbarDirPath\n");
             cbeTextString[0] = '.';
-            cbeTextString[1] = '/';
-            cbeTextString[2] = 0;
+            cbeTextString[1] = 0;
+            cbeTextString[2] = '/';
+            cbeTextString[3] = 0;
+            cbeTextString[4] = 0;
+            cbeTextString[5] = 0;
             uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_mem_write(MTK, tmp1, cbeTextString, 3);
+            uc_mem_write(MTK, tmp1, cbeTextString, 6);
         }
         else if (idx == 18)
         {
@@ -1513,14 +2358,15 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         }
         else if (idx == 89)
         {
-            DEBUG_PRINT("[call]vmIsInnerApp\n");
-            tmp1 = 0;
+            // DEBUG_PRINT("[call]vmIsInnerApp\n");
+            tmp1 = 1;
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
         else if (idx == 90)
         {
-            printf("[call]vmGetInnerAppVer\n");
-            assert(0);
+            // DEBUG_PRINT("[call]vmGetInnerAppVer\n");
+            tmp1 = 0;
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
         else if (idx == 91)
         {
@@ -1722,9 +2568,9 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         }
         else if (idx == 9)
         {
-            // todo
             DEBUG_PRINT("[call]MF_InitGmemoryBlock\n");
-            vm_initMemoryBlock();
+            vm_initMemoryBlock(VM_MemoryBlock_PTR_ADDRESS, VM_MemoryBlock_SIZE);
+            vm_set_call_result(VM_MemoryBlock_PTR_ADDRESS);
         }
         else if (idx == 10)
         {
@@ -1870,11 +2716,14 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         }
         else if (idx == 10)
         {
-            // todo
             uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            // uc_mem_read(MTK, tmp1, cbeTextString, 16);
-            printf("[call]vMDrawString()\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+            uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+            vm_readStringGbkByReg(UC_ARM_REG_R0, cbeTextString);
+            drawFontString(cbeTextString, tmp2, tmp3, (u16)tmp4);
+            tmp1 = 1;
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
         else if (idx == 11)
         {
@@ -2191,12 +3040,10 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         {
             // vMDrawImageWithClipEx(p_mscreenImage ,ptr2 ,0:x? ,0:y? ,0xbc:x2 ,1:y2? ,0 ,3)
             // vMDrawImageWithClipEx(dst, src, sx, sy, w, h, dx, dy)原图的sx,sy，目标图的dx,dy
-            // DEBUG_PRINT("[call]vMDrawImageWithClipEx\n");
             vM_DrawImageWithClipEx();
         }
         else if (idx == 26)
         {
-            // DEBUG_PRINT("[call]vMDrawImageClipAndAlphaEx\n");
             vm_vMDrawImageClipAndAlphaEx();
         }
         else if (idx == 27)
@@ -2263,14 +3110,14 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         }
         else if (idx == 39)
         {
-            DEBUG_PRINT("[call]vMGB2UCS2\n");
+            // DEBUG_PRINT("[call]vMGB2UCS2\n");
             uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
             uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_readStringByReg(UC_ARM_REG_R1, cbeTextString);
+            vm_readStringByReg(UC_ARM_REG_R0, cbeTextString);
             gbk_to_unicode(cbeTextString, sprintfBuff, mySizeOf(sprintfBuff));
-            tmp2 = strlen_utf16((u16 *)sprintfBuff);
-            uc_mem_write(MTK, tmp1, sprintfBuff, (tmp2 + 1) * 2);
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp2);
+            tmp3 = strlen_utf16((u16 *)sprintfBuff);
+            uc_mem_write(MTK, tmp2, sprintfBuff, (tmp3 + 1) * 2);
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp3);
         }
         else if (idx == 40)
         {
@@ -2646,8 +3493,9 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         }
         else if (idx == 12)
         {
-            printf("[call]cbfs_vm_file_mkdir\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+            vm_set_call_result(0);
         }
         else if (idx == 13)
         {
@@ -2894,35 +3742,30 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         u32 idx = (address - VM_MANAGER_TIMER_FUNC_LIST_ADDRESS) / 4;
         if (idx == 0)
         {
-            printf("[call]vMStartTimer\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+            scheduler_start_timer(tmp1, tmp2, tmp3);
         }
         else if (idx == 1)
         {
-            printf("[call]vMStopTimer\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            scheduler_stop_timer(tmp1);
         }
         else if (idx == 2)
         {
-            DEBUG_PRINT("[call]vMGetTickCount\n");
-            // 返回tickCount
-            tmp1 = 1;
+            tmp1 = scheduler_get_tick_ms();
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
         else if (idx == 3)
         {
-            // 返回tickCount
-            tmp1 = 1;
+            tmp1 = (u32)time(NULL);
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-            DEBUG_PRINT("[call]vMGetTotalSeconds\n");
         }
         else if (idx == 4)
         {
-            // 返回tickCount
-            tmp1 = 1;
+            tmp1 = (u32)time(NULL);
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-
-            DEBUG_PRINT("[call]vMGetCurrentTime\n");
         }
         else if (idx == 5)
         {
@@ -2972,7 +3815,24 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     else if (address >= VM_MANAGER_NETWORK_FUNC_LIST_ADDRESS && address < (VM_MANAGER_NETWORK_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
     {
         u32 idx = (address - VM_MANAGER_NETWORK_FUNC_LIST_ADDRESS) / 4;
-        if (idx == 3)
+        if (idx == 0)
+        {
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+            uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+            scheduler_queue_net_task(tmp1, tmp2, tmp3, tmp4);
+            vm_set_call_result(1);
+        }
+        else if (idx == 1)
+        {
+            vm_set_call_result(0);
+        }
+        else if (idx == 2)
+        {
+            vm_set_call_result(0);
+        }
+        else if (idx == 3)
         {
             tmp1 = vm_get_var(Global_R9 + 0x5a3c + 0x10);
             if (tmp1)
@@ -2982,6 +3842,35 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
                 vm_bx(tmp1);
                 return;
             }
+            vm_set_call_result(0);
+        }
+        else if (idx == 6 || idx == 7 || idx == 18)
+        {
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+            uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+            scheduler_queue_net_task(tmp1, tmp2, tmp3, tmp4);
+            vm_set_call_result(1);
+        }
+        else if (idx == 17)
+        {
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+            scheduler_queue_net_task(tmp1, 0, tmp2, tmp3);
+            vm_set_call_result(1);
+        }
+        else if (idx == 4 || idx == 19 || idx == 29 || idx == 30)
+        {
+            vm_set_call_result(1);
+        }
+        else if (idx == 5 || idx == 12 || idx == 13 || idx == 21 || idx == 24 || idx == 25 || idx == 33 || idx == 34 || idx == 36 || idx == 37 || idx == 39 || idx == 41 || idx == 42)
+        {
+            vm_set_call_result(0);
+        }
+        else if (idx == 8 || idx == 9 || idx == 10 || idx == 11 || idx == 14 || idx == 15 || idx == 16 || idx == 22 || idx == 23 || idx == 26 || idx == 27 || idx == 28 || idx == 31 || idx == 32 || idx == 35 || idx == 38 || idx == 40)
+        {
             vm_set_call_result(0);
         }
         else
@@ -3009,50 +3898,44 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         }
         else if (idx == 10)
         {
-            printf("[call]DF_SetDataPackage\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            uc_mem_write(MTK, VM_DreamFactory_DataPackage_ADDRESS, &tmp1, 4);
+            vm_set_call_result(0);
         }
         else if (idx == 11)
         {
-            printf("[call]DF_GetDataPackage\n");
-            assert(0);
+            uc_mem_read(MTK, VM_DreamFactory_DataPackage_ADDRESS, &tmp1, 4);
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
         else if (idx == 12)
         {
-            printf("[call]DF_GetResourceByResourceID\n");
             uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_DF_GetResourceByResourceID(tmp1);
+            vm_df_get_resource_by_id(tmp1);
         }
         else if (idx == 13)
         {
-            printf("[call]DF_GetResourceByFileName\n");
             uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_DF_GetResourceByFileName(tmp1);
+            vm_df_get_resource_by_file_name(tmp1);
         }
         else if (idx == 14)
         {
-            printf("[call]DF_GetResourceNameByID\n");
             uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_DF_GetResourceNameByID(tmp1);
+            vm_df_get_resource_name_by_id(tmp1);
         }
         else if (idx == 15)
         {
             uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_readStringByPtr(tmp1, cbeTextString);
-            printf("[call]DF_GetResourceIDByFileName(%s)\n", cbeTextString);
-            tmp1 = vm_DF_GetResourceIDByFileName(tmp1);
+            tmp1 = vm_df_get_resource_id_by_file_name(tmp1);
         }
         else if (idx == 16)
         {
-            printf("[call]DF_GetTResource\n");
             uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_DF_GetTResource(tmp1);
+            vm_df_get_t_resource(tmp1, 0);
         }
         else if (idx == 17)
         {
-            DEBUG_PRINT("[call]DF_GetStreamTResource\n");
             uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_DF_GetStreamTResource(tmp1);
+            vm_df_get_t_resource(tmp1, 1);
         }
         else if (idx == 18)
         {
@@ -3202,6 +4085,21 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     else if (address >= VM_MANAGER_DF_ENGINE_FUNC_LIST_ADDRESS && address < (VM_MANAGER_DF_ENGINE_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
     {
         u32 idx = (address - VM_MANAGER_DF_ENGINE_FUNC_LIST_ADDRESS) / 4;
+        if (idx == 8)
+        {
+            tmp1 = 0;
+            uc_mem_write(MTK, VM_DreamFactory_DataPackage_ADDRESS, &tmp1, 4);
+            tmp1 = VM_MemoryBlock_PTR_ADDRESS;
+            uc_mem_write(MTK, VM_DreamFactory_MemoryBlock_ADDRESS, &tmp1, 4);
+            vm_set_call_result(0);
+        }
+        else if (idx == 10)
+        {
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+            vm_initDFDataPackage(tmp1, tmp2);
+        }
+        else
         {
             printf("[impl]vmDfEngineManager调用位置:%d\n", idx);
             assert(0);
@@ -3309,8 +4207,10 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         }
         else if (idx == 19)
         {
-            printf("[call]CDownGetFileNameByAppID\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            // DEBUG_PRINT("[call]CDownGetFileNameByAppID\n");
+            tmp1 = 0x104fd48; // "Wpay9990Ker42WqvgaV100.CBM"
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
         else if (idx == 20)
         {
@@ -3427,7 +4327,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         if (idx == 1)
         {
             vm_readStringUCS2ByReg(UC_ARM_REG_R0, cbeTextString);
-            tmp1 = strlen_utf16(cbeTextString) * 2;
+            tmp1 = strlen_utf16(cbeTextString);
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
         else if (idx == 2)
@@ -3497,6 +4397,32 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
     }
+    else if (address >= VM_MANAGER_SCREEN_FUNC_LIST_ADDRESS && address < (VM_MANAGER_SCREEN_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
+    {
+        u32 idx = (address - VM_MANAGER_SCREEN_FUNC_LIST_ADDRESS) / 4;
+        if (idx == 0)
+        {
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            uc_mem_write(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &tmp1, 4);
+            tmp2 = 0;
+            uc_mem_write(MTK, VM_SCREEN_isInQuit_ADDRESS, &tmp2, 4);
+            screenStructChange = 1;
+            vm_set_call_result(VM_SCREEN_isInQuit_ADDRESS);
+        }
+        else if (idx == 4)
+        {
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            vmAddedScreen = tmp1;
+            vm_set_call_result(0);
+        }
+        else
+        {
+            printf("[impl]vmScreenManager调用位置:%d\n", idx);
+            assert(0);
+        }
+        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+        vm_bx(tmp1);
+    }
     //
     // df scr
     else if (address >= VM_MANAGER_DF_SCRIPT_FUNC_LIST_ADDRESS && address < (VM_MANAGER_DF_SCRIPT_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
@@ -3556,7 +4482,21 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     else if (address >= VM_MANAGER_NETAPP_FUNC_LIST_ADDRESS && address < (VM_MANAGER_NETAPP_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
     {
         u32 idx = (address - VM_MANAGER_NETAPP_FUNC_LIST_ADDRESS) / 4;
-        if (1)
+        if (idx == 60)
+        {
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+            tmp4 = 0;
+            if (tmp1)
+                uc_mem_write(MTK, tmp1, &tmp4, 2);
+            if (tmp2)
+                uc_mem_write(MTK, tmp2, &tmp4, 2);
+            if (tmp3)
+                uc_mem_write(MTK, tmp3, &tmp4, 1);
+            vm_set_call_result(0);
+        }
+        else
         {
             printf("[impl]vmNetAppManager调用位置:%d\n", idx);
             assert(0);
@@ -3963,36 +4903,33 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         }
         else if (idx == 84)
         {
-            printf("[call]DF_GetResourceByResourceID\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            vm_df_get_resource_by_id(tmp1);
         }
         else if (idx == 85)
         {
-            printf("[call]DF_GetResourceByFileName\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            vm_df_get_resource_by_file_name(tmp1);
         }
         else if (idx == 86)
         {
-            printf("[call]DF_GetResourceNameByID\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            vm_df_get_resource_name_by_id(tmp1);
         }
         else if (idx == 87)
         {
             uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_DF_GetResourceIDByFileName(tmp1);
-            DEBUG_PRINT("[call]DF_GetResourceIDByFileName(%x)\n", tmp1);
+            vm_df_get_resource_id_by_file_name(tmp1);
         }
         else if (idx == 88)
         {
-            DEBUG_PRINT("[call]DF_GetTResource\n");
             uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_DF_GetTResource(tmp1);
+            vm_df_get_t_resource(tmp1, 0);
         }
         else if (idx == 89)
         {
-            DEBUG_PRINT("[call]DF_GetStreamTResource\n");
             uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_DF_GetStreamTResource(tmp1);
+            vm_df_get_t_resource(tmp1, 1);
         }
         else if (idx == 90)
         {

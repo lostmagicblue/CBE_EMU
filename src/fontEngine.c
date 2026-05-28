@@ -76,7 +76,7 @@ void drawFontChar(u16 gbCode, int x, int y, u16 color)
     }
     else
     {
-        printf("字库中不存在字符%x，无法绘制\n", gbCode);
+        // printf("字库中不存在字符%x，无法绘制\n", gbCode);
     }
     SDL_free(bitMapData);
 }

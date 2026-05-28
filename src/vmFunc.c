@@ -1,5 +1,9 @@
 #include "main.h"
 #include "gifDecode.h"
+#define STBI_ONLY_PNG
+#define STBI_NO_STDIO
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
 
 FILE *openFileList[16];
 #define VM_PSEUDO_DIR_HANDLE ((FILE *)-1)
@@ -134,6 +138,19 @@ int vm_memcpy(int dstAddr, int srcAddr, int len)
     uc_mem_read(MTK, srcAddr, &buff, len);
     uc_mem_write(MTK, dstAddr, &buff, len);
 }
+static int vm_is_pseudo_dir_path(const char *nameBuf)
+{
+    return strcmp(nameBuf, "./") == 0 || strcmp(nameBuf, ".\\") == 0;
+}
+
+static int vm_is_cbm_resource_path(const char *nameBuf)
+{
+    const char *ext = strrchr(nameBuf, '.');
+    if (ext == NULL)
+        return 0;
+    return strcasecmp(ext, ".cbm") == 0;
+}
+
 int vm_get_file_handle(char *nameBuf)
 {
     int handle = -1;
@@ -141,7 +158,7 @@ int vm_get_file_handle(char *nameBuf)
     {
         if (openFileList[i] == NULL)
         {
-            if (strcmp(nameBuf, "./") == 0 || strcmp(nameBuf, ".\\") == 0)
+            if (vm_is_pseudo_dir_path(nameBuf))
             {
                 openFileList[i] = VM_PSEUDO_DIR_HANDLE;
                 return i;
@@ -157,8 +174,12 @@ int vm_get_file_handle(char *nameBuf)
 }
 int vm_dir_exists(int a1)
 {
+    if (a1 == 0)
+        return vm_set_call_result(0);
     char nameBuf[1024];
     vm_readStringByPtr(a1, nameBuf);
+    if (strcmp(nameBuf, ".") == 0)
+        return vm_set_call_result(0);
     int r = dirExists(nameBuf);
     return vm_set_call_result(r);
 }
@@ -199,13 +220,17 @@ int vm_cbfs_vm_file_read(int bufferPtr, int size, int handle)
     if (readed > 0)
         uc_mem_write(MTK, bufferPtr, tmp, readed);
     SDL_free(tmp);
-    return readed;
+    return vm_set_call_result(readed);
 }
 // ok
 int vm_cbfs_vm_file_write(int bufferPtr, int size, int fileHandle)
 {
+    if (fileHandle < 0 || fileHandle >= 16 || openFileList[fileHandle] == NULL || size <= 0)
+        return vm_set_call_result(-1);
+    if (openFileList[fileHandle] == VM_PSEUDO_DIR_HANDLE)
+        return vm_set_call_result(0);
     void *buffer = SDL_malloc(size);
-    uc_mem_read(MTK, bufferPtr, &buffer, size);
+    uc_mem_read(MTK, bufferPtr, buffer, size);
     int r = fwrite(buffer, 1, size, openFileList[fileHandle]);
     SDL_free(buffer);
     return vm_set_call_result(r);
@@ -218,7 +243,6 @@ int vm_cbfs_vm_file_seek(int handle, int pos, int type)
     if (openFileList[handle] == VM_PSEUDO_DIR_HANDLE)
         return vm_set_call_result(0);
     int r = fseek(openFileList[handle], pos, type);
-    // printf("vm_cbfs_vm_file_seek:%x,%d\n", pos, type);
     return vm_set_call_result(r);
 }
 // ok
@@ -236,7 +260,7 @@ int vm_cbfs_vm_file_exists(int disk, int namePtr)
 {
     u8 charBuffer[1024];
     vm_readStringByPtr(namePtr, charBuffer);
-    if (strcmp((char *)charBuffer, "./") == 0 || strcmp((char *)charBuffer, ".\\") == 0)
+    if (vm_is_pseudo_dir_path((char *)charBuffer))
         return vm_set_call_result(1);
     FILE *f = fopen(charBuffer, "rb");
     u32 r = 0;
@@ -252,11 +276,15 @@ int vm_cbfs_vm_file_delete(int disk, int namePtr)
 {
     u8 charBuffer[1024];
     vm_readStringByPtr(namePtr, charBuffer);
+    if (vm_is_pseudo_dir_path((char *)charBuffer) || vm_is_cbm_resource_path((char *)charBuffer))
+        return vm_set_call_result(0);
     FILE *f = fopen(charBuffer, "rb");
     u32 r = 0;
     if (f != NULL)
+    {
         r = 1;
-    fclose(f);
+        fclose(f);
+    }
     if (r == 1)
         unlink(charBuffer);
     return vm_set_call_result(r);
@@ -407,12 +435,12 @@ int vm_DF_DataPackage_InitTxt(int a1, int a2)
     uc_mem_read(uc, a1 + 8, &count, 2);
     uc_mem_read(uc, a1 + 100, &txt_buffer, 4);
 
-    printf("DF_DataPackage_InitTxt 222:%x,%x\n", a2, count);
+    // printf("DF_DataPackage_InitTxt 222:%x,%x\n", a2, count);
 
     // 条件判断
     if (fileHandle < 0 || count <= index || txt_buffer)
     {
-        printf("DF_DataPackage_InitTxt error :%x\n", fileHandle);
+        // printf("DF_DataPackage_InitTxt error :%x\n", fileHandle);
         return 0;
     }
 
@@ -819,7 +847,7 @@ int vm_DF_DataPackage_LoadFormTCardEx(int a1, int pathPtr, int fileSeekPos)
     vm_cbfs_vm_file_seek(fileHandle, fileSeekPos, 0);
 
     int size = vm_DF_File_ReadInt(fileHandle);
-    printf("DF_DataPackage_LoadFormTCard2:%x\n", size);
+    // printf("DF_DataPackage_LoadFormTCard2:%x\n", size);
 
     int bufferPtr = 0;
     if (1)
@@ -854,7 +882,7 @@ int vm_DF_DataPackage_LoadFormTCardEx(int a1, int pathPtr, int fileSeekPos)
         vm_free_var(ptr);
     }
 
-    printf("DF_DataPackage_LoadFormTCard3333:%x,%x\n", count, minus1);
+    // printf("DF_DataPackage_LoadFormTCard3333:%x,%x\n", count, minus1);
 
     while (i < count)
     {
@@ -1102,7 +1130,7 @@ void vm_initDFDataPackage(u32 a1, u32 a2)
     uc_mem_write(MTK, a1 + 16, &tmp2, 4);
     uc_mem_write(MTK, a1 + 24, &tmp2, 4);
     uc_mem_write(MTK, a1 + 28, &tmp2, 4);
-    printf("vm_initDFDataPackage(%x,%x)\n", a1, a2); // debug
+    // printf("vm_initDFDataPackage(%x,%x)\n", a1, a2); // debug
     //*a1 = 1
     tmp2 = 1;
     uc_mem_write(MTK, a1, &tmp2, 1);
@@ -1802,32 +1830,64 @@ void vM_DrawImageWithClipEx()
     // u8 buffer[188];
     // uc_mem_read(MTK, srcPtr, buffer, 188);
     // printf("vM_DrawImageWithClipEx(srcPtr:%x,srcX:%d,srcY:%d,clipW:%d,clipH:%d,dstX:%d,dstY:%d)\n", srcPtr, srcX, srcY, w, h, dstX, dstY);
-    // todo 裁剪边界检查
-    if (w > src_w)
-        w = src_w;
-    if (h > src_h)
-        h = src_h;
-    if (srcY + h > src_h)
-        h = src_h - h;
+    if (srcPtr == 0 || w <= 0 || h <= 0 || src_w == 0 || src_h == 0)
+        return;
+
+    if (srcX < 0)
+    {
+        dstX -= srcX;
+        w += srcX;
+        srcX = 0;
+    }
+    if (srcY < 0)
+    {
+        dstY -= srcY;
+        h += srcY;
+        srcY = 0;
+    }
+    if (srcX >= src_w || srcY >= src_h)
+        return;
     if (srcX + w > src_w)
-        w = src_w - w;
+        w = src_w - srcX;
+    if (srcY + h > src_h)
+        h = src_h - srcY;
+    if (dstX < 0)
+    {
+        srcX -= dstX;
+        w += dstX;
+        dstX = 0;
+    }
+    if (dstY < 0)
+    {
+        srcY -= dstY;
+        h += dstY;
+        dstY = 0;
+    }
+    if (dstX >= LCD_WIDTH || dstY >= LCD_HEIGHT)
+        return;
+    if (dstX + w > LCD_WIDTH)
+        w = LCD_WIDTH - dstX;
+    if (dstY + h > LCD_HEIGHT)
+        h = LCD_HEIGHT - dstY;
+    if (w <= 0 || h <= 0)
+        return;
 
     int srcImgPitch = (((4 - src_w) & 3) + src_w) * 2; // 源图片的宽度按4像素对齐后再x2就是原图片一行像素占用的字节数
     int dstImgPicth = 2 * LCD_WIDTH;
+    int copyBytes = w * 2;
     for (int i = 0; i < h; i++)
     {
         int srcOffset = (i + srcY) * srcImgPitch + srcX * 2;
         u32 dstScreenOffset = (i + dstY) * dstImgPicth + dstX * 2;
 
-        uc_err r = uc_mem_read(MTK, srcPtr + srcOffset, Lcd_Cache_Buffer + dstScreenOffset, srcImgPitch);
+        uc_err r = uc_mem_read(MTK, srcPtr + srcOffset, Lcd_Cache_Buffer + dstScreenOffset, copyBytes);
         if (r != UC_ERR_OK)
         {
             printf("读取内存错误");
             assert(0);
         }
-        uc_mem_write(MTK, VM_screenImage_ADDRESS + dstScreenOffset, Lcd_Cache_Buffer + dstScreenOffset, srcImgPitch);
+        uc_mem_write(MTK, VM_screenImage_ADDRESS + dstScreenOffset, Lcd_Cache_Buffer + dstScreenOffset, copyBytes);
     }
-    return 0;
 }
 u16 blend565(u16 dst, u16 src, u8 a)
 {
@@ -1864,18 +1924,51 @@ void vm_vMDrawImageClipAndAlphaEx()
     uc_mem_read(MTK, srcInfo + 6, &src_h, 2);
     u8 tmpBuffer[480];
     // printf("vMDrawImageClipAndAlphaEx(sx:%d,sy:%d,w:%d,h:%d,dx:%d,dy:%d)\n", srcX, srcY, w, h, dstX, dstY);
-    // todo 裁剪边界检查
-    if (w > src_w)
-        w = src_w;
-    if (h > src_h)
-        h = src_h;
-    if (srcY + h > src_h)
-        h = src_h - h;
+    if (srcPtr == 0 || w <= 0 || h <= 0 || src_w == 0 || src_h == 0)
+        return;
+
+    if (srcX < 0)
+    {
+        dstX -= srcX;
+        w += srcX;
+        srcX = 0;
+    }
+    if (srcY < 0)
+    {
+        dstY -= srcY;
+        h += srcY;
+        srcY = 0;
+    }
+    if (srcX >= src_w || srcY >= src_h)
+        return;
     if (srcX + w > src_w)
-        w = src_w - w;
+        w = src_w - srcX;
+    if (srcY + h > src_h)
+        h = src_h - srcY;
+    if (dstX < 0)
+    {
+        srcX -= dstX;
+        w += dstX;
+        dstX = 0;
+    }
+    if (dstY < 0)
+    {
+        srcY -= dstY;
+        h += dstY;
+        dstY = 0;
+    }
+    if (dstX >= LCD_WIDTH || dstY >= LCD_HEIGHT)
+        return;
+    if (dstX + w > LCD_WIDTH)
+        w = LCD_WIDTH - dstX;
+    if (dstY + h > LCD_HEIGHT)
+        h = LCD_HEIGHT - dstY;
+    if (w <= 0 || h <= 0)
+        return;
 
     int srcImgPitch = (((4 - src_w) & 3) + src_w) * 2; // 源图片的宽度按4像素对齐后再x2就是原图片一行像素占用的字节数
     int dstImgPicth = 2 * LCD_WIDTH;
+    int copyBytes = w * 2;
     int special_alpha_map = 0;
 
     // 下面先写“通用”行为（没有单独 alpha map）：像素值为 0 表示透明
@@ -1888,7 +1981,7 @@ void vm_vMDrawImageClipAndAlphaEx()
         //     printf("dst screen offset 错误");
         //     assert(0);
         // }
-        uc_err r = uc_mem_read(MTK, srcPtr + srcOffset, tmpBuffer, srcImgPitch);
+        uc_err r = uc_mem_read(MTK, srcPtr + srcOffset, tmpBuffer, copyBytes);
         if (r != UC_ERR_OK)
         {
             printf("读取内存错误");
@@ -1926,7 +2019,7 @@ void vm_vMDrawImageClipAndAlphaEx()
                 }
             }
         }
-        uc_mem_write(MTK, VM_screenImage_ADDRESS + dstScreenOffset, Lcd_Cache_Buffer + dstScreenOffset, srcImgPitch);
+        uc_mem_write(MTK, VM_screenImage_ADDRESS + dstScreenOffset, Lcd_Cache_Buffer + dstScreenOffset, copyBytes);
     }
 }
 
@@ -2019,10 +2112,76 @@ int vm_gifDecode(int gifBufferPtr, int resultPtr)
 
 int vm_pngDecodeStart(int pngBufferPtr, int resultPtr)
 {
-    char buffer[102400]; // 由于不知道图片大小，预先读取100kb
-    char ret[32];
-    uc_mem_read(MTK, pngBufferPtr, buffer, mySizeOf(buffer));
-    uc_mem_write(MTK, resultPtr, ret, 12);
+    u8 hdr[8];
+    uc_mem_read(MTK, pngBufferPtr, hdr, sizeof(hdr));
+
+    u32 pngSize = ((u32)hdr[0] << 24) | ((u32)hdr[1] << 16) | ((u32)hdr[2] << 8) | hdr[3];
+    u16 headerWidth = ((u16)hdr[4] << 8) | hdr[5];
+    u16 headerHeight = ((u16)hdr[6] << 8) | hdr[7];
+    if (pngSize == 0 || pngSize > 1024 * 1024)
+    {
+        printf("PNG资源长度异常:%u\n", pngSize);
+        assert(0);
+    }
+
+    u8 *pngData = (u8 *)SDL_malloc(pngSize);
+    if (!pngData)
+    {
+        printf("PNG临时内存申请失败:%u\n", pngSize);
+        assert(0);
+    }
+    uc_mem_read(MTK, pngBufferPtr + 8, pngData, pngSize);
+
+    int w = 0, h = 0, comp = 0;
+    u8 *rgba = stbi_load_from_memory(pngData, (int)pngSize, &w, &h, &comp, 4);
+    SDL_free(pngData);
+    if (!rgba)
+    {
+        printf("PNG解码失败:%s\n", stbi_failure_reason());
+        assert(0);
+    }
+    if (headerWidth && headerWidth != w)
+        w = headerWidth;
+    if (headerHeight && headerHeight != h)
+        h = headerHeight;
+
+    u32 pitchPixels = ((4 - (u32)w) & 3) + (u32)w;
+    u32 pixelBytes = pitchPixels * (u32)h * 2;
+    u32 vmPtr = vm_malloc(pixelBytes);
+    u16 *rgb565 = (u16 *)SDL_malloc(pixelBytes);
+    if (!rgb565)
+    {
+        stbi_image_free(rgba);
+        printf("PNG像素内存申请失败:%u\n", pixelBytes);
+        assert(0);
+    }
+    memset(rgb565, 0, pixelBytes);
+    for (int y = 0; y < h; ++y)
+    {
+        for (int x = 0; x < w; ++x)
+        {
+            u8 *px = rgba + (y * w + x) * 4;
+            u8 a = px[3];
+            if (a == 0)
+                continue;
+            u8 r = px[0];
+            u8 g = px[1];
+            u8 b = px[2];
+            rgb565[y * pitchPixels + x] = (u16)(((r & 0xf8) << 8) | ((g & 0xfc) << 3) | (b >> 3));
+        }
+    }
+
+    uc_mem_write(MTK, vmPtr, rgb565, pixelBytes);
+    SDL_free(rgb565);
+    stbi_image_free(rgba);
+
+    vm_img_result ret;
+    memset(&ret, 0, sizeof(ret));
+    ret.pixelsPtr = vmPtr;
+    ret.width = (short)w;
+    ret.height = (short)h;
+    ret.need_free = 1;
+    uc_mem_write(MTK, resultPtr, &ret, sizeof(ret));
     return vm_set_call_result(resultPtr);
 }
 

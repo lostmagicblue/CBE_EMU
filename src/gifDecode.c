@@ -1,7 +1,7 @@
 #include "gifDecode.h"
 
 /* ==================== 调试宏 ==================== */
-#define GIF2BMP_DEBUG 1
+#define GIF2BMP_DEBUG 0
 #if GIF2BMP_DEBUG
 #define LOG_TRACE(fmt, ...) printf(fmt "\n", ##__VA_ARGS__)
 #else
