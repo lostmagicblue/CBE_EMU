@@ -147,6 +147,26 @@ static vm_timer_task g_timerTasks[VM_SCHED_MAX_TIMERS];
 static u32 g_schedulerStartTicks = 0;
 static u32 g_nextNetConnectId = 1;
 
+static uc_err add_manager_code_hooks(uc_engine *uc);
+
+static bool vm_address_in_range(u32 address, u32 begin, u32 size)
+{
+    return address >= begin && address < begin + size;
+}
+
+static bool vm_is_manager_func_stub_address(u32 address)
+{
+    if (vm_address_in_range(address, VM_MANAGER_FUNC_LIST_ADDRESS, VM_VIDEO_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE - VM_MANAGER_FUNC_LIST_ADDRESS))
+        return true;
+    if (vm_address_in_range(address, VM_DL_RS_FUNC_LIST_ADDRESS, VM_DL_IMAGE_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE - VM_DL_RS_FUNC_LIST_ADDRESS))
+        return true;
+    if (vm_address_in_range(address, VM_MF_MemoryBlock_FUNC_LIST_ADDRESS, VM_APPSTORE_FUNC_LIST_ADDRESS - VM_MF_MemoryBlock_FUNC_LIST_ADDRESS))
+        return true;
+    if (vm_address_in_range(address, VM_APPSTORE_FUNC_LIST_ADDRESS, VM_MANAGER_FUNC_LIST_SIZE))
+        return true;
+    return false;
+}
+
 static u32 vm_read_host_le32(const u8 *p)
 {
     return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
@@ -1372,6 +1392,8 @@ int main(int argc, char *args[])
     }
 
     err = uc_hook_add(MTK, &trace, UC_HOOK_CODE, hookCodeCallBack, 0, 0, 0xFFFFFFFF);
+    if (err == UC_ERR_OK)
+        err = add_manager_code_hooks(MTK);
     //    err = uc_hook_add(MTK, &trace, UC_HOOK_BLOCK, hookBlockCallBack, 0, 0, 0xFFFFFFFF);
 
     uc_hook_add(MTK, &trace, UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, hookRamCallBack, 0, 0, 0xFFFFFFFF);
@@ -1451,291 +1473,13 @@ void hookBlockCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *use
  * pc指针指向此地址时执行(未执行此地址的指令)
  */
 
-void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+static bool hook_vm_manager_func(u32 address)
 {
+    if (!(address >= VM_MANAGER_FUNC_LIST_ADDRESS && address < VM_MANAGER_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
+        return false;
+
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-#ifdef GDB_SERVER_SUPPORT
-    tmp2 = gdbTarget.simulate_pc_count;
-    if (tmp2 == 0)
-    {
-        for (tmp1 = 0; tmp1 < gdbTarget.num_breakpoints; tmp1++)
-        {
-            if (gdbTarget.breakpoints[tmp1] == address)
-            {
-                gdbTarget.running = 0;
-                gdbTarget.last_stop_reason = 0x05;
-                tmp2 = 1;
-                break;
-            }
-        }
-    }
-    else
-    {
-        gdbTarget.running = 0;
-        gdbTarget.simulate_pc_count--;
-        gdbTarget.last_stop_reason = 0x05;
-    }
-    if (tmp2)
-    {
-        char response[32];
-        sprintf(response, "S%02x", gdbTarget.last_stop_reason);
-        send_gdb_response(&clients[0], response);
-        while (gdbTarget.running == 0)
-            ;
-    }
-#endif
-    if (((u32)address & ~1u) == PROGRAM_EXIT_ADDR)
-    {
-        normalize_program_exit_pc(g_currentEmuEntry);
-        uc_emu_stop(MTK);
-        return;
-    }
-    if (((u32)address & ~1u) == 0x103b07c)
-    {
-        vm_set_call_result(0);
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return;
-    }
-    if (((u32)address & ~1u) == 0x103a02e)
-    {
-        vm_set_call_result(0);
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return;
-    }
-    if (((u32)address & ~1u) == VM_FAKE_IMAGE_WIDTH_FUNC_ADDRESS)
-    {
-        u32 picLib = 0;
-        u32 index = 0;
-        u32 itemTable = 0;
-        u32 imageObj = 0;
-        u16 imageWidth = 0;
-        uc_reg_read(MTK, UC_ARM_REG_R0, &picLib);
-        uc_reg_read(MTK, UC_ARM_REG_R1, &index);
-        if (picLib)
-        {
-            uc_mem_read(MTK, picLib + 0x10, &itemTable, 4);
-            if (itemTable)
-                uc_mem_read(MTK, itemTable + index * 4, &imageObj, 4);
-        }
-        if (imageObj == 0)
-            imageObj = picLib;
-        if (imageObj)
-            uc_mem_read(MTK, imageObj + 4, &imageWidth, 2);
-        tmp1 = (imageWidth > 0 && imageWidth <= LCD_WIDTH) ? imageWidth : 240;
-        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return;
-    }
-    if (((u32)address & ~1u) == VM_FAKE_IMAGE_HEIGHT_FUNC_ADDRESS)
-    {
-        u32 picLib = 0;
-        u32 index = 0;
-        u32 itemTable = 0;
-        u32 imageObj = 0;
-        u16 imageHeight = 0;
-        uc_reg_read(MTK, UC_ARM_REG_R0, &picLib);
-        uc_reg_read(MTK, UC_ARM_REG_R1, &index);
-        if (picLib)
-        {
-            uc_mem_read(MTK, picLib + 0x10, &itemTable, 4);
-            if (itemTable)
-                uc_mem_read(MTK, itemTable + index * 4, &imageObj, 4);
-        }
-        if (imageObj == 0)
-            imageObj = picLib;
-        if (imageObj)
-            uc_mem_read(MTK, imageObj + 6, &imageHeight, 2);
-        tmp1 = (imageHeight > 0 && imageHeight <= LCD_HEIGHT) ? imageHeight : 32;
-        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return;
-    }
-    if (((u32)address & ~1u) == VM_FAKE_IMAGE_DRAW_FUNC_ADDRESS)
-    {
-        u32 picLib = 0;
-        u32 index = 0;
-        u32 itemTable = 0;
-        u32 imageObj = 0;
-        u32 pixels = 0;
-        u16 imageWidth = 0;
-        u16 imageHeight = 0;
-        int dstX = 0;
-        int dstY = 0;
-        uc_reg_read(MTK, UC_ARM_REG_R0, &picLib);
-        uc_reg_read(MTK, UC_ARM_REG_R1, &index);
-        uc_reg_read(MTK, UC_ARM_REG_R2, &dstX);
-        uc_reg_read(MTK, UC_ARM_REG_R3, &dstY);
-        if (picLib)
-        {
-            uc_mem_read(MTK, picLib + 0x10, &itemTable, 4);
-            if (itemTable)
-                uc_mem_read(MTK, itemTable + index * 4, &imageObj, 4);
-        }
-        if (imageObj == 0)
-            imageObj = picLib;
-        if (imageObj)
-        {
-            uc_mem_read(MTK, imageObj, &pixels, 4);
-            uc_mem_read(MTK, imageObj + 4, &imageWidth, 2);
-            uc_mem_read(MTK, imageObj + 6, &imageHeight, 2);
-        }
-        if (pixels && imageWidth && imageHeight)
-        {
-            u32 srcPitch = (((4 - imageWidth) & 3) + imageWidth) * 2;
-            int startX = dstX < 0 ? -dstX : 0;
-            int startY = dstY < 0 ? -dstY : 0;
-            int copyW = imageWidth - startX;
-            int copyH = imageHeight - startY;
-            if (dstX + startX + copyW > LCD_WIDTH)
-                copyW = LCD_WIDTH - (dstX + startX);
-            if (dstY + startY + copyH > LCD_HEIGHT)
-                copyH = LCD_HEIGHT - (dstY + startY);
-            if (copyW > 0 && copyH > 0)
-            {
-                u8 rowBuffer[480];
-                for (int row = 0; row < copyH; ++row)
-                {
-                    u32 srcOff = (startY + row) * srcPitch + startX * 2;
-                    u32 dstOff = ((dstY + startY + row) * LCD_WIDTH + dstX + startX) * 2;
-                    uc_mem_read(MTK, pixels + srcOff, rowBuffer, copyW * 2);
-                    u16 *dst = (u16 *)(Lcd_Cache_Buffer + dstOff);
-                    u16 *src = (u16 *)rowBuffer;
-                    for (int col = 0; col < copyW; ++col)
-                    {
-                        if (src[col] != 0)
-                            dst[col] = src[col];
-                    }
-                    uc_mem_write(MTK, VM_screenImage_ADDRESS + dstOff, Lcd_Cache_Buffer + dstOff, copyW * 2);
-                }
-            }
-        }
-        tmp1 = 0;
-        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return;
-    }
-    if (((u32)address & ~1u) == VM_FAKE_IMAGE_LOOKUP_FUNC_ADDRESS)
-    {
-        u32 namePtr = 0;
-        uc_reg_read(MTK, UC_ARM_REG_R1, &namePtr);
-        tmp1 = 0;
-        if (namePtr)
-        {
-            vm_readStringByPtr(namePtr, cbeTextString);
-            if (strcmp((char *)cbeTextString, "UI8.gif") == 0)
-                tmp1 = 1;
-            else if (strcmp((char *)cbeTextString, "UI7.gif") == 0)
-                tmp1 = 2;
-            else if (strcmp((char *)cbeTextString, "flowerStyle.gif") == 0)
-                tmp1 = 3;
-            else if (strcmp((char *)cbeTextString, "loading.gif") == 0)
-                tmp1 = 4;
-        }
-        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return;
-    }
-    if (address == 0x10189e4)
-    {
-        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp1);
-        if (tmp1 == 0)
-        {
-            tmp1 = 240;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-            tmp1 = 0x10189e7;
-            vm_bx(tmp1);
-            return;
-        }
-    }
-    if (address == 0x10189f2)
-    {
-        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp1);
-        if (tmp1 == 0)
-        {
-            tmp1 = 32;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-            tmp1 = 0x10189f5;
-            vm_bx(tmp1);
-            return;
-        }
-    }
-    if (address == 0x1039e2c || address == 0x1039e3a)
-    {
-        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp1);
-        if (tmp1 == 0)
-        {
-            tmp1 = (address == 0x1039e2c) ? 240 : 32;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-            tmp1 = ((u32)address + 2) | 1;
-            vm_bx(tmp1);
-            return;
-        }
-    }
-    if (address == 0x1018946 || address == 0x1018966 || address == 0x1018984 || address == 0x10189a4)
-    {
-        uc_reg_read(MTK, UC_ARM_REG_R6, &tmp1);
-        if (tmp1 == 0)
-        {
-            tmp2 = 0;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp2);
-            tmp2 = ((u32)address + 2) | 1;
-            vm_bx(tmp2);
-            return;
-        }
-    }
-    if (address == 0x103ab4c || address == 0x103ab9a || address == 0x103abe0 || address == 0x103ac1a || address == 0x103ac6e)
-    {
-        uc_reg_read(MTK, UC_ARM_REG_R6, &tmp1);
-        if (tmp1 == 0)
-        {
-            tmp2 = 0;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp2);
-            tmp2 = ((u32)address + 2) | 1;
-            vm_bx(tmp2);
-            return;
-        }
-    }
-    if (address == 0x10025c6)
-    {
-        uc_reg_read(MTK, UC_ARM_REG_SP, &tmp1);
-        uc_mem_read(MTK, tmp1 + 12, &tmp2, 4);
-        if ((tmp2 & ~1u) == PROGRAM_EXIT_ADDR)
-        {
-            uc_emu_stop(MTK);
-            return;
-        }
-    }
-    // if (address == ROM_ADDRESS + 0x3C72 - 0x98)
-    // {
-    //     uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-    //     printf("logic n2:%x\n", tmp1);
-    //     // tmp1 = 4;
-    //     // uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-    // }
-    // if (address == 0x10141D2)
-    // {
-    //     dumpCpuInfo();
-    //     assert(0);
-    // }
-    if (address == VM_LOG_TRACE_ADDRESS)
-    {
-        // vm_log_trace only emits firmware-side diagnostics; keep it silent during normal emulation.
-        // vm_readStringByReg(UC_ARM_REG_R0, cbeTextString);
-        // printf("[vm_log_trace]");
-        // vm_sprintf();
-        // bx lr实现
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-    }
-    else if (address >= VM_MANAGER_FUNC_LIST_ADDRESS && address < VM_MANAGER_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)
-    {
         u32 idx = (address - VM_MANAGER_FUNC_LIST_ADDRESS) / 4;
         if (idx == 1)
         {
@@ -1986,9 +1730,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         // bx lr实现
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
-    }
-    else if (address >= VM_SYS_MANAGER_FUNC_LIST_ADDRESS && address < (VM_SYS_MANAGER_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
-    {
+        return true;
+}
+
+static bool hook_vm_sys_manager_func(u32 address)
+{
+    if (!(address >= VM_SYS_MANAGER_FUNC_LIST_ADDRESS && address < (VM_SYS_MANAGER_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
         u32 idx = (address - VM_SYS_MANAGER_FUNC_LIST_ADDRESS) / 4;
         if (idx == 0)
         {
@@ -2629,9 +2380,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         // bx lr实现
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
-    }
-    else if (address >= VM_MEMORY_MANAGER_FUNC_LIST_ADDRESS && address < (VM_MEMORY_MANAGER_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
-    {
+        return true;
+}
+
+static bool hook_vm_memory_manager_func(u32 address)
+{
+    if (!(address >= VM_MEMORY_MANAGER_FUNC_LIST_ADDRESS && address < (VM_MEMORY_MANAGER_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
         u32 idx = (address - VM_MEMORY_MANAGER_FUNC_LIST_ADDRESS) / 4;
         if (idx == 0)
         {
@@ -2779,9 +2537,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         // bx lr实现
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
-    }
-    else if (address >= VM_MANAGER_LCD_FUNC_LIST_ADDRESS && address < (VM_MANAGER_LCD_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
-    {
+        return true;
+}
+
+static bool hook_vm_manager_lcd_func(u32 address)
+{
+    if (!(address >= VM_MANAGER_LCD_FUNC_LIST_ADDRESS && address < (VM_MANAGER_LCD_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
         u32 idx = (address - VM_MANAGER_LCD_FUNC_LIST_ADDRESS) / 4;
         idx += 1;
         if (idx == 1)
@@ -3538,9 +3303,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         // bx lr实现
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
-    }
-    else if (address >= VM_MANAGER_FILEIO_FUNC_LIST_ADDRESS && address < (VM_MANAGER_FILEIO_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
-    {
+        return true;
+}
+
+static bool hook_vm_manager_fileio_func(u32 address)
+{
+    if (!(address >= VM_MANAGER_FILEIO_FUNC_LIST_ADDRESS && address < (VM_MANAGER_FILEIO_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
         u32 idx = (address - VM_MANAGER_FILEIO_FUNC_LIST_ADDRESS) / 4;
         idx += 1;
         if (idx == 1)
@@ -3724,9 +3496,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         // bx lr实现
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
-    }
-    else if (address >= VM_MANAGER_STDIO_FUNC_LIST_ADDRESS && address < (VM_MANAGER_STDIO_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
-    {
+        return true;
+}
+
+static bool hook_vm_manager_stdio_func(u32 address)
+{
+    if (!(address >= VM_MANAGER_STDIO_FUNC_LIST_ADDRESS && address < (VM_MANAGER_STDIO_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
         u32 idx = (address - VM_MANAGER_STDIO_FUNC_LIST_ADDRESS) / 4;
         idx += 1;
         if (idx == 1)
@@ -3864,9 +3643,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         // bx lr实现
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
-    }
-    else if (address >= VM_MANAGER_TIMER_FUNC_LIST_ADDRESS && address < (VM_MANAGER_TIMER_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
-    {
+        return true;
+}
+
+static bool hook_vm_manager_timer_func(u32 address)
+{
+    if (!(address >= VM_MANAGER_TIMER_FUNC_LIST_ADDRESS && address < (VM_MANAGER_TIMER_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
         u32 idx = (address - VM_MANAGER_TIMER_FUNC_LIST_ADDRESS) / 4;
         if (idx == 0)
         {
@@ -3927,9 +3713,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         // bx lr实现
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
-    }
-    else if (address >= VM_MANAGER_CTRL_FUNC_LIST_ADDRESS && address < (VM_MANAGER_CTRL_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
-    {
+        return true;
+}
+
+static bool hook_vm_manager_ctrl_func(u32 address)
+{
+    if (!(address >= VM_MANAGER_CTRL_FUNC_LIST_ADDRESS && address < (VM_MANAGER_CTRL_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
         u32 idx = (address - VM_MANAGER_CTRL_FUNC_LIST_ADDRESS) / 4;
 
         {
@@ -3939,9 +3732,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         // bx lr实现
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
-    }
-    else if (address >= VM_MANAGER_NETWORK_FUNC_LIST_ADDRESS && address < (VM_MANAGER_NETWORK_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
-    {
+        return true;
+}
+
+static bool hook_vm_manager_network_func(u32 address)
+{
+    if (!(address >= VM_MANAGER_NETWORK_FUNC_LIST_ADDRESS && address < (VM_MANAGER_NETWORK_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
         u32 idx = (address - VM_MANAGER_NETWORK_FUNC_LIST_ADDRESS) / 4;
         DEBUG_PRINT("[probe_net_idx] idx=%u last=%x\n", idx, lastAddress);
         if (idx == 0)
@@ -4015,9 +3815,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         // bx lr实现
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
-    }
-    else if (address >= VM_MANAGER_GAME_UTIL_FUNC_LIST_ADDRESS && address < (VM_MANAGER_GAME_UTIL_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
-    {
+        return true;
+}
+
+static bool hook_vm_manager_game_util_func(u32 address)
+{
+    if (!(address >= VM_MANAGER_GAME_UTIL_FUNC_LIST_ADDRESS && address < (VM_MANAGER_GAME_UTIL_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
         u32 idx = (address - VM_MANAGER_GAME_UTIL_FUNC_LIST_ADDRESS) / 4;
         idx += 1;
         if (idx == 2)
@@ -4214,10 +4021,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         // bx lr实现
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
-    }
-    // df
-    else if (address >= VM_MANAGER_DF_ENGINE_FUNC_LIST_ADDRESS && address < (VM_MANAGER_DF_ENGINE_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
-    {
+        return true;
+}
+
+static bool hook_vm_manager_df_engine_func(u32 address)
+{
+    if (!(address >= VM_MANAGER_DF_ENGINE_FUNC_LIST_ADDRESS && address < (VM_MANAGER_DF_ENGINE_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
         u32 idx = (address - VM_MANAGER_DF_ENGINE_FUNC_LIST_ADDRESS) / 4;
         if (idx == 8)
         {
@@ -4241,10 +4054,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         // bx lr实现
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
-    }
-    //
-    else if (address >= VM_MANAGER_BILLING_FUNC_LIST_ADDRESS && address < (VM_MANAGER_BILLING_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
-    {
+        return true;
+}
+
+static bool hook_vm_manager_billing_func(u32 address)
+{
+    if (!(address >= VM_MANAGER_BILLING_FUNC_LIST_ADDRESS && address < (VM_MANAGER_BILLING_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
         u32 idx = (address - VM_MANAGER_BILLING_FUNC_LIST_ADDRESS) / 4;
         idx += 1;
         if (idx == 1)
@@ -4451,11 +4270,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         // bx lr实现
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
-    }
+        return true;
+}
 
-    // ucs2
-    else if (address >= VM_MANAGER_UCS2_FUNC_LIST_ADDRESS && address < (VM_MANAGER_UCS2_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
-    {
+static bool hook_vm_manager_ucs2_func(u32 address)
+{
+    if (!(address >= VM_MANAGER_UCS2_FUNC_LIST_ADDRESS && address < (VM_MANAGER_UCS2_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
         u32 idx = (address - VM_MANAGER_UCS2_FUNC_LIST_ADDRESS) / 4;
         idx += 1;
         if (idx == 1)
@@ -4530,9 +4354,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         // bx lr实现
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
-    }
-    else if (address >= VM_MANAGER_SCREEN_FUNC_LIST_ADDRESS && address < (VM_MANAGER_SCREEN_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
-    {
+        return true;
+}
+
+static bool hook_vm_manager_screen_func(u32 address)
+{
+    if (!(address >= VM_MANAGER_SCREEN_FUNC_LIST_ADDRESS && address < (VM_MANAGER_SCREEN_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
         u32 idx = (address - VM_MANAGER_SCREEN_FUNC_LIST_ADDRESS) / 4;
         if (idx == 0)
         {
@@ -4556,11 +4387,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         }
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
-    }
-    //
-    // df scr
-    else if (address >= VM_MANAGER_DF_SCRIPT_FUNC_LIST_ADDRESS && address < (VM_MANAGER_DF_SCRIPT_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
-    {
+        return true;
+}
+
+static bool hook_vm_manager_df_script_func(u32 address)
+{
+    if (!(address >= VM_MANAGER_DF_SCRIPT_FUNC_LIST_ADDRESS && address < (VM_MANAGER_DF_SCRIPT_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
         u32 idx = (address - VM_MANAGER_DF_SCRIPT_FUNC_LIST_ADDRESS) / 4;
         if (idx == 0)
         {
@@ -4575,11 +4411,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         // bx lr实现
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
-    }
-    //
-    // game lcd
-    else if (address >= VM_MANAGER_GAME_LCD_FUNC_LIST_ADDRESS && address < (VM_MANAGER_GAME_LCD_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
-    {
+        return true;
+}
+
+static bool hook_vm_manager_game_lcd_func(u32 address)
+{
+    if (!(address >= VM_MANAGER_GAME_LCD_FUNC_LIST_ADDRESS && address < (VM_MANAGER_GAME_LCD_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
         u32 idx = (address - VM_MANAGER_GAME_LCD_FUNC_LIST_ADDRESS) / 4;
         if (idx == 0)
         {
@@ -4610,11 +4451,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         // bx lr实现
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
-    }
-    //
-    // net app
-    else if (address >= VM_MANAGER_NETAPP_FUNC_LIST_ADDRESS && address < (VM_MANAGER_NETAPP_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
-    {
+        return true;
+}
+
+static bool hook_vm_manager_netapp_func(u32 address)
+{
+    if (!(address >= VM_MANAGER_NETAPP_FUNC_LIST_ADDRESS && address < (VM_MANAGER_NETAPP_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
         u32 idx = (address - VM_MANAGER_NETAPP_FUNC_LIST_ADDRESS) / 4;
         if (idx == 60)
         {
@@ -4638,11 +4484,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         // bx lr实现
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
-    }
-    //
-    // audio
-    else if (address >= VM_MANAGER_AUDIO_FUNC_LIST_ADDRESS && address < (VM_MANAGER_AUDIO_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
-    {
+        return true;
+}
+
+static bool hook_vm_manager_audio_func(u32 address)
+{
+    if (!(address >= VM_MANAGER_AUDIO_FUNC_LIST_ADDRESS && address < (VM_MANAGER_AUDIO_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
         u32 idx = (address - VM_MANAGER_AUDIO_FUNC_LIST_ADDRESS) / 4;
         idx += 1;
         if (idx == 1)
@@ -4813,11 +4664,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         // bx lr实现
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
-    }
-    //
-    // sensor
-    else if (address >= VM_MANAGER_SENSOR_FUNC_LIST_ADDRESS && address < (VM_MANAGER_SENSOR_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
-    {
+        return true;
+}
+
+static bool hook_vm_manager_sensor_func(u32 address)
+{
+    if (!(address >= VM_MANAGER_SENSOR_FUNC_LIST_ADDRESS && address < (VM_MANAGER_SENSOR_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
         u32 idx = (address - VM_MANAGER_SENSOR_FUNC_LIST_ADDRESS) / 4;
         if (1)
         {
@@ -4827,11 +4683,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         // bx lr实现
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
-    }
-    //
-    // vmim
-    else if (address >= VM_MANAGER_VMIM_FUNC_LIST_ADDRESS && address < (VM_MANAGER_VMIM_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
-    {
+        return true;
+}
+
+static bool hook_vm_manager_vmim_func(u32 address)
+{
+    if (!(address >= VM_MANAGER_VMIM_FUNC_LIST_ADDRESS && address < (VM_MANAGER_VMIM_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
         u32 idx = (address - VM_MANAGER_VMIM_FUNC_LIST_ADDRESS) / 4;
         if (idx == 0)
         {
@@ -4881,10 +4742,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         // bx lr实现
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
-    }
-    //
-    else if (address >= VM_MANAGER_GAMEOLD_FUNC_LIST_ADDRESS && address < (VM_MANAGER_GAMEOLD_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
-    {
+        return true;
+}
+
+static bool hook_vm_manager_gameold_func(u32 address)
+{
+    if (!(address >= VM_MANAGER_GAMEOLD_FUNC_LIST_ADDRESS && address < (VM_MANAGER_GAMEOLD_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
         u32 idx = (address - VM_MANAGER_GAMEOLD_FUNC_LIST_ADDRESS) / 4;
         idx += 1;
         if (idx == 1)
@@ -5319,9 +5186,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         // bx lr实现
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
-    }
-    else if (address >= VM_DF_DATAPACKAGE_FUNC_LIST_ADDRESS && address < (VM_DF_DATAPACKAGE_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
-    {
+        return true;
+}
+
+static bool hook_vm_df_datapackage_func(u32 address)
+{
+    if (!(address >= VM_DF_DATAPACKAGE_FUNC_LIST_ADDRESS && address < (VM_DF_DATAPACKAGE_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
         u32 idx = (address - VM_DF_DATAPACKAGE_FUNC_LIST_ADDRESS) / 4;
         idx += 1;
         if (idx == 1)
@@ -5410,9 +5284,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         // bx lr实现
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
-    }
-    else if (address >= VM_MF_MemoryBlock_FUNC_LIST_ADDRESS && address < (VM_MF_MemoryBlock_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
-    {
+        return true;
+}
+
+static bool hook_vm_mf_memoryblock_func(u32 address)
+{
+    if (!(address >= VM_MF_MemoryBlock_FUNC_LIST_ADDRESS && address < (VM_MF_MemoryBlock_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
         u32 idx = (address - VM_MF_MemoryBlock_FUNC_LIST_ADDRESS) / 4;
         idx += 1;
         if (idx == 1)
@@ -5443,9 +5324,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         // bx lr实现
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
-    }
-    else if (address >= VM_APPSTORE_FUNC_LIST_ADDRESS && address < (VM_APPSTORE_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
-    {
+        return true;
+}
+
+static bool hook_vm_appstore_func(u32 address)
+{
+    if (!(address >= VM_APPSTORE_FUNC_LIST_ADDRESS && address < (VM_APPSTORE_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
         u32 idx = (address - VM_APPSTORE_FUNC_LIST_ADDRESS) / 4;
         idx += 1;
         if (idx == 1)
@@ -5649,9 +5537,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         // bx lr实现
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
-    }
-    else if (address >= VM_DL_LOAD_FUNC_LIST_ADDRESS && address < (VM_DL_LOAD_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
-    {
+        return true;
+}
+
+static bool hook_vm_dl_load_func(u32 address)
+{
+    if (!(address >= VM_DL_LOAD_FUNC_LIST_ADDRESS && address < (VM_DL_LOAD_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
         u32 idx = (address - VM_DL_LOAD_FUNC_LIST_ADDRESS) / 4;
         if (idx == 0)
         {
@@ -5715,9 +5610,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         } // bx lr实现
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
-    }
-    else if (address >= VM_DL_RS_FUNC_LIST_ADDRESS && address < (VM_DL_RS_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
-    {
+        return true;
+}
+
+static bool hook_vm_dl_rs_func(u32 address)
+{
+    if (!(address >= VM_DL_RS_FUNC_LIST_ADDRESS && address < (VM_DL_RS_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
         u32 idx = (address - VM_DL_RS_FUNC_LIST_ADDRESS) / 4;
         if (idx == 0)
         {
@@ -5755,9 +5657,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         }
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
-    }
-    else if (address >= VM_DL_IMAGE_FUNC_LIST_ADDRESS && address < (VM_DL_IMAGE_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
-    {
+        return true;
+}
+
+static bool hook_vm_dl_image_func(u32 address)
+{
+    if (!(address >= VM_DL_IMAGE_FUNC_LIST_ADDRESS && address < (VM_DL_IMAGE_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
         u32 idx = (address - VM_DL_IMAGE_FUNC_LIST_ADDRESS) / 4;
         if (idx == 4)
         {
@@ -5779,9 +5688,16 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         }
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
-    }
-    else if (address >= VM_VIDEO_FUNC_LIST_ADDRESS && address < (VM_VIDEO_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
-    {
+        return true;
+}
+
+static bool hook_vm_video_func(u32 address)
+{
+    if (!(address >= VM_VIDEO_FUNC_LIST_ADDRESS && address < (VM_VIDEO_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
         u32 idx = (address - VM_VIDEO_FUNC_LIST_ADDRESS) / 4;
         if (idx == 0)
         {
@@ -5978,6 +5894,508 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
             printf("vmVideoManager位置:%d \n", idx);
             assert(0);
         }
+        return true;
+}
+static void hook_vm_manager_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_manager_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_sys_manager_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_sys_manager_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_memory_manager_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_memory_manager_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_manager_lcd_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_manager_lcd_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_manager_fileio_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_manager_fileio_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_manager_stdio_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_manager_stdio_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_manager_timer_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_manager_timer_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_manager_ctrl_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_manager_ctrl_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_manager_network_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_manager_network_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_manager_game_util_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_manager_game_util_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_manager_df_engine_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_manager_df_engine_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_manager_billing_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_manager_billing_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_manager_ucs2_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_manager_ucs2_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_manager_screen_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_manager_screen_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_manager_df_script_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_manager_df_script_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_manager_game_lcd_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_manager_game_lcd_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_manager_netapp_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_manager_netapp_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_manager_audio_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_manager_audio_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_manager_sensor_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_manager_sensor_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_manager_vmim_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_manager_vmim_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_manager_gameold_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_manager_gameold_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_df_datapackage_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_df_datapackage_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_mf_memoryblock_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_mf_memoryblock_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_appstore_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_appstore_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_dl_load_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_dl_load_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_dl_rs_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_dl_rs_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_dl_image_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_dl_image_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_video_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_video_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static uc_err add_manager_code_hooks(uc_engine *uc)
+{
+    uc_hook hook;
+    uc_err err;
+#define ADD_MANAGER_CODE_HOOK_RANGE(begin, end, cb) \
+    do \
+    { \
+        err = uc_hook_add(uc, &hook, UC_HOOK_CODE, cb, NULL, begin, end); \
+        if (err != UC_ERR_OK) \
+            return err; \
+    } while (0)
+#define ADD_MANAGER_CODE_HOOK(begin, cb) ADD_MANAGER_CODE_HOOK_RANGE(begin, begin + VM_MANAGER_FUNC_LIST_SIZE - 1, cb)
+
+    ADD_MANAGER_CODE_HOOK(VM_MANAGER_FUNC_LIST_ADDRESS, hook_vm_manager_code_callback);
+    ADD_MANAGER_CODE_HOOK(VM_SYS_MANAGER_FUNC_LIST_ADDRESS, hook_vm_sys_manager_code_callback);
+    ADD_MANAGER_CODE_HOOK(VM_MEMORY_MANAGER_FUNC_LIST_ADDRESS, hook_vm_memory_manager_code_callback);
+    ADD_MANAGER_CODE_HOOK(VM_MANAGER_LCD_FUNC_LIST_ADDRESS, hook_vm_manager_lcd_code_callback);
+    ADD_MANAGER_CODE_HOOK(VM_MANAGER_FILEIO_FUNC_LIST_ADDRESS, hook_vm_manager_fileio_code_callback);
+    ADD_MANAGER_CODE_HOOK(VM_MANAGER_STDIO_FUNC_LIST_ADDRESS, hook_vm_manager_stdio_code_callback);
+    ADD_MANAGER_CODE_HOOK(VM_MANAGER_TIMER_FUNC_LIST_ADDRESS, hook_vm_manager_timer_code_callback);
+    ADD_MANAGER_CODE_HOOK(VM_MANAGER_CTRL_FUNC_LIST_ADDRESS, hook_vm_manager_ctrl_code_callback);
+    ADD_MANAGER_CODE_HOOK(VM_MANAGER_NETWORK_FUNC_LIST_ADDRESS, hook_vm_manager_network_code_callback);
+    ADD_MANAGER_CODE_HOOK(VM_MANAGER_GAME_UTIL_FUNC_LIST_ADDRESS, hook_vm_manager_game_util_code_callback);
+    ADD_MANAGER_CODE_HOOK(VM_MANAGER_DF_ENGINE_FUNC_LIST_ADDRESS, hook_vm_manager_df_engine_code_callback);
+    ADD_MANAGER_CODE_HOOK(VM_MANAGER_BILLING_FUNC_LIST_ADDRESS, hook_vm_manager_billing_code_callback);
+    ADD_MANAGER_CODE_HOOK(VM_MANAGER_UCS2_FUNC_LIST_ADDRESS, hook_vm_manager_ucs2_code_callback);
+    ADD_MANAGER_CODE_HOOK(VM_MANAGER_SCREEN_FUNC_LIST_ADDRESS, hook_vm_manager_screen_code_callback);
+    ADD_MANAGER_CODE_HOOK(VM_MANAGER_DF_SCRIPT_FUNC_LIST_ADDRESS, hook_vm_manager_df_script_code_callback);
+    ADD_MANAGER_CODE_HOOK(VM_MANAGER_GAME_LCD_FUNC_LIST_ADDRESS, hook_vm_manager_game_lcd_code_callback);
+    ADD_MANAGER_CODE_HOOK(VM_MANAGER_NETAPP_FUNC_LIST_ADDRESS, hook_vm_manager_netapp_code_callback);
+    ADD_MANAGER_CODE_HOOK(VM_MANAGER_AUDIO_FUNC_LIST_ADDRESS, hook_vm_manager_audio_code_callback);
+    ADD_MANAGER_CODE_HOOK(VM_MANAGER_SENSOR_FUNC_LIST_ADDRESS, hook_vm_manager_sensor_code_callback);
+    ADD_MANAGER_CODE_HOOK(VM_MANAGER_VMIM_FUNC_LIST_ADDRESS, hook_vm_manager_vmim_code_callback);
+    ADD_MANAGER_CODE_HOOK(VM_MANAGER_GAMEOLD_FUNC_LIST_ADDRESS, hook_vm_manager_gameold_code_callback);
+    ADD_MANAGER_CODE_HOOK(VM_DF_DATAPACKAGE_FUNC_LIST_ADDRESS, hook_vm_df_datapackage_code_callback);
+    ADD_MANAGER_CODE_HOOK_RANGE(VM_MF_MemoryBlock_FUNC_LIST_ADDRESS, VM_APPSTORE_FUNC_LIST_ADDRESS - 1, hook_vm_mf_memoryblock_code_callback);
+    ADD_MANAGER_CODE_HOOK(VM_APPSTORE_FUNC_LIST_ADDRESS, hook_vm_appstore_code_callback);
+    ADD_MANAGER_CODE_HOOK(VM_DL_LOAD_FUNC_LIST_ADDRESS, hook_vm_dl_load_code_callback);
+    ADD_MANAGER_CODE_HOOK(VM_DL_RS_FUNC_LIST_ADDRESS, hook_vm_dl_rs_code_callback);
+    ADD_MANAGER_CODE_HOOK(VM_DL_IMAGE_FUNC_LIST_ADDRESS, hook_vm_dl_image_code_callback);
+    ADD_MANAGER_CODE_HOOK(VM_VIDEO_FUNC_LIST_ADDRESS, hook_vm_video_code_callback);
+
+#undef ADD_MANAGER_CODE_HOOK
+#undef ADD_MANAGER_CODE_HOOK_RANGE
+    return UC_ERR_OK;
+}
+
+void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
+    if (vm_is_manager_func_stub_address((u32)address))
+        return;
+
+#ifdef GDB_SERVER_SUPPORT
+    tmp2 = gdbTarget.simulate_pc_count;
+    if (tmp2 == 0)
+    {
+        for (tmp1 = 0; tmp1 < gdbTarget.num_breakpoints; tmp1++)
+        {
+            if (gdbTarget.breakpoints[tmp1] == address)
+            {
+                gdbTarget.running = 0;
+                gdbTarget.last_stop_reason = 0x05;
+                tmp2 = 1;
+                break;
+            }
+        }
+    }
+    else
+    {
+        gdbTarget.running = 0;
+        gdbTarget.simulate_pc_count--;
+        gdbTarget.last_stop_reason = 0x05;
+    }
+    if (tmp2)
+    {
+        char response[32];
+        sprintf(response, "S%02x", gdbTarget.last_stop_reason);
+        send_gdb_response(&clients[0], response);
+        while (gdbTarget.running == 0)
+            ;
+    }
+#endif
+    if (((u32)address & ~1u) == PROGRAM_EXIT_ADDR)
+    {
+        normalize_program_exit_pc(g_currentEmuEntry);
+        uc_emu_stop(MTK);
+        return;
+    }
+    if (((u32)address & ~1u) == 0x103b07c)
+    {
+        vm_set_call_result(0);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+        vm_bx(tmp1);
+        return;
+    }
+    if (((u32)address & ~1u) == 0x103a02e)
+    {
+        vm_set_call_result(0);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+        vm_bx(tmp1);
+        return;
+    }
+    if (((u32)address & ~1u) == VM_FAKE_IMAGE_WIDTH_FUNC_ADDRESS)
+    {
+        u32 picLib = 0;
+        u32 index = 0;
+        u32 itemTable = 0;
+        u32 imageObj = 0;
+        u16 imageWidth = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &picLib);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &index);
+        if (picLib)
+        {
+            uc_mem_read(MTK, picLib + 0x10, &itemTable, 4);
+            if (itemTable)
+                uc_mem_read(MTK, itemTable + index * 4, &imageObj, 4);
+        }
+        if (imageObj == 0)
+            imageObj = picLib;
+        if (imageObj)
+            uc_mem_read(MTK, imageObj + 4, &imageWidth, 2);
+        tmp1 = (imageWidth > 0 && imageWidth <= LCD_WIDTH) ? imageWidth : 240;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+        vm_bx(tmp1);
+        return;
+    }
+    if (((u32)address & ~1u) == VM_FAKE_IMAGE_HEIGHT_FUNC_ADDRESS)
+    {
+        u32 picLib = 0;
+        u32 index = 0;
+        u32 itemTable = 0;
+        u32 imageObj = 0;
+        u16 imageHeight = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &picLib);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &index);
+        if (picLib)
+        {
+            uc_mem_read(MTK, picLib + 0x10, &itemTable, 4);
+            if (itemTable)
+                uc_mem_read(MTK, itemTable + index * 4, &imageObj, 4);
+        }
+        if (imageObj == 0)
+            imageObj = picLib;
+        if (imageObj)
+            uc_mem_read(MTK, imageObj + 6, &imageHeight, 2);
+        tmp1 = (imageHeight > 0 && imageHeight <= LCD_HEIGHT) ? imageHeight : 32;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+        vm_bx(tmp1);
+        return;
+    }
+    if (((u32)address & ~1u) == VM_FAKE_IMAGE_DRAW_FUNC_ADDRESS)
+    {
+        u32 picLib = 0;
+        u32 index = 0;
+        u32 itemTable = 0;
+        u32 imageObj = 0;
+        u32 pixels = 0;
+        u16 imageWidth = 0;
+        u16 imageHeight = 0;
+        int dstX = 0;
+        int dstY = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &picLib);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &index);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &dstX);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &dstY);
+        if (picLib)
+        {
+            uc_mem_read(MTK, picLib + 0x10, &itemTable, 4);
+            if (itemTable)
+                uc_mem_read(MTK, itemTable + index * 4, &imageObj, 4);
+        }
+        if (imageObj == 0)
+            imageObj = picLib;
+        if (imageObj)
+        {
+            uc_mem_read(MTK, imageObj, &pixels, 4);
+            uc_mem_read(MTK, imageObj + 4, &imageWidth, 2);
+            uc_mem_read(MTK, imageObj + 6, &imageHeight, 2);
+        }
+        if (pixels && imageWidth && imageHeight)
+        {
+            u32 srcPitch = (((4 - imageWidth) & 3) + imageWidth) * 2;
+            int startX = dstX < 0 ? -dstX : 0;
+            int startY = dstY < 0 ? -dstY : 0;
+            int copyW = imageWidth - startX;
+            int copyH = imageHeight - startY;
+            if (dstX + startX + copyW > LCD_WIDTH)
+                copyW = LCD_WIDTH - (dstX + startX);
+            if (dstY + startY + copyH > LCD_HEIGHT)
+                copyH = LCD_HEIGHT - (dstY + startY);
+            if (copyW > 0 && copyH > 0)
+            {
+                u8 rowBuffer[480];
+                for (int row = 0; row < copyH; ++row)
+                {
+                    u32 srcOff = (startY + row) * srcPitch + startX * 2;
+                    u32 dstOff = ((dstY + startY + row) * LCD_WIDTH + dstX + startX) * 2;
+                    uc_mem_read(MTK, pixels + srcOff, rowBuffer, copyW * 2);
+                    u16 *dst = (u16 *)(Lcd_Cache_Buffer + dstOff);
+                    u16 *src = (u16 *)rowBuffer;
+                    for (int col = 0; col < copyW; ++col)
+                    {
+                        if (src[col] != 0)
+                            dst[col] = src[col];
+                    }
+                    uc_mem_write(MTK, VM_screenImage_ADDRESS + dstOff, Lcd_Cache_Buffer + dstOff, copyW * 2);
+                }
+            }
+        }
+        tmp1 = 0;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+        vm_bx(tmp1);
+        return;
+    }
+    if (((u32)address & ~1u) == VM_FAKE_IMAGE_LOOKUP_FUNC_ADDRESS)
+    {
+        u32 namePtr = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R1, &namePtr);
+        tmp1 = 0;
+        if (namePtr)
+        {
+            vm_readStringByPtr(namePtr, cbeTextString);
+            if (strcmp((char *)cbeTextString, "UI8.gif") == 0)
+                tmp1 = 1;
+            else if (strcmp((char *)cbeTextString, "UI7.gif") == 0)
+                tmp1 = 2;
+            else if (strcmp((char *)cbeTextString, "flowerStyle.gif") == 0)
+                tmp1 = 3;
+            else if (strcmp((char *)cbeTextString, "loading.gif") == 0)
+                tmp1 = 4;
+        }
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+        vm_bx(tmp1);
+        return;
+    }
+    if (address == 0x10189e4)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp1);
+        if (tmp1 == 0)
+        {
+            tmp1 = 240;
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+            tmp1 = 0x10189e7;
+            vm_bx(tmp1);
+            return;
+        }
+    }
+    if (address == 0x10189f2)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp1);
+        if (tmp1 == 0)
+        {
+            tmp1 = 32;
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+            tmp1 = 0x10189f5;
+            vm_bx(tmp1);
+            return;
+        }
+    }
+    if (address == 0x1039e2c || address == 0x1039e3a)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp1);
+        if (tmp1 == 0)
+        {
+            tmp1 = (address == 0x1039e2c) ? 240 : 32;
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+            tmp1 = ((u32)address + 2) | 1;
+            vm_bx(tmp1);
+            return;
+        }
+    }
+    if (address == 0x1018946 || address == 0x1018966 || address == 0x1018984 || address == 0x10189a4)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R6, &tmp1);
+        if (tmp1 == 0)
+        {
+            tmp2 = 0;
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp2);
+            tmp2 = ((u32)address + 2) | 1;
+            vm_bx(tmp2);
+            return;
+        }
+    }
+    if (address == 0x103ab4c || address == 0x103ab9a || address == 0x103abe0 || address == 0x103ac1a || address == 0x103ac6e)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R6, &tmp1);
+        if (tmp1 == 0)
+        {
+            tmp2 = 0;
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp2);
+            tmp2 = ((u32)address + 2) | 1;
+            vm_bx(tmp2);
+            return;
+        }
+    }
+    if (address == 0x10025c6)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_SP, &tmp1);
+        uc_mem_read(MTK, tmp1 + 12, &tmp2, 4);
+        if ((tmp2 & ~1u) == PROGRAM_EXIT_ADDR)
+        {
+            uc_emu_stop(MTK);
+            return;
+        }
+    }
+    // if (address == ROM_ADDRESS + 0x3C72 - 0x98)
+    // {
+    //     uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+    //     printf("logic n2:%x\n", tmp1);
+    //     // tmp1 = 4;
+    //     // uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    // }
+    // if (address == 0x10141D2)
+    // {
+    //     dumpCpuInfo();
+    //     assert(0);
+    // }
+    if (address == VM_LOG_TRACE_ADDRESS)
+    {
+        // vm_log_trace only emits firmware-side diagnostics; keep it silent during normal emulation.
+        // vm_readStringByReg(UC_ARM_REG_R0, cbeTextString);
+        // printf("[vm_log_trace]");
+        // vm_sprintf();
+        // bx lr实现
+        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+        vm_bx(tmp1);
     }
     lastAddress = address;
     // printf("pc:%x\n", address);
