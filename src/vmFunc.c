@@ -2,6 +2,7 @@
 #include "gifDecode.h"
 
 FILE *openFileList[16];
+#define VM_PSEUDO_DIR_HANDLE ((FILE *)-1)
 
 u32 vm_malloc_var();
 u32 vm_get_var(u32 addr);
@@ -140,6 +141,11 @@ int vm_get_file_handle(char *nameBuf)
     {
         if (openFileList[i] == NULL)
         {
+            if (strcmp(nameBuf, "./") == 0 || strcmp(nameBuf, ".\\") == 0)
+            {
+                openFileList[i] = VM_PSEUDO_DIR_HANDLE;
+                return i;
+            }
             FILE *f = fopen(nameBuf, "rb");
             if (f == NULL)
                 return -1;
@@ -185,6 +191,8 @@ int vm_cbfs_vm_file_read(int bufferPtr, int size, int handle)
 {
     if (handle < 0 || handle >= 16 || openFileList[handle] == NULL || size <= 0)
         return vm_set_call_result(-1);
+    if (openFileList[handle] == VM_PSEUDO_DIR_HANDLE)
+        return vm_set_call_result(0);
     char *tmp = SDL_malloc(size);
     int readed = fread(tmp, 1, size, openFileList[handle]);
 
@@ -207,6 +215,8 @@ int vm_cbfs_vm_file_seek(int handle, int pos, int type)
 {
     if (handle < 0 || handle >= 16 || openFileList[handle] == NULL)
         return vm_set_call_result(-1);
+    if (openFileList[handle] == VM_PSEUDO_DIR_HANDLE)
+        return vm_set_call_result(0);
     int r = fseek(openFileList[handle], pos, type);
     // printf("vm_cbfs_vm_file_seek:%x,%d\n", pos, type);
     return vm_set_call_result(r);
@@ -214,6 +224,10 @@ int vm_cbfs_vm_file_seek(int handle, int pos, int type)
 // ok
 int vm_cbfs_vm_file_tell(int fileHandle)
 {
+    if (fileHandle < 0 || fileHandle >= 16 || openFileList[fileHandle] == NULL)
+        return vm_set_call_result(-1);
+    if (openFileList[fileHandle] == VM_PSEUDO_DIR_HANDLE)
+        return vm_set_call_result(0);
     int r = ftell(openFileList[fileHandle]);
     return vm_set_call_result(r);
 }
@@ -222,11 +236,15 @@ int vm_cbfs_vm_file_exists(int disk, int namePtr)
 {
     u8 charBuffer[1024];
     vm_readStringByPtr(namePtr, charBuffer);
+    if (strcmp((char *)charBuffer, "./") == 0 || strcmp((char *)charBuffer, ".\\") == 0)
+        return vm_set_call_result(1);
     FILE *f = fopen(charBuffer, "rb");
     u32 r = 0;
     if (f != NULL)
+    {
         r = 1;
-    fclose(f);
+        fclose(f);
+    }
     return vm_set_call_result(r);
 }
 
@@ -247,6 +265,8 @@ int vm_cbfs_vm_file_getfilesize(int fileHandle)
 {
     if (fileHandle < 0 || fileHandle >= 16 || openFileList[fileHandle] == NULL)
         return vm_set_call_result(-1);
+    if (openFileList[fileHandle] == VM_PSEUDO_DIR_HANDLE)
+        return vm_set_call_result(0);
     FILE *f = openFileList[fileHandle];
     fseek(f, 0, SEEK_END);
     int r = ftell(f);
@@ -258,6 +278,11 @@ int vm_cbfs_vm_file_close(int fileHandle)
 {
     if (fileHandle < 0 || fileHandle >= 16 || openFileList[fileHandle] == NULL)
         return vm_set_call_result(-1);
+    if (openFileList[fileHandle] == VM_PSEUDO_DIR_HANDLE)
+    {
+        openFileList[fileHandle] = NULL;
+        return vm_set_call_result(0);
+    }
     int r = fclose(openFileList[fileHandle]);
     openFileList[fileHandle] = NULL;
     return vm_set_call_result(r);

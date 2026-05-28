@@ -344,14 +344,14 @@ u8 *SimpleRamMatch(u8 *start, u8 *end, u8 *matchStart, int matchLen)
 #define LOAD_CBE_PATH "CBE/钻石迷情3.CBE"
 #define LOAD_CBE_PATH "CBE/涂鸦跳跃.CBE"
 #define LOAD_CBE_PATH "CBE/枪之荣誉.CBE"
-#define LOAD_CBE_PATH "CBE/皇牌空战.CBE"
 #define LOAD_CBE_PATH "CBE/僵尸先生.CBE"
 #define LOAD_CBE_PATH "CBE/捕鱼猎人.CBE"
 #define LOAD_CBE_PATH "CBE/战争机器.CBE"
-#define LOAD_CBE_PATH "CBE/恶魔城.CBE"
+#define LOAD_CBE_PATH "CBE/皇牌空战.CBE"
 #define LOAD_CBE_PATH "CBE/鬼吹灯.CBE"
-#define LOAD_CBE_PATH "CBE/孤岛.CBE"
 #define LOAD_CBE_PATH "CBE/魔塔.CBE"
+#define LOAD_CBE_PATH "CBE/孤岛.CBE"
+#define LOAD_CBE_PATH "CBE/恶魔城.CBE"
 #define LOAD_CBE_PATH "CBE/江湖OL.CBE"
 
 void RunArmProgram(void *param)
@@ -1122,13 +1122,11 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         }
         else if (idx == 13)
         {
-            printf("[call]vmEnterWinSetFPS\n");
-            assert(0);
+            vm_set_call_result(0);
         }
         else if (idx == 14)
         {
-            printf("[call]vmEnterWinClose\n");
-            assert(0);
+            vm_set_call_result(0);
         }
         else if (idx == 15)
         {
@@ -1152,13 +1150,10 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         {
             DEBUG_PRINT("[call]Coolbar_GetCoolbarDirPath\n");
             cbeTextString[0] = '.';
-            cbeTextString[1] = 0;
-            cbeTextString[2] = '/';
-            cbeTextString[3] = 0;
-            cbeTextString[4] = 0;
-            cbeTextString[5] = 0;
+            cbeTextString[1] = '/';
+            cbeTextString[2] = 0;
             uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_mem_write(MTK, tmp1, cbeTextString, 6);
+            uc_mem_write(MTK, tmp1, cbeTextString, 3);
         }
         else if (idx == 18)
         {
@@ -1473,8 +1468,8 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         {
             // todo
             DEBUG_PRINT("[call]vMGetGameWinState\n");
-            tmp2 = 1; // pause remuse stop
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp2);
+            tmp2 = 1; // running
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp2);
         }
         else if (idx == 81)
         {
@@ -1829,8 +1824,8 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         }
         else if (idx == 3)
         {
-            printf("[call]vM_InvalidateLcd\n");
-            assert(0);
+            UpdateLcd();
+            vm_set_call_result(0);
         }
         else if (idx == 4)
         {
@@ -1899,13 +1894,25 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         }
         else if (idx == 12)
         {
-            printf("[call]vMDrawStringClipAlign\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
+            uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
+            uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
+            u16 color = 0xffff;
+            uc_mem_read(MTK, tmp4 + 16, &color, 2);
+            vm_readStringGbkByReg(UC_ARM_REG_R1, cbeTextString);
+            drawFontString(cbeTextString, tmp2, tmp3, color);
+            vm_set_call_result(1);
         }
         else if (idx == 13)
         {
-            printf("[call]vMDrawStringClip\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
+            uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
+            uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
+            u16 color = 0xffff;
+            uc_mem_read(MTK, tmp4 + 16, &color, 2);
+            vm_readStringGbkByReg(UC_ARM_REG_R1, cbeTextString);
+            drawFontString(cbeTextString, tmp2, tmp3, color);
+            vm_set_call_result(1);
         }
         else if (idx == 14)
         {
@@ -1924,23 +1931,241 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         }
         else if (idx == 17)
         {
-            printf("[call]vMDrawRect\n");
-            assert(0);
+            u32 rectH, rectColor;
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+            uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+            uc_reg_read(MTK, UC_ARM_REG_SP, &tmp5);
+            uc_mem_read(MTK, tmp5, &rectH, 4);
+            uc_mem_read(MTK, tmp5 + 4, &rectColor, 4);
+            int x = (int)tmp1;
+            int y = (int)tmp2;
+            int w = (int)tmp3;
+            int h = (int)rectH;
+            u16 color = (u16)rectColor;
+            if (w > 0 && h > 0)
+            {
+                if (x < 0)
+                {
+                    w += x;
+                    x = 0;
+                }
+                if (y < 0)
+                {
+                    h += y;
+                    y = 0;
+                }
+                if (x + w > LCD_WIDTH)
+                    w = LCD_WIDTH - x;
+                if (y + h > LCD_HEIGHT)
+                    h = LCD_HEIGHT - y;
+            }
+            if (w > 0 && h > 0)
+            {
+                u16 *rowBuf = (u16 *)cbeTextString;
+                for (int col = 0; col < w; col++)
+                    rowBuf[col] = color;
+                u32 top = y * LCD_WIDTH + x;
+                uc_mem_write(MTK, VM_screenImage_ADDRESS + top * 2, rowBuf, w * 2);
+                for (int col = 0; col < w; col++)
+                    ((u16 *)Lcd_Cache_Buffer)[top + col] = color;
+                if (h > 1)
+                {
+                    u32 bottom = (y + h - 1) * LCD_WIDTH + x;
+                    uc_mem_write(MTK, VM_screenImage_ADDRESS + bottom * 2, rowBuf, w * 2);
+                    for (int col = 0; col < w; col++)
+                        ((u16 *)Lcd_Cache_Buffer)[bottom + col] = color;
+                }
+                for (int row = 1; row < h - 1; row++)
+                {
+                    u32 left = (y + row) * LCD_WIDTH + x;
+                    ((u16 *)Lcd_Cache_Buffer)[left] = color;
+                    uc_mem_write(MTK, VM_screenImage_ADDRESS + left * 2, &color, 2);
+                    if (w > 1)
+                    {
+                        u32 right = left + w - 1;
+                        ((u16 *)Lcd_Cache_Buffer)[right] = color;
+                        uc_mem_write(MTK, VM_screenImage_ADDRESS + right * 2, &color, 2);
+                    }
+                }
+            }
+            vm_set_call_result(1);
         }
         else if (idx == 18)
         {
-            printf("[call]vMDrawRectEx\n");
-            assert(0);
+            u32 dstImage, dstPixels, rectH, rectColor;
+            u16 dstW, dstH;
+            uc_reg_read(MTK, UC_ARM_REG_R0, &dstImage);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
+            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
+            uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
+            uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
+            uc_mem_read(MTK, tmp4, &rectH, 4);
+            uc_mem_read(MTK, tmp4 + 4, &rectColor, 4);
+            uc_mem_read(MTK, dstImage, &dstPixels, 4);
+            uc_mem_read(MTK, dstImage + 4, &dstW, 2);
+            uc_mem_read(MTK, dstImage + 6, &dstH, 2);
+            if (dstImage == VM_screenImageStruct_ADDRESS || dstPixels == 0 || dstW == 0 || dstH == 0 || dstW > LCD_WIDTH || dstH > LCD_HEIGHT)
+            {
+                dstPixels = VM_screenImage_ADDRESS;
+                dstW = LCD_WIDTH;
+                dstH = LCD_HEIGHT;
+            }
+            int x = (int)tmp1;
+            int y = (int)tmp2;
+            int w = (int)tmp3;
+            int h = (int)rectH;
+            u16 color = (u16)rectColor;
+            if (w > 0 && h > 0)
+            {
+                if (x < 0)
+                {
+                    w += x;
+                    x = 0;
+                }
+                if (y < 0)
+                {
+                    h += y;
+                    y = 0;
+                }
+                if (x + w > dstW)
+                    w = dstW - x;
+                if (y + h > dstH)
+                    h = dstH - y;
+            }
+            if (w > 0 && h > 0)
+            {
+                u16 *rowBuf = (u16 *)cbeTextString;
+                for (int col = 0; col < w; col++)
+                    rowBuf[col] = color;
+                u32 top = y * dstW + x;
+                uc_mem_write(MTK, dstPixels + top * 2, rowBuf, w * 2);
+                if (dstPixels == VM_screenImage_ADDRESS && dstW == LCD_WIDTH)
+                    for (int col = 0; col < w; col++)
+                        ((u16 *)Lcd_Cache_Buffer)[top + col] = color;
+                if (h > 1)
+                {
+                    u32 bottom = (y + h - 1) * dstW + x;
+                    uc_mem_write(MTK, dstPixels + bottom * 2, rowBuf, w * 2);
+                    if (dstPixels == VM_screenImage_ADDRESS && dstW == LCD_WIDTH)
+                        for (int col = 0; col < w; col++)
+                            ((u16 *)Lcd_Cache_Buffer)[bottom + col] = color;
+                }
+                for (int row = 1; row < h - 1; row++)
+                {
+                    u32 left = (y + row) * dstW + x;
+                    uc_mem_write(MTK, dstPixels + left * 2, &color, 2);
+                    if (dstPixels == VM_screenImage_ADDRESS && dstW == LCD_WIDTH)
+                        ((u16 *)Lcd_Cache_Buffer)[left] = color;
+                    if (w > 1)
+                    {
+                        u32 right = left + w - 1;
+                        uc_mem_write(MTK, dstPixels + right * 2, &color, 2);
+                        if (dstPixels == VM_screenImage_ADDRESS && dstW == LCD_WIDTH)
+                            ((u16 *)Lcd_Cache_Buffer)[right] = color;
+                    }
+                }
+            }
+            vm_set_call_result(1);
         }
         else if (idx == 19)
         {
-            printf("[call]vMFillRect\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+            uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+            uc_reg_read(MTK, UC_ARM_REG_SP, &tmp5);
+            u32 fillH, fillColor;
+            uc_mem_read(MTK, tmp5, &fillH, 4);
+            uc_mem_read(MTK, tmp5 + 4, &fillColor, 4);
+            int x = (int)tmp1;
+            int y = (int)tmp2;
+            int w = (int)tmp3;
+            int h = (int)fillH;
+            if (x < 0)
+            {
+                w += x;
+                x = 0;
+            }
+            if (y < 0)
+            {
+                h += y;
+                y = 0;
+            }
+            if (x + w > LCD_WIDTH)
+                w = LCD_WIDTH - x;
+            if (y + h > LCD_HEIGHT)
+                h = LCD_HEIGHT - y;
+            if (w > 0 && h > 0)
+            {
+                u16 color = (u16)fillColor;
+                for (int row = 0; row < h; row++)
+                {
+                    u32 off = (y + row) * LCD_WIDTH + x;
+                    for (int col = 0; col < w; col++)
+                        ((u16 *)Lcd_Cache_Buffer)[off + col] = color;
+                    uc_mem_write(MTK, VM_screenImage_ADDRESS + off * 2, Lcd_Cache_Buffer + off * 2, w * 2);
+                }
+            }
+            vm_set_call_result(1);
         }
         else if (idx == 20)
         {
-            printf("[call]vMFillRectEx\n");
-            assert(0);
+            u32 dstImage, dstPixels, fillH, fillColor;
+            u16 dstW, dstH;
+            uc_reg_read(MTK, UC_ARM_REG_R0, &dstImage);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
+            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
+            uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
+            uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
+            uc_mem_read(MTK, tmp4, &fillH, 4);
+            uc_mem_read(MTK, tmp4 + 4, &fillColor, 4);
+            uc_mem_read(MTK, dstImage, &dstPixels, 4);
+            uc_mem_read(MTK, dstImage + 4, &dstW, 2);
+            uc_mem_read(MTK, dstImage + 6, &dstH, 2);
+            if (dstImage == VM_screenImageStruct_ADDRESS || dstPixels == 0 || dstW == 0 || dstH == 0 || dstW > LCD_WIDTH || dstH > LCD_HEIGHT)
+            {
+                dstPixels = VM_screenImage_ADDRESS;
+                dstW = LCD_WIDTH;
+                dstH = LCD_HEIGHT;
+            }
+            int x = (int)tmp1;
+            int y = (int)tmp2;
+            int w = (int)tmp3;
+            int h = (int)fillH;
+            if (x < 0)
+            {
+                w += x;
+                x = 0;
+            }
+            if (y < 0)
+            {
+                h += y;
+                y = 0;
+            }
+            if (x + w > dstW)
+                w = dstW - x;
+            if (y + h > dstH)
+                h = dstH - y;
+            if (w > 0 && h > 0)
+            {
+                u16 color = (u16)fillColor;
+                u16 *rowBuf = (u16 *)cbeTextString;
+                for (int row = 0; row < h; row++)
+                {
+                    u32 off = (y + row) * dstW + x;
+                    for (int col = 0; col < w; col++)
+                        rowBuf[col] = color;
+                    if (dstPixels == VM_screenImage_ADDRESS && dstW == LCD_WIDTH)
+                    {
+                        for (int col = 0; col < w; col++)
+                            ((u16 *)Lcd_Cache_Buffer)[off + col] = color;
+                    }
+                    uc_mem_write(MTK, dstPixels + off * 2, rowBuf, w * 2);
+                }
+            }
+            vm_set_call_result(1);
         }
         else if (idx == 21)
         {
@@ -2701,8 +2926,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         }
         else if (idx == 5)
         {
-            printf("[call]vMSysSleep\n");
-            assert(0);
+            vm_set_call_result(0);
         }
         else if (idx == 6)
         {
@@ -2750,7 +2974,15 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         u32 idx = (address - VM_MANAGER_NETWORK_FUNC_LIST_ADDRESS) / 4;
         if (idx == 3)
         {
-            vm_set_call_result(1);
+            tmp1 = vm_get_var(Global_R9 + 0x5a3c + 0x10);
+            if (tmp1)
+            {
+                tmp2 = 0;
+                uc_reg_write(MTK, UC_ARM_REG_R0, &tmp2);
+                vm_bx(tmp1);
+                return;
+            }
+            vm_set_call_result(0);
         }
         else
         {
@@ -2987,7 +3219,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         {
             uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
             uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            tmp1 = 1;
+            tmp1 = 0;
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
         else if (idx == 2)
@@ -3597,7 +3829,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         {
             tmp2 = 0;
             uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            DEBUG_PRINT("[call]GAME_isKeyDown(%d)\n", tmp1);
+            // DEBUG_PRINT("[call]GAME_isKeyDown(%d)\n", tmp1);
             if (simulatePress == 1)
             {
                 tmp2 = (tmp1 & (1 << simulateKey)) != 0; // 0按下
@@ -3606,8 +3838,8 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         }
         else if (idx == 13)
         {
-            printf("[call]GAME_isKeyHold\n");
-            assert(0);
+            // printf("[call]GAME_isKeyHold\n");
+            vm_set_call_result(0);
         }
         else if (idx == 24)
         {
@@ -3666,37 +3898,37 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         }
         else if (idx == 63)
         {
-            DEBUG_PRINT("[call]SCREEN_IsPointerHold\n");
+            // DEBUG_PRINT("[call]SCREEN_IsPointerHold\n");
             tmp1 = !simulateTouchPress;
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
         else if (idx == 64)
         {
-            DEBUG_PRINT("[call]SCREEN_IsPointerDown(%d)\n", simulateTouchPress);
+            // DEBUG_PRINT("[call]SCREEN_IsPointerDown(%d)\n", simulateTouchPress);
             tmp1 = simulateTouchPress; // 1按下
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
         else if (idx == 65)
         {
-            DEBUG_PRINT("[call]SCREEN_IsPointerUp\n");
+            // DEBUG_PRINT("[call]SCREEN_IsPointerUp\n");
             tmp1 = !simulateTouchPress;
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
         else if (idx == 66)
         {
-            DEBUG_PRINT("[call]SCREEN_IsPointerDrag\n");
+            // DEBUG_PRINT("[call]SCREEN_IsPointerDrag\n");
             tmp1 = 0;
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
         else if (idx == 67)
         {
-            DEBUG_PRINT("[call]SCREEN_GetPointerX(%d)\n", simulateTouchX);
+            // DEBUG_PRINT("[call]SCREEN_GetPointerX(%d)\n", simulateTouchX);
             tmp1 = simulateTouchX; // x坐标
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
         else if (idx == 68)
         {
-            DEBUG_PRINT("[call]SCREEN_GetPointerY(%d)\n", simulateTouchY);
+            // DEBUG_PRINT("[call]SCREEN_GetPointerY(%d)\n", simulateTouchY);
             tmp1 = simulateTouchY; // y坐标
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
