@@ -1587,7 +1587,7 @@ int vm_DF_DataPackage_DoReadData(int32_t a1, int32_t a2)
 
     buffer = vm_malloc(len);
     vm_cbfs_vm_file_read(buffer, len, file_handle);
-    printf("DF_Package_DoReadData(adr:%x,len:0x%x,seek:0x%x)\n", buffer, len, v5 + base_offset);
+    // printf("DF_Package_DoReadData(adr:%x,len:0x%x,seek:0x%x)\n", buffer, len, v5 + base_offset);
     return vm_set_call_result(buffer);
 }
 
@@ -1613,7 +1613,7 @@ int vm_DF_DataPackage_GetFileByID(u32 a1, u32 fileId)
     uc_mem_read(uc, a1 + 20, &id_base, 4);
     uc_mem_read(uc, a1 + 16, &data_base, 4);
     uc_mem_read(uc, a1 + 24, &offset_base, 4);
-    printf("DF_DataPackage_GetFileByID:%d\n", fileId);
+    // printf("DF_DataPackage_GetFileByID:%d\n", fileId);
 
     for (i = 0; i < count1; i++)
     {
@@ -1662,11 +1662,8 @@ int vm_DF_DataPackage_GetFile(int a1, int namePtr)
     int FileID = vm_DF_DataPackage_GetFileID(a1, namePtr);
     if (FileID < 0)
     {
-        gbk_to_utf8(cbeTextString, sprintfBuff, mySizeOf(sprintfBuff));
-        printf("[读取包内文件失败]%s\n", sprintfBuff);
-        printf("[文件ID]%d\n", FileID);
-        dumpCpuInfo();
-        assert(0);
+        vm_readStringByPtr(namePtr, cbeTextString);
+        return vm_set_call_result(vm_load_resource_blob_from_cbe((const char *)cbeTextString));
     }
     return vm_DF_DataPackage_GetFileByID(a1, FileID);
 }

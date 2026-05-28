@@ -5,6 +5,7 @@
 
 #include "main.h"
 #include "lcd.h"
+static u32 vm_load_resource_blob_from_cbe(const char *name);
 #include "vmFunc.c"
 #include "hookRam.c"
 #include "vmEvent.c"
@@ -102,6 +103,9 @@ u32 stackCallback[17];
 int simulatePress = 0;
 int simulateKey = 0;
 int simulateTouchPress = 0;
+int simulateTouchDown = 0;
+int simulateTouchUp = 0;
+int simulateTouchDrag = 0;
 int simulateTouchX = 0;
 int simulateTouchY = 0;
 u32 screenStructChange = 0;
@@ -141,6 +145,7 @@ static u32 g_schedulerTick = 0;
 static vm_net_task g_netTasks[VM_SCHED_MAX_NET_TASKS];
 static vm_timer_task g_timerTasks[VM_SCHED_MAX_TIMERS];
 static u32 g_schedulerStartTicks = 0;
+static u32 g_nextNetConnectId = 1;
 
 static u32 vm_read_host_le32(const u8 *p)
 {
@@ -384,7 +389,9 @@ static void scheduler_prepare_debug_picture_library(void)
     }
 
     uc_mem_read(MTK, debugUiObj + 0x50, &debugItems, 4);
-    if (debugItems != 0)
+    u32 currentLookupFunc = 0;
+    uc_mem_read(MTK, debugUiObj + 0x5c, &currentLookupFunc, 4);
+    if (debugItems != 0 && currentLookupFunc == lookupFunc)
         return;
 
     const char *names[] = {"UI2.gif", "UI8.gif", "UI7.gif", "flowerStyle.gif", "loading.gif"};
@@ -429,6 +436,29 @@ static void scheduler_prepare_debug_picture_library(void)
     uc_mem_write(MTK, debugUiObj + 0x60, &widthFunc, 4);
     uc_mem_write(MTK, debugUiObj + 0x64, &heightFunc, 4);
     uc_mem_write(MTK, debugUiObj + 0x78, &drawFunc, 4);
+}
+
+static void scheduler_normalize_startup_screen_state(void)
+{
+    u32 debugUiRoot = Global_R9 + 0x9928;
+    u32 debugUiObj = 0;
+    uc_mem_read(MTK, debugUiRoot + 0x10, &debugUiObj, 4);
+    if (debugUiObj == 0)
+        return;
+
+    u8 state = 0;
+    u32 updateObj = 0;
+    uc_mem_read(MTK, debugUiObj + 0x3d, &state, 1);
+    uc_mem_read(MTK, debugUiObj + 0x140, &updateObj, 4);
+    if (state == 10 && updateObj == 0)
+    {
+        u8 hasLocalUpdate = 0;
+        u8 nextState = 11;
+        uc_mem_read(MTK, Global_R9 + 0x5496, &hasLocalUpdate, 1);
+        if (hasLocalUpdate == 1)
+            nextState = 9;
+        uc_mem_write(MTK, debugUiObj + 0x3d, &nextState, 1);
+    }
 }
 
 u32 size_128mb = 1024 * 1024 * 128;
@@ -538,6 +568,7 @@ static u32 scheduler_start_timer(u32 delayMs, u32 callback, u32 context)
                 g_timerTasks[i].remainingTicks = 1;
             g_timerTasks[i].callback = callback;
             g_timerTasks[i].context = context;
+            DEBUG_PRINT("[probe_timer] start handle=%u delay=%u cb=%x ctx=%x tick=%u\n", g_timerTasks[i].handle, delayMs, callback, context, g_schedulerTick);
             return vm_set_call_result(g_timerTasks[i].handle);
         }
     }
@@ -574,6 +605,7 @@ static uc_err scheduler_dispatch_timers(void)
         }
         u32 callback = task->callback;
         u32 context = task->context;
+        DEBUG_PRINT("[probe_timer] fire handle=%u cb=%x ctx=%x tick=%u\n", task->handle, callback, context, g_schedulerTick);
         task->active = 0;
         task->remainingTicks = 0;
         task->callback = 0;
@@ -603,6 +635,7 @@ static void scheduler_queue_net_task(u32 r0, u32 r1, u32 callback, u32 context)
             g_netTasks[i].r1 = r1;
             g_netTasks[i].callback = callback;
             g_netTasks[i].context = context;
+            DEBUG_PRINT("[probe_net] queue r0=%x r1=%x cb=%x ctx=%x tick=%u last=%x\n", r0, r1, callback, context, g_schedulerTick, lastAddress);
             return;
         }
     }
@@ -624,11 +657,68 @@ static uc_err scheduler_dispatch_net_tasks(void)
         {
             task->fired = 1;
             task->active = 0;
-            uc_err err = vm_call4(task->callback, task->r0, task->r1, task->callback, task->context);
+            DEBUG_PRINT("[probe_net] fire r0=%x r1=%x cb=%x ctx=%x tick=%u\n", task->r0, task->r1, task->callback, task->context, g_schedulerTick);
+            u32 netCurrentReqAddr = Global_R9 + 0x9588 + 4;
+            u32 oldCurrentReq = 0;
+            uc_mem_read(MTK, netCurrentReqAddr, &oldCurrentReq, 4);
+            u32 request = task->context - 4;
+            uc_mem_write(MTK, netCurrentReqAddr, &request, 4);
+            uc_err err = vm_call4(task->callback, 0, 0, 0, 5);
+            uc_mem_write(MTK, netCurrentReqAddr, &oldCurrentReq, 4);
             if (err != UC_ERR_OK)
                 return err;
         }
     }
+    return UC_ERR_OK;
+}
+
+static uc_err scheduler_dispatch_tscreen_event(u32 tScreenEventEntry, u32 screenPtr)
+{
+    simulateKey = 0;
+    simulatePress = 0;
+    simulateTouchDown = 0;
+    simulateTouchUp = 0;
+    simulateTouchDrag = 0;
+
+    vm_event *evt = DequeueVMEvent();
+    if (evt == NULL)
+        return UC_ERR_OK;
+
+    if (evt->event == VM_EVENT_KEYBOARD)
+    {
+        simulateKey = evt->r0;
+        simulatePress = evt->r1;
+        if (tScreenEventEntry == 0)
+            return UC_ERR_OK;
+
+        u32 keyMask = 0;
+        if (evt->r0 < 31)
+            keyMask = 1u << evt->r0;
+        u32 keyPtr = vm_malloc_var();
+        vm_set_var(keyPtr, keyMask);
+        uc_err err = vm_call4(tScreenEventEntry, screenPtr, evt->r1 ? 0 : 1, keyPtr, 0);
+        vm_free_var(keyPtr);
+        return err;
+    }
+
+    if (evt->event == VM_EVENT_TOUCHSCREEN)
+    {
+        simulateTouchPress = evt->r0 != MR_MOUSE_UP;
+        simulateTouchDown = evt->r0 == MR_MOUSE_DOWN;
+        simulateTouchUp = evt->r0 == MR_MOUSE_UP;
+        simulateTouchDrag = evt->r0 == MR_MOUSE_MOVE;
+        simulateTouchX = (evt->r1 >> 16) & 0xffff;
+        simulateTouchY = evt->r1 & 0xffff;
+        if (tScreenEventEntry == 0)
+            return UC_ERR_OK;
+
+        u32 touchPtr = vm_malloc_var();
+        vm_set_var(touchPtr, evt->r1);
+        uc_err err = vm_call4(tScreenEventEntry, screenPtr, evt->r0 == MR_MOUSE_UP ? 4 : 3, touchPtr, 0);
+        vm_free_var(touchPtr);
+        return err;
+    }
+
     return UC_ERR_OK;
 }
 
@@ -650,7 +740,7 @@ static uc_err scheduler_tick(void)
 void keyEvent(int type, int key)
 {
     // printf("keyboard(%x,type=%d)\n", key, type);
-    int skey = 0;
+    int skey = -1;
     // F5导出Cpu信息
     if (key == 0x4000003e && type == 4)
     {
@@ -725,8 +815,7 @@ void mouseEvent(int type, int x, int y)
     else if (y > 399)
         y = 399;
 
-    int isPress = type == 1 ? 1 : 0;
-    EnqueueVMEvent(VM_EVENT_TOUCHSCREEN, isPress, (x << 16) | y);
+    EnqueueVMEvent(VM_EVENT_TOUCHSCREEN, type, (x << 16) | y);
 }
 
 void loop()
@@ -903,7 +992,8 @@ void RunArmProgram(void *param)
                 assert(0);
             }
             u32 tScreenRenderEntry = 0;
-            u32 tScreenLogicEntry = 0;
+            u32 tScreenUpdateEntry = 0;
+            u32 tScreenEventEntry = 0;
             u32 tScreenInitEntry = 0;
             u32 tScreenInitedPtr = 0;
             while (p == UC_ERR_OK && screenStructChange != 1)
@@ -919,7 +1009,7 @@ void RunArmProgram(void *param)
                     {
                         uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
                         uc_reg_write(MTK, UC_ARM_REG_R0, &vmAddedScreen);
-                        p = vm_emu_start_count(tScreenInitEntry, exitAddr, 200000);
+                        p = vm_emu_start(tScreenInitEntry, exitAddr);
                         if (p != UC_ERR_OK)
                         {
                             printf("TScreen init异常:%s\n", uc_strerror(p));
@@ -929,6 +1019,7 @@ void RunArmProgram(void *param)
                     tScreenInitedPtr = vmAddedScreen;
                 }
                 scheduler_prepare_debug_picture_library();
+                scheduler_normalize_startup_screen_state();
                 u32 debugUiRoot = Global_R9 + 0x9928;
                 u32 debugUiObj = 0;
                 u32 debugItems = 0;
@@ -1001,12 +1092,34 @@ void RunArmProgram(void *param)
                         uc_mem_write(MTK, debugUiObj + 0x78, &drawFunc, 4);
                     }
                 }
-                uc_mem_read(MTK, vmAddedScreen + 0x08, &tScreenLogicEntry, 4);
+                uc_mem_read(MTK, vmAddedScreen + 0x04, &tScreenUpdateEntry, 4);
+                uc_mem_read(MTK, vmAddedScreen + 0x08, &tScreenEventEntry, 4);
                 uc_mem_read(MTK, vmAddedScreen + 0x0c, &tScreenRenderEntry, 4);
                 if (tScreenRenderEntry == 0)
                 {
                     printf("TScreen未设置render入口\n");
                     assert(0);
+                }
+                p = scheduler_dispatch_tscreen_event(tScreenEventEntry, vmAddedScreen);
+                if (p != UC_ERR_OK)
+                {
+                    printf("TScreen event异常:%s\n", uc_strerror(p));
+                    break;
+                }
+                if (screenStructChange == 1)
+                    break;
+                if (tScreenUpdateEntry)
+                {
+                    uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
+                    uc_reg_write(MTK, UC_ARM_REG_R0, &vmAddedScreen);
+                    p = vm_emu_start(tScreenUpdateEntry, exitAddr);
+                    if (p != UC_ERR_OK)
+                    {
+                        printf("TScreen update异常:%s\n", uc_strerror(p));
+                        break;
+                    }
+                    if (screenStructChange == 1)
+                        break;
                 }
                 uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
                 uc_reg_write(MTK, UC_ARM_REG_R0, &vmAddedScreen);
@@ -1014,8 +1127,6 @@ void RunArmProgram(void *param)
                 if (p != UC_ERR_OK)
                     break;
                 UpdateLcd();
-                if (tScreenLogicEntry)
-                    uc_reg_write(MTK, UC_ARM_REG_PC, &tScreenLogicEntry);
                 SDL_Delay(100);
             }
         }
@@ -1076,9 +1187,9 @@ void RunArmProgram(void *param)
                     }
                     simulateKey = 0;
                     simulatePress = 0;
-                    simulateTouchPress = 0;
-                    simulateTouchX = 0;
-                    simulateTouchY = 0;
+                    simulateTouchDown = 0;
+                    simulateTouchUp = 0;
+                    simulateTouchDrag = 0;
                     vm_event *evt = DequeueVMEvent();
                     if (evt != NULL)
                     {
@@ -1091,7 +1202,10 @@ void RunArmProgram(void *param)
                             }
                             if (evt->event == VM_EVENT_TOUCHSCREEN)
                             {
-                                simulateTouchPress = evt->r0;
+                                simulateTouchPress = evt->r0 != MR_MOUSE_UP;
+                                simulateTouchDown = evt->r0 == MR_MOUSE_DOWN;
+                                simulateTouchUp = evt->r0 == MR_MOUSE_UP;
+                                simulateTouchDrag = evt->r0 == MR_MOUSE_MOVE;
                                 simulateTouchX = (evt->r1 >> 16) & 0xffff;
                                 simulateTouchY = evt->r1 & 0xffff;
                             }
@@ -1375,6 +1489,20 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     {
         normalize_program_exit_pc(g_currentEmuEntry);
         uc_emu_stop(MTK);
+        return;
+    }
+    if (((u32)address & ~1u) == 0x103b07c)
+    {
+        vm_set_call_result(0);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+        vm_bx(tmp1);
+        return;
+    }
+    if (((u32)address & ~1u) == 0x103a02e)
+    {
+        vm_set_call_result(0);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+        vm_bx(tmp1);
         return;
     }
     if (((u32)address & ~1u) == VM_FAKE_IMAGE_WIDTH_FUNC_ADDRESS)
@@ -3815,12 +3943,18 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     else if (address >= VM_MANAGER_NETWORK_FUNC_LIST_ADDRESS && address < (VM_MANAGER_NETWORK_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE))
     {
         u32 idx = (address - VM_MANAGER_NETWORK_FUNC_LIST_ADDRESS) / 4;
+        DEBUG_PRINT("[probe_net_idx] idx=%u last=%x\n", idx, lastAddress);
         if (idx == 0)
         {
             uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
             uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
             uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
             uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+            tmp5 = g_nextNetConnectId++;
+            if (tmp5 == 0)
+                tmp5 = g_nextNetConnectId++;
+            if (tmp4)
+                uc_mem_write(MTK, tmp4, &tmp5, 4);
             scheduler_queue_net_task(tmp1, tmp2, tmp3, tmp4);
             vm_set_call_result(1);
         }
@@ -4839,25 +4973,25 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         else if (idx == 63)
         {
             // DEBUG_PRINT("[call]SCREEN_IsPointerHold\n");
-            tmp1 = !simulateTouchPress;
+            tmp1 = simulateTouchPress;
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
         else if (idx == 64)
         {
             // DEBUG_PRINT("[call]SCREEN_IsPointerDown(%d)\n", simulateTouchPress);
-            tmp1 = simulateTouchPress; // 1按下
+            tmp1 = simulateTouchDown;
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
         else if (idx == 65)
         {
             // DEBUG_PRINT("[call]SCREEN_IsPointerUp\n");
-            tmp1 = !simulateTouchPress;
+            tmp1 = simulateTouchUp;
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
         else if (idx == 66)
         {
             // DEBUG_PRINT("[call]SCREEN_IsPointerDrag\n");
-            tmp1 = 0;
+            tmp1 = simulateTouchDrag;
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
         else if (idx == 67)
