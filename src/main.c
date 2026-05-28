@@ -327,7 +327,6 @@ u8 *SimpleRamMatch(u8 *start, u8 *end, u8 *matchStart, int matchLen)
         return NULL;
 }
 
-#define LOAD_CBE_PATH "CBE/魔塔.CBE"
 #define LOAD_CBE_PATH "CBE/愤怒的小鸟.CBE"
 #define LOAD_CBE_PATH "CBE/众神之战.CBE"
 #define LOAD_CBE_PATH "CBE/钻石迷情3.CBE"
@@ -341,6 +340,7 @@ u8 *SimpleRamMatch(u8 *start, u8 *end, u8 *matchStart, int matchLen)
 #define LOAD_CBE_PATH "CBE/恶魔城.CBE"
 #define LOAD_CBE_PATH "CBE/鬼吹灯.CBE"
 #define LOAD_CBE_PATH "CBE/孤岛.CBE"
+#define LOAD_CBE_PATH "CBE/魔塔.CBE"
 
 void RunArmProgram(void *param)
 {
@@ -1062,11 +1062,14 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         }
         else if (idx == 16)
         {
+            u32 line = 0;
+            u32 lr = 0;
             vm_readStringByReg(UC_ARM_REG_R0, cbeTextString);
-            printf("[call]vMAssert(%s)\n", cbeTextString);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &line);
+            uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+            printf("[call]vMAssert(%s:%u, lr:%x, last:%x)\n", cbeTextString, line, lr, lastAddress);
             dumpCpuInfo();
-            while (1)
-                ;
+            fflush(stdout);
             assert(0);
         }
         else if (idx == 17)

@@ -573,14 +573,15 @@ int vm_DF_DataPackage_GetPackageID(int a1, int a2)
 // ok
 int vm_DF_Free(int p)
 {
+    u32 target = 0;
+    u32 zero = 0;
+
     if (p)
     {
-        // 先写0（防止UAF崩）
-        u32 zero = 0;
+        uc_mem_read(MTK, p, &target, 4);
+        if (target)
+            vm_free(target);
         uc_mem_write(MTK, p, &zero, 4);
-
-        // 再free
-        vm_free(p);
     }
     return vm_set_call_result(p);
 }
@@ -799,7 +800,7 @@ int vm_DF_DataPackage_LoadFormTCardEx(int a1, int pathPtr, int fileSeekPos)
     {
         u32 ptr = vm_malloc_var();
         vm_set_var(ptr, offset); // ptr = &offset
-        count = (u16)vm_DF_ReadInt(bufferPtr, offset);
+        count = (u16)vm_DF_ReadInt(bufferPtr, ptr);
         offset = vm_get_var(ptr);
         vm_free_var(ptr);
     }
@@ -975,7 +976,13 @@ int vm_DF_DataPackage_LoadFormTCardEx(int a1, int pathPtr, int fileSeekPos)
         i++;
     }
 
-    // vm_free(bufferPtr);
+    if (bufferPtr)
+    {
+        u32 ptr = vm_malloc_var();
+        vm_set_var(ptr, bufferPtr);
+        vm_DF_Free(ptr);
+        vm_free_var(ptr);
+    }
 
     int txt_id;
     uc_mem_read(MTK, a1 + 104, &txt_id, 4);
@@ -1347,7 +1354,8 @@ u32 vm_MF_MemoryBlock_Malloc(int a1, int a2)
     uc_mem_read(MTK, a1, &baseAddr, 4);      //->base
     uc_mem_read(MTK, a1 + 4, &oldOffset, 4); //->offset
     uc_mem_read(MTK, a1 + 8, &size, 4);      //->offset
-    offset = oldOffset + a2;
+    u32 alignedSize = (a2 + 3) & ~3;
+    offset = oldOffset + alignedSize;
     if (offset > size)
     {
         printf("申请内存(%x)超过可用值(%x)\n", a2, size - oldOffset);
@@ -1355,8 +1363,7 @@ u32 vm_MF_MemoryBlock_Malloc(int a1, int a2)
         assert(0);
     }
     uc_mem_write(MTK, a1 + 4, &offset, 4);
-    oldOffset = baseAddr + offset;
-    return vm_set_call_result(oldOffset);
+    return vm_set_call_result(baseAddr + oldOffset);
     // printf("[call]MF_MemoryBlock_Malloc(%x,%x)(%x)\n", baseAddr, a2, oldOffset);
 }
 
@@ -2285,8 +2292,11 @@ int vm_LzssDecode(int srcPtr, int srcLen, int destPtr, int a4Ptr)
 
             /* source address = dest - distance */
             int copy_src_vm = destPtr + dest_pos - (int)distance;
-            /* perform copy */
-            vm_memcpy(destPtr + dest_pos, copy_src_vm, (int)n3_1);
+            for (unsigned int i = 0; i < n3_1; ++i)
+            {
+                u8 b = vm_get_var_byte(copy_src_vm + i);
+                vm_set_var_byte(destPtr + dest_pos + i, b);
+            }
 
             src_pos += 2;
             dest_pos += n3_1;
