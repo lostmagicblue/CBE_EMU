@@ -615,6 +615,7 @@ _DWORD *__fastcall vMInitGSensorManager(_DWORD *result)
   result[11] = vmGsensorGetLastMotionInfo;
   return result;
 }
+
 _DWORD *__fastcall vMInitDlLoadManager(_DWORD *result)
 {
   *result = vlDlSetCurrContextAddress;
@@ -957,13 +958,7 @@ int __fastcall vMInitNetAppManager(int a1)
 0x016B41FC + 0x691C = 0x016BAB18//headerInt2 + headerInt4结束位置
 cbe中RW对应到模拟器的位置0x16848E4、0xDD4958，后者是SP寄存器的值
 
-
-
-0x15508 + 0x1695600 = 
-0x14038 + 0x1695600 = 0x16A
-0x13F34 + 0x1695600 = 0x16A9534
-0x14f08 + 0x1695600 = 0x16AA508
-
+0x19F1C + 0x016CE960 = 
 
 
 0x016C5EF8(R9) + 0x2bfc = 0x016C8AF4(理论Data结束地址)

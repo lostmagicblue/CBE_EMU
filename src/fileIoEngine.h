@@ -5,3 +5,4 @@
 
 int writeFile(const char *filename, void *buff, u32 size);
 u8 *readFile(const char *filename, u32 *size);
+int dirExists(char *path);

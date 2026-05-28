@@ -79,7 +79,17 @@ int strlen_utf16(u16 *utf16)
         len++;
     return len;
 }
-
+int strcpy_utf16(u16 *dst, u16 *src)
+{
+    int len = 0;
+    while (src[len] != 0)
+    {
+        dst[len] = src[len];
+        len++;
+    }
+    dst[len] = 0;
+    return len;
+}
 /* 统计 GBK 字符串的字符数（以字为单位）并且可以选择是否严格验证：
  * strict = 1 -> 如果遇到非法序列，立即返回 (size_t)-1 表示错误
  * strict = 0 -> 遇到非法序列时把该字节当作单字节字符继续统计

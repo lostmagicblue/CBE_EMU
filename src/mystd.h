@@ -10,3 +10,4 @@ void gbk_to_unicode(u8 *gbk, u8 *unicode, size_t outlen);
 int strlen_gbk(u8 *gbk);
 u32 ucs2_strlen(u16 *str);
 int ucs2_to_gbk(u8 *ucs2, u32 ucs2_len, u8 *gbk, u32 gbk_len);
+int strcpy_utf16(u16 *dst, u16 *src);

@@ -38,7 +38,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             ;
     }
 #endif
-    // if (type == UC_MEM_WRITE && ((address >= (0x0102954c + 88))&&(address <= (0x0102954c + 92))))
+    // if (type == UC_MEM_WRITE && ((address == 0x10353C0)))
     // {
     //     printf("write[%x:", address);
     //     printf("%x]", value);
