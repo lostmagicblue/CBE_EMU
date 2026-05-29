@@ -58,7 +58,9 @@
 #define VM_DL_RS_MANAGER_ADDRESS (VM_DL_PAY_MANAGER_ADDRESS + VM_MANAGER_TABLE_SIZE)
 #define VM_DL_IMAGE_MANAGER_ADDRESS (VM_DL_RS_MANAGER_ADDRESS + VM_MANAGER_TABLE_SIZE)
 
-#define VM_DF_DataPackage_In_File_Offset_ADDRESS (VM_DL_IMAGE_MANAGER_ADDRESS + 512)
+// Firmware keeps these fields in the DataPackage path block:
+// path[0x200], in-file offset at +0x200, length at +0x204, load type at +0x208.
+#define VM_DF_DataPackage_In_File_Offset_ADDRESS (VM_DF_DataPackage_FilePath_ADDRESS + 512)
 #define VM_DF_DataPackage_In_File_Length_ADDRESS (VM_DF_DataPackage_In_File_Offset_ADDRESS + 4)
 #define VM_DF_DataPackage_LoadType_ADDRESS (VM_DF_DataPackage_In_File_Length_ADDRESS + 4)
 

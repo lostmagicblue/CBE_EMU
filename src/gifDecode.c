@@ -8,14 +8,19 @@
 #define LOG_TRACE(fmt, ...) ((void)0)
 #endif
 
-#define ASSERT(cond)                                                             \
-    do                                                                           \
-    {                                                                            \
-        if (!(cond))                                                             \
-        {                                                                        \
-            fprintf(stderr, "ASSERT failed: %s, line %d\n", __FILE__, __LINE__); \
-            return 0;                                                            \
-        }                                                                        \
+#define GIF_FAIL(fmt, ...)                                      \
+    do                                                          \
+    {                                                           \
+        snprintf(g_gifLastError, sizeof(g_gifLastError), fmt,   \
+                 ##__VA_ARGS__);                                \
+        return 0;                                               \
+    } while (0)
+
+#define ASSERT(cond)                                      \
+    do                                                    \
+    {                                                     \
+        if (!(cond))                                      \
+            GIF_FAIL("assert line=%d", __LINE__);         \
     } while (0)
 
 /* ==================== LKV2 解码器全局状态 ==================== */
@@ -29,6 +34,12 @@ static int16_t LKV2_TransparentIndex; /* 透明色索引 */
 static int32_t LKV2_CurCodeSize;      /* 当前 LZW 码长 */
 static int32_t LKV2_CurMaxCode;       /* 当前 LZW 最大有效码 = 1 << CurCodeSize */
 static int32_t LKV2_CurBit;           /* 当前位偏移, -1 表示未初始化 */
+static char g_gifLastError[128];
+
+const char *gifDecodeGetLastError(void)
+{
+    return g_gifLastError;
+}
 
 /* ==================== GAME_ReadCode 静态状态 ==================== */
 /*
@@ -190,6 +201,7 @@ int gifDecodeExt(uint8_t *data, GifOutput *output, int alloc_new, int *mallocSiz
     int32_t cur_code;
     int32_t prev_code;
     int32_t saved_code;
+    int32_t end_code;
     int32_t stack_idx;
     uint16_t *pixel_buf;
     int32_t dict_size;
@@ -200,6 +212,7 @@ int gifDecodeExt(uint8_t *data, GifOutput *output, int alloc_new, int *mallocSiz
     int32_t loop_cnt;
     uint8_t *src_ptr;
 
+    g_gifLastError[0] = 0;
     gif_lkv2_Init();
     *mallocSize = 0;
     prev_code = 0;
@@ -207,6 +220,10 @@ int gifDecodeExt(uint8_t *data, GifOutput *output, int alloc_new, int *mallocSiz
                 ((int32_t)data[1] << 16) |
                 ((int32_t)data[2] << 8) |
                 (int32_t)data[3];
+    if (dict_size <= 0 || dict_size > 1024 * 1024)
+    {
+        GIF_FAIL("bad dict_size=%d", dict_size);
+    }
     flags = data[4];
     ptr = data + 5;
     first_char = 0;
@@ -215,12 +232,15 @@ int gifDecodeExt(uint8_t *data, GifOutput *output, int alloc_new, int *mallocSiz
 
     if ((flags & 0x80) == 0)
     {
-        ASSERT(0);
-        return 0;
+        GIF_FAIL("missing local palette flags=%02x dict_size=%d", flags, dict_size);
     }
 
     color_count = 1 << ((flags & 7) + 1);
     max_root_code = color_count - 1;
+    if (color_count <= 0 || color_count > 256 || color_count > dict_size)
+    {
+        GIF_FAIL("bad color_count=%d flags=%02x dict_size=%d", color_count, flags, dict_size);
+    }
 
     /* src 用于指向局部调色板源数据 (ptr + 2) */
     src_ptr = ptr + 2;
@@ -290,6 +310,10 @@ int gifDecodeExt(uint8_t *data, GifOutput *output, int alloc_new, int *mallocSiz
 
             img_width = ((int32_t)src_ptr[1] << 8) | src_ptr[0];
             img_height = ((int32_t)src_ptr[3] << 8) | src_ptr[2];
+            if (img_width <= 0 || img_height <= 0 || img_width > 1024 || img_height > 1024)
+            {
+                GIF_FAIL("bad image_size=%dx%d dict_size=%d", img_width, img_height, dict_size);
+            }
             LKV2_GIFArray = src_ptr + 4;
 
             /* 检查 packed field 的位 6-7 (原始: v20 >> 6) */
@@ -297,13 +321,16 @@ int gifDecodeExt(uint8_t *data, GifOutput *output, int alloc_new, int *mallocSiz
             LKV2_GIFArray++;
             if ((packed >> 6) != 0)
             {
-                ASSERT(0);
-                return 0;
+                GIF_FAIL("unsupported packed=%02x size=%dx%d", packed, img_width, img_height);
             }
 
             /* 读取 LZW 最小码长 */
             code_size = (int32_t)*LKV2_GIFArray;
             LKV2_GIFArray++;
+            if (code_size <= 0 || code_size > 8)
+            {
+                GIF_FAIL("bad code_size=%d size=%dx%d", code_size, img_width, img_height);
+            }
 
             /*
              * 初始化 LZW 解码参数
@@ -315,7 +342,12 @@ int gifDecodeExt(uint8_t *data, GifOutput *output, int alloc_new, int *mallocSiz
             LKV2_CurCodeSize = code_size + 1;
             LKV2_CurMaxCode = 1 << (code_size + 1);
             clear_code = 1 << code_size;
+            end_code = clear_code + 1;
             next_code = clear_code + 2;
+            if (next_code >= dict_size)
+            {
+                GIF_FAIL("dict too small dict_size=%d next_code=%d", dict_size, next_code);
+            }
 
             /*
              * 计算行对齐填充
@@ -384,6 +416,12 @@ int gifDecodeExt(uint8_t *data, GifOutput *output, int alloc_new, int *mallocSiz
                     next_code = clear_code + 2;
 
                     prev_code = GAME_ReadCode();
+                    if (prev_code < 0 || prev_code == end_code)
+                        break;
+                    if (prev_code > max_root_code)
+                    {
+                        GIF_FAIL("bad prev_code=%d max_root=%d", prev_code, max_root_code);
+                    }
                     first_char = (uint8_t)prev_code;
 
                     *LKV2_PixelArray = LKV2_Palette[first_char];
@@ -396,11 +434,17 @@ int gifDecodeExt(uint8_t *data, GifOutput *output, int alloc_new, int *mallocSiz
                 }
                 else
                 {
+                    if (cur_code < 0 || cur_code == end_code)
+                        break;
                     saved_code = cur_code;
 
                     if (cur_code >= next_code)
                     {
-                        /* 码值超出当前字典: KwKwK 特殊情况 */
+                        if (prev_code < 0)
+                        {
+                            GIF_FAIL("bad kwkwk cur=%d next=%d prev=%d", cur_code, next_code, prev_code);
+                        }
+                        /* 固件在 cur_code >= next_code 时统一按 KwKwK 分支处理。 */
                         cur_code = prev_code;
                         LKV2_OutCode[0] = first_char;
                         stack_idx = 1;
@@ -409,16 +453,24 @@ int gifDecodeExt(uint8_t *data, GifOutput *output, int alloc_new, int *mallocSiz
                     /* 沿前缀链回溯, 将字节推入输出栈 */
                     while (cur_code > max_root_code)
                     {
+                        if (cur_code < 0 || cur_code >= dict_size || cur_code >= next_code || stack_idx >= dict_size)
+                        {
+                            GIF_FAIL("bad prefix cur=%d next=%d stack=%d dict=%d", cur_code, next_code, stack_idx, dict_size);
+                        }
                         LKV2_OutCode[stack_idx] = LKV2_Suffix[cur_code];
                         stack_idx++;
                         cur_code = LKV2_Prefix[cur_code];
+                    }
+                    if (cur_code < 0 || cur_code > max_root_code || stack_idx >= dict_size)
+                    {
+                        GIF_FAIL("bad root cur=%d max_root=%d stack=%d dict=%d", cur_code, max_root_code, stack_idx, dict_size);
                     }
 
                     first_char = (uint8_t)cur_code;
                     LKV2_OutCode[stack_idx] = (uint8_t)cur_code;
 
                     /* 从栈中弹出并输出像素 */
-                    while (stack_idx >= 0)
+                    while (stack_idx >= 0 && total_pixels > 0)
                     {
                         *LKV2_PixelArray =
                             LKV2_Palette[LKV2_OutCode[stack_idx]];
@@ -432,11 +484,15 @@ int gifDecodeExt(uint8_t *data, GifOutput *output, int alloc_new, int *mallocSiz
                     }
 
                     /* 将新串加入字典 */
-                    LKV2_Prefix[next_code] = prev_code;
-                    LKV2_Suffix[next_code] = first_char;
+                    if (next_code < dict_size)
+                    {
+                        LKV2_Prefix[next_code] = prev_code;
+                        LKV2_Suffix[next_code] = first_char;
+                    }
                     stack_idx = 0;
                     prev_code = saved_code;
-                    next_code++;
+                    if (next_code < dict_size)
+                        next_code++;
 
                     /* 检查是否需要增加码长 */
                     if (next_code >= LKV2_CurMaxCode && LKV2_CurCodeSize < 12)
@@ -467,8 +523,7 @@ int gifDecodeExt(uint8_t *data, GifOutput *output, int alloc_new, int *mallocSiz
             return 1;
         }
     }
-    ASSERT(0);
-    return 0;
+    GIF_FAIL("no image separator dict_size=%d flags=%02x", dict_size, flags);
 }
 /* ==================== 资源释放 ==================== */
 void gifReleaseOutput(GifOutput *output)

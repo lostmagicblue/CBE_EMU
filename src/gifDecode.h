@@ -31,4 +31,5 @@ typedef struct vm_img_result
 
 
 int gifDecodeExt(uint8_t *data, GifOutput *output, int alloc_new, int *mallocSize);
+const char *gifDecodeGetLastError(void);
 void free_mem(void *ptr);

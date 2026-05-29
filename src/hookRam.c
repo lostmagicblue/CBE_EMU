@@ -109,6 +109,20 @@ void hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_
 {
     printf("地址无法访问:%x type:%d size:%u value:%llx\n", address, type, size, value);
     dumpCpuInfo();
+    int regs[] = {
+        UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3,
+        UC_ARM_REG_R4, UC_ARM_REG_R5, UC_ARM_REG_R6, UC_ARM_REG_R7,
+    };
+    for (unsigned i = 0; i < sizeof(regs) / sizeof(regs[0]); ++i)
+    {
+        u32 ptr = 0;
+        uc_reg_read(MTK, regs[i], &ptr);
+        if (ptr >= ROM_ADDRESS && ptr < ROM_ADDRESS + 0x1000000)
+        {
+            printf("------------\nr%u object dump at %08x\n", i, ptr);
+            dumpVirtMemory(ptr, 96);
+        }
+    }
     u32 sp;
     uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
     if (sp >= STACK_ADDRESS && sp <= STACK_ADDRESS + 0x100000)

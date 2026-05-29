@@ -2,6 +2,9 @@
 #define GDI_LAYER_DEBUG_
 
 #define DEBUG_PRINT(...) ((void)0)
+#define ENABLE_GAME_PC_PATCHES 0
+#define ENABLE_GAME_OBJECT_FIXUPS 0
+#define ENABLE_NET_STATE_FIXUPS 0
 
 #ifdef _WIN32
 #include <direct.h>
@@ -116,6 +119,7 @@ int simulateTouchY = 0;
 u32 screenStructChange = 0;
 u32 screenStructNotifyLoadRes = 0;
 u32 vmAddedScreen = 0;
+static u32 g_tscreenCodeBase = 0;
 
 u32 lastSprintfPtr = 0;
 static u8 *g_cbeFileBuffer = NULL;
@@ -167,6 +171,7 @@ static u32 g_netMockResponseLen = 0;
 static u32 g_netMockResponseOffset = 0;
 static u32 g_netMockResponseVmPtr = 0;
 static u8 g_netMockResponseIsUpdateChunk = 0;
+static u8 g_netMockUpdateDelivered = 0;
 static u8 g_lastStartupScreenState = 0xff;
 static u32 g_lastStartupUpdateObj = 0xffffffff;
 static u8 g_lastStartupProgress = 0xff;
@@ -190,6 +195,18 @@ static bool vm_is_manager_func_stub_address(u32 address)
     if (vm_address_in_range(address, VM_MF_MemoryBlock_FUNC_LIST_ADDRESS, VM_APPSTORE_FUNC_LIST_ADDRESS - VM_MF_MemoryBlock_FUNC_LIST_ADDRESS))
         return true;
     if (vm_address_in_range(address, VM_APPSTORE_FUNC_LIST_ADDRESS, VM_MANAGER_FUNC_LIST_SIZE))
+        return true;
+    return false;
+}
+
+static bool vm_is_title_code_offset(u32 pc, u32 offset)
+{
+    pc &= ~1u;
+    if (g_tscreenCodeBase != 0 && pc == g_tscreenCodeBase + offset)
+        return true;
+    if (pc == 0x05022d78 + offset)
+        return true;
+    if (pc == 0x0501dcf0 + offset)
         return true;
     return false;
 }
@@ -263,6 +280,7 @@ static u32 vm_load_resource_blob_from_cbe(const char *name)
 
 static const char *vm_fake_resource_name_from_id(u32 id)
 {
+#if ENABLE_GAME_OBJECT_FIXUPS
     switch (id)
     {
     case 0x70000000:
@@ -278,10 +296,15 @@ static const char *vm_fake_resource_name_from_id(u32 id)
     default:
         return NULL;
     }
+#else
+    (void)id;
+    return NULL;
+#endif
 }
 
 static u32 vm_fake_resource_id_from_name(const char *name)
 {
+#if ENABLE_GAME_OBJECT_FIXUPS
     if (strcmp(name, "flowerStyle.gif") == 0)
         return 0x70000000;
     if (strcmp(name, "loading.gif") == 0)
@@ -292,6 +315,9 @@ static u32 vm_fake_resource_id_from_name(const char *name)
         return 0x70000003;
     if (strcmp(name, "UI8.gif") == 0)
         return 0x70000004;
+#else
+    (void)name;
+#endif
     return 0;
 }
 
@@ -407,8 +433,98 @@ static u32 vm_create_image_from_resource_name(const char *name)
     return imageInfo;
 }
 
+static void vm_picture_library_install_images(u32 picLib, const char **names, u32 nameCount)
+{
+    if (picLib == 0 || names == NULL || nameCount == 0)
+        return;
+
+    u32 itemTable = 0;
+    u32 nameBuffer = 0;
+    uc_mem_read(MTK, picLib, &nameBuffer, 4);
+    if (nameBuffer == 0)
+    {
+        nameBuffer = vm_malloc(0x1e0);
+        uc_mem_write(MTK, nameBuffer, emptyBuff, 0x1e0);
+        uc_mem_write(MTK, picLib, &nameBuffer, 4);
+    }
+
+    uc_mem_read(MTK, picLib + 0x10, &itemTable, 4);
+    if (itemTable != 0)
+        return;
+
+    u16 capacity = 0;
+    u16 existingCount = 0;
+    uc_mem_read(MTK, picLib + 0x08, &capacity, 2);
+    uc_mem_read(MTK, picLib + 0x14, &existingCount, 2);
+
+    u32 slotCount = existingCount ? existingCount : capacity;
+    if (slotCount == 0 || slotCount > nameCount)
+        slotCount = nameCount;
+
+    u32 idTable = vm_malloc(slotCount * 2);
+    itemTable = vm_malloc(slotCount * 4);
+    uc_mem_write(MTK, idTable, emptyBuff, slotCount * 2);
+    uc_mem_write(MTK, itemTable, emptyBuff, slotCount * 4);
+
+    u16 invalidId = 0xffff;
+    u32 itemCount = 0;
+    u32 lastImage = 0;
+    for (u32 i = 0; i < slotCount; ++i)
+    {
+        u32 imageInfo = vm_create_image_from_resource_name(names[i]);
+        if (imageInfo == 0)
+            imageInfo = lastImage;
+        if (imageInfo == 0)
+            continue;
+        uc_mem_write(MTK, itemTable + itemCount * 4, &imageInfo, 4);
+        uc_mem_write(MTK, idTable + itemCount * 2, &invalidId, 2);
+        lastImage = imageInfo;
+        itemCount++;
+    }
+
+    if (itemCount == 0)
+    {
+        vm_free(idTable);
+        vm_free(itemTable);
+        return;
+    }
+
+    if (itemCount < slotCount)
+    {
+        for (u32 i = itemCount; i < slotCount; ++i)
+        {
+            uc_mem_write(MTK, itemTable + i * 4, &lastImage, 4);
+            uc_mem_write(MTK, idTable + i * 2, &invalidId, 2);
+        }
+        itemCount = slotCount;
+    }
+
+    uc_mem_write(MTK, picLib + 0x0c, &idTable, 4);
+    uc_mem_write(MTK, picLib + 0x10, &itemTable, 4);
+    uc_mem_write(MTK, picLib + 0x14, &itemCount, 2);
+    if (capacity == 0)
+        uc_mem_write(MTK, picLib + 0x08, &itemCount, 2);
+    vm_fileio_trace("picture_library_install picLib=%08x idTable=%08x itemTable=%08x count=%u\n",
+                    picLib, idTable, itemTable, itemCount);
+}
+
 static void scheduler_prepare_debug_picture_library(void)
 {
+#if ENABLE_GAME_OBJECT_FIXUPS
+    const char *titleNames[] = {
+        "Background.gif",
+        "title001.gif",
+        "banben.gif",
+        "banbenV.gif",
+        "banbenNB.gif",
+        "UI8.gif",
+        "UI7.gif",
+        "loading.gif",
+        "UI2.gif",
+    };
+    u32 titlePicLib = Global_R9 + 0x2878;
+    vm_picture_library_install_images(titlePicLib, titleNames, sizeof(titleNames) / sizeof(titleNames[0]));
+
     u32 debugUiRoot = Global_R9 + 0x9928;
     u32 debugUiObj = 0;
     u32 debugItems = 0;
@@ -483,6 +599,9 @@ static void scheduler_prepare_debug_picture_library(void)
     uc_mem_write(MTK, debugUiObj + 0x60, &widthFunc, 4);
     uc_mem_write(MTK, debugUiObj + 0x64, &heightFunc, 4);
     uc_mem_write(MTK, debugUiObj + 0x78, &drawFunc, 4);
+#else
+    (void)vm_picture_library_install_images;
+#endif
 }
 
 static void scheduler_normalize_startup_screen_state(void)
@@ -495,8 +614,14 @@ static void scheduler_normalize_startup_screen_state(void)
 
     u8 state = 0;
     u32 updateObj = 0;
+    u32 imageTable = 0;
+    short imageIndexA = 0;
+    short imageIndexB = 0;
     uc_mem_read(MTK, debugUiObj + 0x3d, &state, 1);
     uc_mem_read(MTK, debugUiObj + 0x140, &updateObj, 4);
+    uc_mem_read(MTK, debugUiObj + 0x50, &imageTable, 4);
+    uc_mem_read(MTK, debugUiObj + 0x34, &imageIndexA, 2);
+    uc_mem_read(MTK, debugUiObj + 0x36, &imageIndexB, 2);
     if (state != g_lastStartupScreenState || updateObj != g_lastStartupUpdateObj)
     {
         u8 hasLocalUpdate = 0;
@@ -505,7 +630,8 @@ static void scheduler_normalize_startup_screen_state(void)
         uc_mem_read(MTK, Global_R9 + 0x5496, &hasLocalUpdate, 1);
         uc_mem_read(MTK, Global_R9 + 0x5494, &progress, 1);
         uc_mem_read(MTK, Global_R9 + 0x4cb6, &updateState, 1);
-        vm_net_trace("startup_screen state=%u updateObj=%08x hasLocalUpdate=%u progress=%u updateState=%u tick=%u\n", state, updateObj, hasLocalUpdate, progress, updateState, g_schedulerTick);
+        vm_net_trace("startup_screen obj=%08x state=%u updateObj=%08x hasLocalUpdate=%u progress=%u updateState=%u imageTable=%08x idx=%d,%d tick=%u\n",
+                     debugUiObj, state, updateObj, hasLocalUpdate, progress, updateState, imageTable, imageIndexA, imageIndexB, g_schedulerTick);
         g_lastStartupScreenState = state;
         g_lastStartupUpdateObj = updateObj;
         g_lastStartupProgress = progress;
@@ -526,12 +652,16 @@ static void scheduler_normalize_startup_screen_state(void)
     }
     if (state == 10 && updateObj == 0)
     {
+#if ENABLE_GAME_OBJECT_FIXUPS
         u8 musicSettingReady = 0;
         u8 nextState = 11;
         uc_mem_read(MTK, Global_R9 + 0x5496, &musicSettingReady, 1);
         if (musicSettingReady == 1)
             nextState = 9;
         uc_mem_write(MTK, debugUiObj + 0x3d, &nextState, 1);
+#else
+        vm_net_trace("startup_state_waiting state=10 updateObj=0 tick=%u\n", g_schedulerTick);
+#endif
     }
 }
 
@@ -802,10 +932,14 @@ static uc_err scheduler_dispatch_net_tasks(void)
                 u32 netCb44 = 0;
                 uc_mem_read(MTK, Global_R9 + 0x9588 + 0x14, &netCb14, 4);
                 uc_mem_read(MTK, Global_R9 + 0x9588 + 0x44, &netCb44, 4);
+#if ENABLE_NET_STATE_FIXUPS
                 uc_mem_read(MTK, Global_R9 + 0x9588 + 0xc, &oldNetState, 1);
                 forceNetState = 1;
                 uc_mem_write(MTK, Global_R9 + 0x9588 + 0xc, &forceNetState, 1);
                 vm_net_trace("force_net_state old=%u new=%u cb14=%08x cb44=%08x\n", oldNetState, forceNetState, netCb14, netCb44);
+#else
+                vm_net_trace("net_state_observe cb14=%08x cb44=%08x\n", netCb14, netCb44);
+#endif
             }
             uc_err err = vm_call4(task->callback, task->r0, task->r1, task->r2, task->eventType);
             if (task->eventType == 7)
@@ -830,6 +964,7 @@ static uc_err scheduler_dispatch_net_tasks(void)
                 uc_mem_read(MTK, Global_R9 + 0x95e8 + 0x28, &downloadTotal, 4);
                 if (downloadState == 3 && updateFlags[0] == 0 && updateFlags[1] == 1 && updateFlags[2] == 1 && updateFlags[3] == 1)
                 {
+#if ENABLE_NET_STATE_FIXUPS
                     u8 done = 1;
                     u8 idle = 0;
                     uc_mem_write(MTK, Global_R9 + 0x954c + 0x10, &done, 1);
@@ -851,15 +986,25 @@ static uc_err scheduler_dispatch_net_tasks(void)
                     if (!g_startupAdvanceAfterUpdate)
                     {
                         g_startupAdvanceAfterUpdate = 1;
-                        vm_net_trace("startup_advance_after_update entry=0100369c arg=2\n");
-                        uc_err advanceErr = vm_call4(0x100369c, 2, 0, 0, 0);
-                        if (advanceErr != UC_ERR_OK)
-                            return advanceErr;
+                        g_netMockUpdateDelivered = 1;
+                        vm_net_trace("startup_update_complete marked_done=1\n");
                     }
+#else
+                    vm_net_trace("update_chunk_complete_observed flag=0 downloadState=3\n");
+#endif
+                }
+                if (updateState == 2 && updateFlags[0] == 1 && updateFlags[1] == 1 && updateFlags[2] == 1 && updateFlags[3] == 1 &&
+                    !g_startupAdvanceAfterUpdate)
+                {
+                    g_startupAdvanceAfterUpdate = 1;
+                    g_netMockUpdateDelivered = 1;
+                    vm_net_trace("startup_no_update_complete flags=1,1,1,1\n");
                 }
                 vm_net_trace("after_data_event updateState=%u downloadState=%u updateIndex=%u remain=%u done=%u received=%u total=%u hasLocalUpdate=%u flags=%u,%u,%u,%u\n",
                              updateState, downloadState, updateIndex, updateRemain, updateDoneCount, downloadReceived, downloadTotal, hasLocalUpdate, updateFlags[0], updateFlags[1], updateFlags[2], updateFlags[3]);
+#if ENABLE_NET_STATE_FIXUPS
                 uc_mem_write(MTK, Global_R9 + 0x9588 + 0xc, &oldNetState, 1);
+#endif
             }
             uc_mem_write(MTK, netCurrentReqAddr, &oldCurrentReq, 4);
             if (err != UC_ERR_OK)
@@ -913,6 +1058,17 @@ static u32 vm_net_mock_load_response_file(const char *path, u8 *out, u32 outCap)
     size_t len = fread(out, 1, outCap, fp);
     fclose(fp);
     return (u32)len;
+}
+
+static bool vm_net_mock_file_has_data(const char *path)
+{
+    FILE *fp = fopen(path, "rb");
+    if (fp == NULL)
+        return false;
+    fseek(fp, 0, SEEK_END);
+    long size = ftell(fp);
+    fclose(fp);
+    return size > 40;
 }
 
 static bool vm_net_mock_buffer_has_nonzero(const u8 *data, u32 len)
@@ -1137,10 +1293,17 @@ static bool vm_net_mock_put_object_string(u8 *out, u32 outCap, u32 *pos, const c
 static u32 vm_net_mock_build_version_response(u8 *out, u32 outCap)
 {
     u32 pos = 11;
+    u8 result = 1;
     if (outCap < pos)
         return 0;
 
-    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
+    if (g_netMockUpdateDelivered || vm_net_mock_file_has_data("JHOnlineData/MMORPGTempcbm"))
+    {
+        g_netMockUpdateDelivered = 1;
+        result = 0;
+    }
+
+    if (!vm_net_mock_put_int_field(out, outCap, &pos, "result", result))
         return 0;
 
     out[0] = 'W';
@@ -1154,6 +1317,7 @@ static u32 vm_net_mock_build_version_response(u8 *out, u32 outCap)
     out[8] = 0;
     out[9] = (u8)((pos - 5) >> 8);
     out[10] = (u8)(pos - 5);
+    vm_net_trace("mock_version_response result=%u delivered=%u\n", result, g_netMockUpdateDelivered);
     return pos;
 }
 
@@ -1812,6 +1976,7 @@ void RunArmProgram(void *param)
             u32 tScreenUpdateEntry = 0;
             u32 tScreenEventEntry = 0;
             u32 tScreenInitEntry = 0;
+            u32 tScreenResourceLoadEntry = 0;
             u32 tScreenInitedPtr = 0;
             while (p == UC_ERR_OK && screenStructChange != 1)
             {
@@ -1837,81 +2002,12 @@ void RunArmProgram(void *param)
                 }
                 scheduler_prepare_debug_picture_library();
                 scheduler_normalize_startup_screen_state();
-                u32 debugUiRoot = Global_R9 + 0x9928;
-                u32 debugUiObj = 0;
-                u32 debugItems = 0;
-                uc_mem_read(MTK, debugUiRoot + 0x10, &debugUiObj, 4);
-                if (debugUiObj)
-                {
-                    u16 defaultItemIndex = 2; // UI7.gif, used by the lower-right cancel button.
-                    uc_mem_write(MTK, debugUiObj + 0x38, &defaultItemIndex, 2);
-                    u32 callback = 0;
-                            uc_mem_read(MTK, debugUiObj + 0x20, &callback, 4);
-                    if (callback == 0)
-                    {
-                        u32 widthFunc = VM_FAKE_IMAGE_WIDTH_FUNC_ADDRESS | 1;
-                        u32 heightFunc = VM_FAKE_IMAGE_HEIGHT_FUNC_ADDRESS | 1;
-                        u32 drawFunc = VM_FAKE_IMAGE_DRAW_FUNC_ADDRESS | 1;
-                        uc_mem_write(MTK, debugUiObj + 0x20, &widthFunc, 4);
-                        uc_mem_write(MTK, debugUiObj + 0x24, &heightFunc, 4);
-                        uc_mem_write(MTK, debugUiObj + 0x60, &widthFunc, 4);
-                        uc_mem_write(MTK, debugUiObj + 0x64, &heightFunc, 4);
-                        uc_mem_write(MTK, debugUiObj + 0x78, &drawFunc, 4);
-                    }
-                    uc_mem_read(MTK, debugUiObj + 0x50, &debugItems, 4);
-                    if (debugItems == 0)
-                    {
-                        const char *names[] = {"UI2.gif", "UI8.gif", "UI7.gif", "flowerStyle.gif"};
-                        u32 itemTable = vm_malloc(16);
-                        u32 itemCount = 0;
-                        u32 widthFunc = VM_FAKE_IMAGE_WIDTH_FUNC_ADDRESS | 1;
-                        u32 heightFunc = VM_FAKE_IMAGE_HEIGHT_FUNC_ADDRESS | 1;
-                        u32 drawFunc = VM_FAKE_IMAGE_DRAW_FUNC_ADDRESS | 1;
-                        u32 lookupFunc = VM_FAKE_IMAGE_LOOKUP_FUNC_ADDRESS | 1;
-                        for (u32 n = 0; n < sizeof(names) / sizeof(names[0]); ++n)
-                        {
-                            u32 imageInfo = vm_create_image_from_resource_name(names[n]);
-                            if (imageInfo)
-                            {
-                                uc_mem_write(MTK, itemTable + itemCount * 4, &imageInfo, 4);
-                                itemCount++;
-                            }
-                        }
-                        if (itemCount == 0)
-                        {
-                            u32 imageInfo = vm_malloc(0x80);
-                            u32 pixelBuffer = vm_malloc(240 * 32 * 2);
-                            u16 imageWidth = 240;
-                            u16 imageHeight = 32;
-                            for (u32 off = 0; off < 240 * 32 * 2; off += sizeof(emptyBuff))
-                                uc_mem_write(MTK, pixelBuffer + off, emptyBuff, SDL_min((u32)sizeof(emptyBuff), 240 * 32 * 2 - off));
-                            uc_mem_write(MTK, imageInfo, emptyBuff, 0x80);
-                            uc_mem_write(MTK, imageInfo, &pixelBuffer, 4);
-                            uc_mem_write(MTK, imageInfo + 4, &imageWidth, 2);
-                            uc_mem_write(MTK, imageInfo + 6, &imageHeight, 2);
-                            uc_mem_write(MTK, itemTable, &imageInfo, 4);
-                            itemCount = 1;
-                        }
-                        if (itemCount == 1)
-                        {
-                            u32 imageInfo = 0;
-                            uc_mem_read(MTK, itemTable, &imageInfo, 4);
-                            for (u32 n = 1; n < 4; ++n)
-                                uc_mem_write(MTK, itemTable + n * 4, &imageInfo, 4);
-                            itemCount = 4;
-                        }
-                        uc_mem_write(MTK, debugUiObj + 0x50, &itemTable, 4);
-                        uc_mem_write(MTK, debugUiObj + 0x54, &itemCount, 4);
-                        uc_mem_write(MTK, debugUiObj + 0x58, &itemCount, 4);
-                        uc_mem_write(MTK, debugUiObj + 0x5c, &lookupFunc, 4);
-                        uc_mem_write(MTK, debugUiObj + 0x60, &widthFunc, 4);
-                        uc_mem_write(MTK, debugUiObj + 0x64, &heightFunc, 4);
-                        uc_mem_write(MTK, debugUiObj + 0x78, &drawFunc, 4);
-                    }
-                }
                 uc_mem_read(MTK, vmAddedScreen + 0x04, &tScreenUpdateEntry, 4);
                 uc_mem_read(MTK, vmAddedScreen + 0x08, &tScreenEventEntry, 4);
                 uc_mem_read(MTK, vmAddedScreen + 0x0c, &tScreenRenderEntry, 4);
+                uc_mem_read(MTK, vmAddedScreen + 0x18, &tScreenResourceLoadEntry, 4);
+                if (tScreenRenderEntry)
+                    g_tscreenCodeBase = (tScreenRenderEntry & ~1u) - 0x63e;
                 if (tScreenRenderEntry == 0)
                 {
                     printf("TScreen未设置render入口\n");
@@ -1938,6 +2034,23 @@ void RunArmProgram(void *param)
                     if (screenStructChange == 1)
                         break;
                 }
+                if (screenStructNotifyLoadRes == 1)
+                {
+                    screenStructNotifyLoadRes = 0;
+                    if (tScreenResourceLoadEntry)
+                    {
+                        vm_net_trace("tscreen_resource_load entry=%08x screen=%08x\n", tScreenResourceLoadEntry, vmAddedScreen);
+                        uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
+                        uc_reg_write(MTK, UC_ARM_REG_R0, &vmAddedScreen);
+                        p = vm_emu_start(tScreenResourceLoadEntry, exitAddr);
+                        if (p != UC_ERR_OK)
+                        {
+                            printf("TScreen resource load异常:%s\n", uc_strerror(p));
+                            break;
+                        }
+                    }
+                }
+                scheduler_prepare_debug_picture_library();
                 uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
                 uc_reg_write(MTK, UC_ARM_REG_R0, &vmAddedScreen);
                 p = vm_emu_start(tScreenRenderEntry, exitAddr);
@@ -3033,13 +3146,15 @@ static bool hook_vm_sys_manager_func(u32 address)
         }
         else if (idx == 68)
         {
-            printf("[call]Net_get_DefaultLoginInfo\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+            if (tmp1 && tmp2)
+                uc_mem_write(MTK, tmp1, emptyBuff, tmp2 > sizeof(emptyBuff) ? sizeof(emptyBuff) : tmp2);
+            vm_set_call_result(0);
         }
         else if (idx == 69)
         {
-            printf("[call]Net_write_DefaultLoginInfo\n");
-            assert(0);
+            vm_set_call_result(0);
         }
         else if (idx == 70)
         {
@@ -4358,13 +4473,11 @@ static bool hook_vm_manager_fileio_func(u32 address)
         }
         else if (idx == 24)
         {
-            printf("[call]vm_file_truncate\n");
-            assert(0);
+            vm_set_call_result(0);
         }
         else if (idx == 25)
         {
-            printf("[call]vm_file_RdWt\n");
-            assert(0);
+            vm_set_call_result(0);
         }
         else if (idx == 26)
         {
@@ -7078,7 +7191,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         tracePc == 0x103755e || tracePc == 0x103757e || tracePc == 0x1037588 || tracePc == 0x1037598 ||
         tracePc == 0x10372d6 || tracePc == 0x103730e || tracePc == 0x1037318 || tracePc == 0x1037324 ||
         tracePc == 0x1037334 || tracePc == 0x1037348 || tracePc == 0x1037358 || tracePc == 0x1037378 ||
-        tracePc == 0x103745e)
+        tracePc == 0x103745e || tracePc == 0x103a9c0 || tracePc == 0x103a9c4 || tracePc == 0x103a9cc)
     {
         u32 r0 = 0, r1 = 0, r2 = 0, r3 = 0, lr = 0;
         uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
@@ -7094,6 +7207,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
                 vm_net_trace_bytes("parse_object_input", bytes, sizeof(bytes));
         }
     }
+#if ENABLE_GAME_PC_PATCHES
     if (((u32)address & ~1u) == 0x103b07c)
     {
         vm_set_call_result(0);
@@ -7108,6 +7222,115 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         vm_bx(tmp1);
         return;
     }
+    if (((u32)address & ~1u) == 0x103a9d0 || ((u32)address & ~1u) == 0x103a9d6)
+    {
+        u32 drawManager = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R5, &tmp1);
+        if (tmp1 == 0 || uc_mem_read(MTK, tmp1, &drawManager, 4) != UC_ERR_OK || drawManager == 0)
+        {
+            tmp1 = 0x103aa32 | 1;
+            vm_bx(tmp1);
+            return;
+        }
+    }
+    if (((u32)address & ~1u) == 0x103b04c)
+    {
+        u32 sp = 0;
+        u32 imageObj = 0;
+        uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+        if (uc_mem_read(MTK, sp + 4, &imageObj, 4) != UC_ERR_OK || imageObj == 0)
+        {
+            tmp1 = 0x103b050 | 1;
+            vm_bx(tmp1);
+            return;
+        }
+    }
+    if (((u32)address & ~1u) == 0x1005b78 || ((u32)address & ~1u) == 0x1005b9c)
+    {
+        u32 picLib = 0;
+        u32 itemTable = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R4, &picLib);
+        if (picLib == 0 || uc_mem_read(MTK, picLib + 0x10, &itemTable, 4) != UC_ERR_OK || itemTable == 0)
+        {
+            tmp1 = 0;
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+            uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+            vm_bx(tmp1);
+            return;
+        }
+    }
+    if (((u32)address & ~1u) == 0x1004e2c || ((u32)address & ~1u) == 0x1004e62 ||
+        ((u32)address & ~1u) == 0x1004e9c)
+    {
+        u32 actor = 0;
+        u32 actorData = 0;
+        u32 groupTable = 0;
+        u32 frameBase = 0;
+        u16 groupIndex = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &actor);
+        if (actor == 0 ||
+            uc_mem_read(MTK, actor + 0x0c, &actorData, 4) != UC_ERR_OK || actorData == 0 ||
+            uc_mem_read(MTK, actorData + 0x0c, &groupTable, 4) != UC_ERR_OK || groupTable == 0 ||
+            uc_mem_read(MTK, actor + 0x06, &groupIndex, 2) != UC_ERR_OK ||
+            uc_mem_read(MTK, groupTable + ((u32)(int16_t)groupIndex) * 8 + 4, &frameBase, 4) != UC_ERR_OK ||
+            frameBase == 0)
+        {
+            tmp1 = 0;
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+            uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+            vm_bx(tmp1);
+            return;
+        }
+    }
+    if (((u32)address & ~1u) == 0x100591a || ((u32)address & ~1u) == 0x100591e ||
+        ((u32)address & ~1u) == 0x1005938 || ((u32)address & ~1u) == 0x100593c ||
+        ((u32)address & ~1u) == 0x100597e || ((u32)address & ~1u) == 0x1005982 ||
+        ((u32)address & ~1u) == 0x100599c || ((u32)address & ~1u) == 0x10059a0)
+    {
+        u32 picLib = 0;
+        u32 itemTable = 0;
+        u32 itemOffset = 0;
+        u32 imageObj = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R4, &picLib);
+        uc_reg_read(MTK, UC_ARM_REG_R12, &itemOffset);
+        if (picLib == 0 ||
+            uc_mem_read(MTK, picLib + 0x10, &itemTable, 4) != UC_ERR_OK || itemTable == 0 ||
+            uc_mem_read(MTK, itemTable + itemOffset, &imageObj, 4) != UC_ERR_OK || imageObj == 0)
+        {
+            tmp1 = 0;
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+            tmp1 = 0x100592a | 1;
+            if ((((u32)address & ~1u) >= 0x100597e))
+                tmp1 = 0x100598e | 1;
+            vm_bx(tmp1);
+            return;
+        }
+    }
+    if (vm_is_title_code_offset((u32)address, 0x2868) || vm_is_title_code_offset((u32)address, 0x286a))
+    {
+        u32 actor = 0;
+        u32 actorData = 0;
+        u32 groupTable = 0;
+        u16 groupIndex = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R7, &actor);
+        if (actor == 0 ||
+            uc_mem_read(MTK, actor + 0x0c, &actorData, 4) != UC_ERR_OK || actorData == 0 ||
+            uc_mem_read(MTK, actorData + 0x0c, &groupTable, 4) != UC_ERR_OK || groupTable == 0 ||
+            uc_mem_read(MTK, actor + 0x06, &groupIndex, 2) != UC_ERR_OK)
+        {
+            uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+            vm_bx(tmp1);
+            return;
+        }
+    }
+    if (vm_is_title_code_offset((u32)address, 0x67e))
+    {
+        tmp1 = (g_tscreenCodeBase ? g_tscreenCodeBase : (((u32)address & ~1u) - 0x67e)) + 0x682;
+        tmp1 |= 1;
+        vm_bx(tmp1);
+        return;
+    }
+#endif
     if (((u32)address & ~1u) == VM_FAKE_IMAGE_WIDTH_FUNC_ADDRESS)
     {
         u32 picLib = 0;
@@ -7245,6 +7468,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         vm_bx(tmp1);
         return;
     }
+#if ENABLE_GAME_PC_PATCHES
     if (address == 0x10189e4)
     {
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp1);
@@ -7315,6 +7539,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
             return;
         }
     }
+#endif
     // if (address == ROM_ADDRESS + 0x3C72 - 0x98)
     // {
     //     uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
