@@ -5,6 +5,8 @@
 #define ENABLE_GAME_PC_PATCHES 0
 #define ENABLE_GAME_OBJECT_FIXUPS 0
 #define ENABLE_NET_STATE_FIXUPS 0
+#define TRACE_STARTUP_UI 0
+#define TRACE_RESOURCE_IO 0
 
 #ifdef _WIN32
 #include <direct.h>
@@ -172,6 +174,8 @@ static u32 g_netMockResponseOffset = 0;
 static u32 g_netMockResponseVmPtr = 0;
 static u8 g_netMockResponseIsUpdateChunk = 0;
 static u8 g_netMockUpdateDelivered = 0;
+static u32 g_netUpLinkData = 0;
+static u32 g_netDownLinkData = 0;
 static u8 g_lastStartupScreenState = 0xff;
 static u32 g_lastStartupUpdateObj = 0xffffffff;
 static u8 g_lastStartupProgress = 0xff;
@@ -190,7 +194,7 @@ static bool vm_is_manager_func_stub_address(u32 address)
 {
     if (vm_address_in_range(address, VM_MANAGER_FUNC_LIST_ADDRESS, VM_VIDEO_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE - VM_MANAGER_FUNC_LIST_ADDRESS))
         return true;
-    if (vm_address_in_range(address, VM_DL_RS_FUNC_LIST_ADDRESS, VM_DL_IMAGE_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE - VM_DL_RS_FUNC_LIST_ADDRESS))
+    if (vm_address_in_range(address, VM_DL_PAY_FUNC_LIST_ADDRESS, VM_DL_IMAGE_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE - VM_DL_PAY_FUNC_LIST_ADDRESS))
         return true;
     if (vm_address_in_range(address, VM_MF_MemoryBlock_FUNC_LIST_ADDRESS, VM_APPSTORE_FUNC_LIST_ADDRESS - VM_MF_MemoryBlock_FUNC_LIST_ADDRESS))
         return true;
@@ -504,8 +508,8 @@ static void vm_picture_library_install_images(u32 picLib, const char **names, u3
     uc_mem_write(MTK, picLib + 0x14, &itemCount, 2);
     if (capacity == 0)
         uc_mem_write(MTK, picLib + 0x08, &itemCount, 2);
-    vm_fileio_trace("picture_library_install picLib=%08x idTable=%08x itemTable=%08x count=%u\n",
-                    picLib, idTable, itemTable, itemCount);
+    VM_RESOURCE_TRACE("picture_library_install picLib=%08x idTable=%08x itemTable=%08x count=%u\n",
+                      picLib, idTable, itemTable, itemCount);
 }
 
 static void scheduler_prepare_debug_picture_library(void)
@@ -660,9 +664,56 @@ static void scheduler_normalize_startup_screen_state(void)
             nextState = 9;
         uc_mem_write(MTK, debugUiObj + 0x3d, &nextState, 1);
 #else
+#if TRACE_STARTUP_UI
         vm_net_trace("startup_state_waiting state=10 updateObj=0 tick=%u\n", g_schedulerTick);
 #endif
+#endif
     }
+}
+
+static void scheduler_trace_startup_ui_object(const char *phase, u32 screenPtr)
+{
+#if TRACE_STARTUP_UI
+    u32 debugUiRoot = Global_R9 + 0x9928;
+    u32 debugUiObj = 0;
+    u32 imageTable = 0;
+    u32 item0 = 0;
+    u32 item1 = 0;
+    u32 item3 = 0;
+    short imageIndexA = 0;
+    short imageIndexB = 0;
+    u8 state = 0;
+    u32 entry0 = 0, entry4 = 0, entry8 = 0, entry12 = 0, entry16 = 0, entry20 = 0, entry24 = 0;
+    if (screenPtr)
+    {
+        uc_mem_read(MTK, screenPtr + 0x00, &entry0, 4);
+        uc_mem_read(MTK, screenPtr + 0x04, &entry4, 4);
+        uc_mem_read(MTK, screenPtr + 0x08, &entry8, 4);
+        uc_mem_read(MTK, screenPtr + 0x0c, &entry12, 4);
+        uc_mem_read(MTK, screenPtr + 0x10, &entry16, 4);
+        uc_mem_read(MTK, screenPtr + 0x14, &entry20, 4);
+        uc_mem_read(MTK, screenPtr + 0x18, &entry24, 4);
+    }
+    uc_mem_read(MTK, debugUiRoot + 0x10, &debugUiObj, 4);
+    if (debugUiObj == 0)
+        return;
+    uc_mem_read(MTK, debugUiObj + 0x50, &imageTable, 4);
+    uc_mem_read(MTK, debugUiObj + 0x34, &imageIndexA, 2);
+    uc_mem_read(MTK, debugUiObj + 0x36, &imageIndexB, 2);
+    uc_mem_read(MTK, debugUiObj + 0x3d, &state, 1);
+    if (imageTable)
+    {
+        uc_mem_read(MTK, imageTable + 0 * 4, &item0, 4);
+        uc_mem_read(MTK, imageTable + 1 * 4, &item1, 4);
+        uc_mem_read(MTK, imageTable + 3 * 4, &item3, 4);
+    }
+    vm_net_trace("startup_ui %s screen=%08x table=%08x,%08x,%08x,%08x,%08x,%08x,%08x obj=%08x state=%u imageTable=%08x idx=%d,%d items=%08x,%08x,%08x\n",
+                 phase, screenPtr, entry0, entry4, entry8, entry12, entry16, entry20, entry24,
+                 debugUiObj, state, imageTable, imageIndexA, imageIndexB, item0, item1, item3);
+#else
+    (void)phase;
+    (void)screenPtr;
+#endif
 }
 
 u32 size_128mb = 1024 * 1024 * 128;
@@ -1071,6 +1122,49 @@ static bool vm_net_mock_file_has_data(const char *path)
     return size > 40;
 }
 
+static bool vm_net_mock_file_has_min_size(const char *path, long minSize)
+{
+    FILE *fp = fopen(path, "rb");
+    if (fp == NULL)
+        return false;
+    fseek(fp, 0, SEEK_END);
+    long size = ftell(fp);
+    fclose(fp);
+    return size >= minSize;
+}
+
+static bool vm_host_file_exists(const char *path)
+{
+    FILE *fp = fopen(path, "rb");
+    if (fp == NULL)
+        return false;
+    fclose(fp);
+    return true;
+}
+
+static u32 vm_alloc_host_string(const char *text)
+{
+    u32 len = (u32)strlen(text) + 1;
+    u32 ptr = vm_malloc(len);
+    if (ptr)
+        uc_mem_write(MTK, ptr, text, len);
+    return ptr;
+}
+
+static u32 vm_billing_get_wpay_file_name(void)
+{
+    const char *wpayPath = "./\\JHOnlineData\\Wpay9990Ker42WqvgaV100.CBM";
+    if (!vm_host_file_exists(wpayPath))
+        return 0;
+    return vm_alloc_host_string(wpayPath);
+}
+
+static bool vm_net_mock_has_installed_update(void)
+{
+    return vm_net_mock_file_has_min_size("JHOnlineData/MMORPGTempcbm", 41) &&
+           vm_net_mock_file_has_min_size("JHOnlineData/mmorpg_updateversioncbm", 40);
+}
+
 static bool vm_net_mock_buffer_has_nonzero(const u8 *data, u32 len)
 {
     for (u32 i = 0; i < len; ++i)
@@ -1297,7 +1391,7 @@ static u32 vm_net_mock_build_version_response(u8 *out, u32 outCap)
     if (outCap < pos)
         return 0;
 
-    if (g_netMockUpdateDelivered || vm_net_mock_file_has_data("JHOnlineData/MMORPGTempcbm"))
+    if (g_netMockUpdateDelivered || vm_net_mock_has_installed_update())
     {
         g_netMockUpdateDelivered = 1;
         result = 0;
@@ -1412,6 +1506,7 @@ static u32 vm_net_mock_sync_response_to_vm(void)
 {
     if (g_netMockResponseLen == 0)
         return 0;
+    const u32 callbackPayloadSize = 512;
 
     if (g_netMockResponseVmPtr)
     {
@@ -1419,8 +1514,11 @@ static u32 vm_net_mock_sync_response_to_vm(void)
         g_netMockResponseVmPtr = 0;
     }
 
-    g_netMockResponseVmPtr = vm_malloc(g_netMockResponseLen);
-    uc_mem_write(MTK, g_netMockResponseVmPtr, g_netMockResponse, g_netMockResponseLen);
+    u8 payload[callbackPayloadSize];
+    memset(payload, 0, sizeof(payload));
+    memcpy(payload, g_netMockResponse, SDL_min(g_netMockResponseLen, callbackPayloadSize));
+    g_netMockResponseVmPtr = vm_malloc(callbackPayloadSize);
+    uc_mem_write(MTK, g_netMockResponseVmPtr, payload, callbackPayloadSize);
     return g_netMockResponseVmPtr;
 }
 
@@ -1438,6 +1536,7 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
     g_netMockResponseIsUpdateChunk = 0;
     g_netMockResponseLen = vm_net_mock_build_response(request, readLen, g_netMockResponse, sizeof(g_netMockResponse));
     g_netMockResponseOffset = 0;
+    g_netUpLinkData += dataLen;
     if (g_netMockResponseLen == 0)
         return;
     if (g_netMockResponseIsUpdateChunk)
@@ -1452,14 +1551,15 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
     u32 responsePtr = vm_net_mock_sync_response_to_vm();
     if (responsePtr == 0)
         return;
+    g_netDownLinkData += g_netMockResponseLen;
     vm_net_trace("mock_response ptr=%08x len=%u\n", responsePtr, g_netMockResponseLen);
     vm_net_trace_bytes("mock_response_payload", g_netMockResponse, g_netMockResponseLen);
 
     vm_net_channel *channel = scheduler_find_net_channel(connectId);
     if (channel && channel->callback)
     {
-        vm_net_trace("queue_data_event connect=%u cb=%08x ctx=%08x\n", connectId, channel->callback, channel->context);
-        scheduler_queue_net_event(7, responsePtr, g_netMockResponseLen, 0, channel->callback, channel->context);
+        vm_net_trace("queue_data_event connect=%u cb=%08x ctx=%08x event=7 payload=512 len=%u\n", connectId, channel->callback, channel->context, g_netMockResponseLen);
+        scheduler_queue_net_event(7, responsePtr, 512, 512, channel->callback, channel->context);
     }
     else
     {
@@ -1973,7 +2073,6 @@ void RunArmProgram(void *param)
                 assert(0);
             }
             u32 tScreenRenderEntry = 0;
-            u32 tScreenUpdateEntry = 0;
             u32 tScreenEventEntry = 0;
             u32 tScreenInitEntry = 0;
             u32 tScreenResourceLoadEntry = 0;
@@ -1997,12 +2096,12 @@ void RunArmProgram(void *param)
                             printf("TScreen init异常:%s\n", uc_strerror(p));
                             break;
                         }
+                        scheduler_trace_startup_ui_object("after_init", vmAddedScreen);
                     }
                     tScreenInitedPtr = vmAddedScreen;
                 }
                 scheduler_prepare_debug_picture_library();
                 scheduler_normalize_startup_screen_state();
-                uc_mem_read(MTK, vmAddedScreen + 0x04, &tScreenUpdateEntry, 4);
                 uc_mem_read(MTK, vmAddedScreen + 0x08, &tScreenEventEntry, 4);
                 uc_mem_read(MTK, vmAddedScreen + 0x0c, &tScreenRenderEntry, 4);
                 uc_mem_read(MTK, vmAddedScreen + 0x18, &tScreenResourceLoadEntry, 4);
@@ -2021,19 +2120,6 @@ void RunArmProgram(void *param)
                 }
                 if (screenStructChange == 1)
                     break;
-                if (tScreenUpdateEntry)
-                {
-                    uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
-                    uc_reg_write(MTK, UC_ARM_REG_R0, &vmAddedScreen);
-                    p = vm_emu_start(tScreenUpdateEntry, exitAddr);
-                    if (p != UC_ERR_OK)
-                    {
-                        printf("TScreen update异常:%s\n", uc_strerror(p));
-                        break;
-                    }
-                    if (screenStructChange == 1)
-                        break;
-                }
                 if (screenStructNotifyLoadRes == 1)
                 {
                     screenStructNotifyLoadRes = 0;
@@ -2051,6 +2137,7 @@ void RunArmProgram(void *param)
                     }
                 }
                 scheduler_prepare_debug_picture_library();
+                scheduler_trace_startup_ui_object("before_render", vmAddedScreen);
                 uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
                 uc_reg_write(MTK, UC_ARM_REG_R0, &vmAddedScreen);
                 p = vm_emu_start(tScreenRenderEntry, exitAddr);
@@ -3677,8 +3764,14 @@ static bool hook_vm_manager_lcd_func(u32 address)
         }
         else if (idx == 14)
         {
-            printf("[call]vMDrawStringRect\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
+            uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
+            uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
+            u16 color = 0xffff;
+            uc_mem_read(MTK, tmp4 + 16, &color, 2);
+            vm_readStringGbkByReg(UC_ARM_REG_R1, cbeTextString);
+            drawFontString(cbeTextString, tmp2, tmp3, color);
+            vm_set_call_result(1);
         }
         else if (idx == 15)
         {
@@ -4038,8 +4131,7 @@ static bool hook_vm_manager_lcd_func(u32 address)
         }
         else if (idx == 41)
         {
-            printf("[call]vMWinPointIsInRect\n");
-            assert(0);
+            vm_set_call_result(0);
         }
         else if (idx == 42)
         {
@@ -4110,18 +4202,15 @@ static bool hook_vm_manager_lcd_func(u32 address)
         }
         else if (idx == 55)
         {
-            printf("[call]vMDrawStringBorder\n");
-            assert(0);
+            vm_set_call_result(1);
         }
         else if (idx == 56)
         {
-            printf("[call]vMDrawStringClipAlignBorder\n");
-            assert(0);
+            vm_set_call_result(1);
         }
         else if (idx == 57)
         {
-            assert(0);
-            printf("[call]vMDrawStringClipBorder\n");
+            vm_set_call_result(1);
         }
         else if (idx == 58)
         {
@@ -4527,8 +4616,12 @@ static bool hook_vm_manager_stdio_func(u32 address)
         idx += 1;
         if (idx == 1)
         {
-            printf("[call]memcpy\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+            if (tmp1 && tmp2 && tmp3)
+                vm_memcpy(tmp1, tmp2, tmp3);
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
         else if (idx == 2)
         {
@@ -4539,8 +4632,17 @@ static bool hook_vm_manager_stdio_func(u32 address)
         }
         else if (idx == 3)
         {
-            printf("[call]memset\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+            if (tmp1 && tmp3)
+            {
+                u8 fill[256];
+                memset(fill, tmp2 & 0xff, sizeof(fill));
+                for (u32 off = 0; off < tmp3; off += sizeof(fill))
+                    uc_mem_write(MTK, tmp1 + off, fill, SDL_min((u32)sizeof(fill), tmp3 - off));
+            }
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
         else if (idx == 4)
         {
@@ -4568,8 +4670,28 @@ static bool hook_vm_manager_stdio_func(u32 address)
         }
         else if (idx == 8)
         {
-            printf("[call]strncpy\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+            if (tmp1 && tmp2 && tmp3)
+            {
+                u8 ch = 0;
+                u32 i = 0;
+                for (; i < tmp3; ++i)
+                {
+                    uc_mem_read(MTK, tmp2 + i, &ch, 1);
+                    uc_mem_write(MTK, tmp1 + i, &ch, 1);
+                    if (ch == 0)
+                        break;
+                }
+                if (i < tmp3)
+                {
+                    u8 zero[64] = {0};
+                    for (++i; i < tmp3; i += sizeof(zero))
+                        uc_mem_write(MTK, tmp1 + i, zero, SDL_min((u32)sizeof(zero), tmp3 - i));
+                }
+            }
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
         else if (idx == 9)
         {
@@ -4580,13 +4702,22 @@ static bool hook_vm_manager_stdio_func(u32 address)
         }
         else if (idx == 10)
         {
-            printf("[call]strcat\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+            if (tmp1 && tmp2)
+            {
+                int dstLen = vm_strlen(tmp1);
+                vm_readStringByPtr(tmp2, cbeTextString);
+                uc_mem_write(MTK, tmp1 + dstLen, cbeTextString, strlen(cbeTextString) + 1);
+            }
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
         else if (idx == 11)
         {
-            printf("[call]atol\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            vm_readStringByPtr(tmp1, cbeTextString);
+            tmp1 = (u32)strtol((char *)cbeTextString, NULL, 10);
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
         else if (idx == 12)
         {
@@ -4595,8 +4726,10 @@ static bool hook_vm_manager_stdio_func(u32 address)
         }
         else if (idx == 13)
         {
-            printf("[call]atoi\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            vm_readStringByPtr(tmp1, cbeTextString);
+            tmp1 = (u32)atoi((char *)cbeTextString);
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
         else if (idx == 14)
         {
@@ -4605,18 +4738,56 @@ static bool hook_vm_manager_stdio_func(u32 address)
         }
         else if (idx == 15)
         {
-            printf("[call]strcmp\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+            u8 strA[1024] = {0};
+            u8 strB[1024] = {0};
+            if (tmp1)
+                vm_readStringByPtr(tmp1, strA);
+            if (tmp2)
+                vm_readStringByPtr(tmp2, strB);
+            tmp1 = (u32)strcmp((char *)strA, (char *)strB);
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
         else if (idx == 16)
         {
-            printf("[call]memcmp\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+            int cmp = 0;
+            for (u32 i = 0; i < tmp3; ++i)
+            {
+                u8 a = 0, b = 0;
+                uc_mem_read(MTK, tmp1 + i, &a, 1);
+                uc_mem_read(MTK, tmp2 + i, &b, 1);
+                if (a != b)
+                {
+                    cmp = (int)a - (int)b;
+                    break;
+                }
+            }
+            tmp1 = (u32)cmp;
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
         else if (idx == 17)
         {
-            printf("[call]strncmp\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+            int cmp = 0;
+            for (u32 i = 0; i < tmp3; ++i)
+            {
+                u8 a = 0, b = 0;
+                uc_mem_read(MTK, tmp1 + i, &a, 1);
+                uc_mem_read(MTK, tmp2 + i, &b, 1);
+                if (a != b || a == 0 || b == 0)
+                {
+                    cmp = (int)a - (int)b;
+                    break;
+                }
+            }
+            tmp1 = (u32)cmp;
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
         else if (idx == 18)
         {
@@ -4818,15 +4989,28 @@ static bool hook_vm_manager_network_func(u32 address)
             vm_net_trace("net_success_stub idx=%u r0=%08x r1=%08x r2=%08x r3=%08x last=%08x\n", idx, tmp1, tmp2, tmp3, tmp4, lastAddress);
             vm_set_call_result(1);
         }
+        else if (idx == 35)
+        {
+            g_netUpLinkData = 0;
+            g_netDownLinkData = 0;
+            g_netMockResponseOffset = 0;
+            vm_net_trace("net_data_reset\n");
+            vm_set_call_result(0);
+        }
         else if (idx == 36)
         {
-            vm_net_mock_read_data(tmp1, tmp2);
+            if (tmp1)
+                uc_mem_write(MTK, tmp1, &g_netUpLinkData, 4);
+            if (tmp2)
+                uc_mem_write(MTK, tmp2, &g_netDownLinkData, 4);
+            vm_net_trace("net_get_data up=%u down=%u upPtr=%08x downPtr=%08x\n", g_netUpLinkData, g_netDownLinkData, tmp1, tmp2);
+            vm_set_call_result(g_netDownLinkData);
         }
         else if (idx == 5 || idx == 12 || idx == 13 || idx == 21 || idx == 24 || idx == 25 || idx == 33 || idx == 34 || idx == 37 || idx == 39 || idx == 41 || idx == 42)
         {
             vm_set_call_result(0);
         }
-        else if (idx == 8 || idx == 9 || idx == 10 || idx == 11 || idx == 14 || idx == 15 || idx == 16 || idx == 22 || idx == 23 || idx == 26 || idx == 27 || idx == 28 || idx == 31 || idx == 32 || idx == 35 || idx == 38 || idx == 40)
+        else if (idx == 8 || idx == 9 || idx == 10 || idx == 11 || idx == 14 || idx == 15 || idx == 16 || idx == 22 || idx == 23 || idx == 26 || idx == 27 || idx == 28 || idx == 31 || idx == 32 || idx == 38 || idx == 40)
         {
             vm_set_call_result(0);
         }
@@ -5183,9 +5367,7 @@ static bool hook_vm_manager_billing_func(u32 address)
         }
         else if (idx == 19)
         {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            // DEBUG_PRINT("[call]CDownGetFileNameByAppID\n");
-            tmp1 = 0x104fd48; // "Wpay9990Ker42WqvgaV100.CBM"
+            tmp1 = vm_billing_get_wpay_file_name();
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
         else if (idx == 20)
@@ -5861,6 +6043,22 @@ static bool hook_vm_manager_gameold_func(u32 address)
         }
         else if (idx == 62)
         {
+            u32 lr = 0;
+            u32 screenPtr = vmAddedScreen;
+            u32 entry0 = 0, entry4 = 0, entry8 = 0, entry12 = 0, entry16 = 0, entry20 = 0, entry24 = 0;
+            uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+            if (screenPtr)
+            {
+                uc_mem_read(MTK, screenPtr + 0x00, &entry0, 4);
+                uc_mem_read(MTK, screenPtr + 0x04, &entry4, 4);
+                uc_mem_read(MTK, screenPtr + 0x08, &entry8, 4);
+                uc_mem_read(MTK, screenPtr + 0x0c, &entry12, 4);
+                uc_mem_read(MTK, screenPtr + 0x10, &entry16, 4);
+                uc_mem_read(MTK, screenPtr + 0x14, &entry20, 4);
+                uc_mem_read(MTK, screenPtr + 0x18, &entry24, 4);
+            }
+            vm_net_trace("screen_notify_load_res lr=%08x screen=%08x table=%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
+                         lr, screenPtr, entry0, entry4, entry8, entry12, entry16, entry20, entry24);
             screenStructNotifyLoadRes = 1;
             DEBUG_PRINT("[call]SCREEN_NotifyLoadResource(entry:0x%x)\n", tmp2);
         }
@@ -6639,6 +6837,23 @@ static bool hook_vm_dl_load_func(u32 address)
         return true;
 }
 
+static bool hook_vm_dl_pay_func(u32 address)
+{
+    if (!(address >= VM_DL_PAY_FUNC_LIST_ADDRESS && address < (VM_DL_PAY_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
+        return false;
+
+    u32 tmp1;
+    u32 idx = (address - VM_DL_PAY_FUNC_LIST_ADDRESS) / 4;
+
+    uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+    vm_net_trace("dl_wpay_call idx=%u r0=%08x last=%08x\n", idx, tmp1, lastAddress);
+    vm_set_call_result(0);
+
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
+}
+
 static bool hook_vm_dl_rs_func(u32 address)
 {
     if (!(address >= VM_DL_RS_FUNC_LIST_ADDRESS && address < (VM_DL_RS_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
@@ -7072,6 +7287,12 @@ static void hook_vm_dl_load_code_callback(uc_engine *uc, uint64_t address, uint3
     lastAddress = (u32)address;
 }
 
+static void hook_vm_dl_pay_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_dl_pay_func((u32)address);
+    lastAddress = (u32)address;
+}
+
 static void hook_vm_dl_rs_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
 {
     hook_vm_dl_rs_func((u32)address);
@@ -7128,6 +7349,7 @@ static uc_err add_manager_code_hooks(uc_engine *uc)
     ADD_MANAGER_CODE_HOOK_RANGE(VM_MF_MemoryBlock_FUNC_LIST_ADDRESS, VM_APPSTORE_FUNC_LIST_ADDRESS - 1, hook_vm_mf_memoryblock_code_callback);
     ADD_MANAGER_CODE_HOOK(VM_APPSTORE_FUNC_LIST_ADDRESS, hook_vm_appstore_code_callback);
     ADD_MANAGER_CODE_HOOK(VM_DL_LOAD_FUNC_LIST_ADDRESS, hook_vm_dl_load_code_callback);
+    ADD_MANAGER_CODE_HOOK(VM_DL_PAY_FUNC_LIST_ADDRESS, hook_vm_dl_pay_code_callback);
     ADD_MANAGER_CODE_HOOK(VM_DL_RS_FUNC_LIST_ADDRESS, hook_vm_dl_rs_code_callback);
     ADD_MANAGER_CODE_HOOK(VM_DL_IMAGE_FUNC_LIST_ADDRESS, hook_vm_dl_image_code_callback);
     ADD_MANAGER_CODE_HOOK(VM_VIDEO_FUNC_LIST_ADDRESS, hook_vm_video_code_callback);
@@ -7191,7 +7413,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         tracePc == 0x103755e || tracePc == 0x103757e || tracePc == 0x1037588 || tracePc == 0x1037598 ||
         tracePc == 0x10372d6 || tracePc == 0x103730e || tracePc == 0x1037318 || tracePc == 0x1037324 ||
         tracePc == 0x1037334 || tracePc == 0x1037348 || tracePc == 0x1037358 || tracePc == 0x1037378 ||
-        tracePc == 0x103745e || tracePc == 0x103a9c0 || tracePc == 0x103a9c4 || tracePc == 0x103a9cc)
+        tracePc == 0x103745e)
     {
         u32 r0 = 0, r1 = 0, r2 = 0, r3 = 0, lr = 0;
         uc_reg_read(MTK, UC_ARM_REG_R0, &r0);

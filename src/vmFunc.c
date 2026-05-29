@@ -49,6 +49,12 @@ static void vm_fileio_trace_bytes(const char *tag, int handle, const char *path,
     fclose(fp);
 }
 
+#if TRACE_RESOURCE_IO
+#define VM_RESOURCE_TRACE(...) vm_fileio_trace(__VA_ARGS__)
+#else
+#define VM_RESOURCE_TRACE(...) ((void)0)
+#endif
+
 static void vm_trim_mmorpg_tempdata_header(void)
 {
     FILE *fp = fopen("JHOnlineData/mmorpgTempdata", "rb");
@@ -555,14 +561,14 @@ int vm_DF_DataPackage_LoadPackage(int a1, int srcPtr)
     char traceName[128] = {0};
     if (srcPtr)
         vm_readStringByPtr(srcPtr, traceName);
-    vm_fileio_trace("datapackage_load_package begin pkg=%08x src=%08x name=%s count=%u\n",
-                    a1, srcPtr, traceName, (unsigned)vm_get_var_short(a1 + 10));
+    VM_RESOURCE_TRACE("datapackage_load_package begin pkg=%08x src=%08x name=%s count=%u\n",
+                      a1, srcPtr, traceName, (unsigned)vm_get_var_short(a1 + 10));
 
     /* src == NULL -> set first byte at a1 to 0 and return 0 */
     if (srcPtr == 0)
     {
         vm_set_var_byte(a1, 0); /* *(_BYTE *)a1 = 0; */
-        vm_fileio_trace("datapackage_load_package null pkg=%08x\n", a1);
+        VM_RESOURCE_TRACE("datapackage_load_package null pkg=%08x\n", a1);
         return 0;
     }
 
@@ -598,8 +604,8 @@ int vm_DF_DataPackage_LoadPackage(int a1, int srcPtr)
             /* assign package index into slot->byte[1] and return it */
             int pkgIndex = vm_DF_DataPackage_GetPackageIndex(a1);
             vm_set_var_byte(slot_ptr + 1, (unsigned char)pkgIndex);
-            vm_fileio_trace("datapackage_load_package reuse_slot pkg=%08x name=%s slot=%d child=%08x pkgIndex=%d count=%u\n",
-                            a1, traceName, idx, slot_ptr, pkgIndex, (unsigned)vm_get_var_short(a1 + 10));
+            VM_RESOURCE_TRACE("datapackage_load_package reuse_slot pkg=%08x name=%s slot=%d child=%08x pkgIndex=%d count=%u\n",
+                              a1, traceName, idx, slot_ptr, pkgIndex, (unsigned)vm_get_var_short(a1 + 10));
             return vm_set_call_result(pkgIndex);
         }
     }
@@ -625,9 +631,9 @@ int vm_DF_DataPackage_LoadPackage(int a1, int srcPtr)
 
         result = slot_count + 1;
         vm_set_var_short(a1 + 10, (unsigned short)result); /* update slot count */
-        vm_fileio_trace("datapackage_load_package append pkg=%08x name=%s slot=%d child=%08x pkgIndex=%u count=%u\n",
-                        a1, traceName, slot_count, slot_ptr, (unsigned)vm_get_var_byte(slot_ptr + 1),
-                        (unsigned)vm_get_var_short(a1 + 10));
+        VM_RESOURCE_TRACE("datapackage_load_package append pkg=%08x name=%s slot=%d child=%08x pkgIndex=%u count=%u\n",
+                          a1, traceName, slot_count, slot_ptr, (unsigned)vm_get_var_byte(slot_ptr + 1),
+                          (unsigned)vm_get_var_short(a1 + 10));
     }
 
     return vm_set_call_result(result);
@@ -1128,8 +1134,8 @@ int vm_DF_DataPackage_LoadFormTCardEx(int a1, int pathPtr, int fileSeekPos)
         u8 entryLoaded = 0xff;
         if (entry)
             entryLoaded = vm_get_var_byte(entry);
-        vm_fileio_trace("datapackage_tcard_entry pkg=%08x i=%d count=%d name=%s namePtr=%08x entry=%08x loaded=%u nextOff=%08x fileSeek=%08x\n",
-                        a1, i, count, entryName, namePtr, entry, entryLoaded, offset, fileSeekPos);
+        VM_RESOURCE_TRACE("datapackage_tcard_entry pkg=%08x i=%d count=%d name=%s namePtr=%08x entry=%08x loaded=%u nextOff=%08x fileSeek=%08x\n",
+                          a1, i, count, entryName, namePtr, entry, entryLoaded, offset, fileSeekPos);
 
         if (entry && !vm_get_var_byte(entry))
         {
@@ -1330,8 +1336,8 @@ int VM_DF_DataPackage_DoLoading(int a1, int a2, int a3)
     {
         uc_mem_read(MTK, VM_DF_DataPackage_LoadType_ADDRESS, &n2, 1);
         uc_mem_read(MTK, VM_DF_DataPackage_In_File_Offset_ADDRESS, &inFileOffset, 4);
-        vm_fileio_trace("datapackage_doload a1=%08x a2=%08x a3=%08x loadType=%u inFileOffset=%08x\n",
-                        a1, a2, a3, n2, inFileOffset);
+        VM_RESOURCE_TRACE("datapackage_doload a1=%08x a2=%08x a3=%08x loadType=%u inFileOffset=%08x\n",
+                          a1, a2, a3, n2, inFileOffset);
 
         if (n2 == 1)
         {
@@ -1346,7 +1352,7 @@ int VM_DF_DataPackage_DoLoading(int a1, int a2, int a3)
     }
 
     if (a2 == 0)
-        vm_fileio_trace("datapackage_load_tresource_null a1=%08x a3=%08x loadType=%u\n", a1, a3, n2);
+        VM_RESOURCE_TRACE("datapackage_load_tresource_null a1=%08x a3=%08x loadType=%u\n", a1, a3, n2);
 
     // 默认走资源加载
     return vm_DF_DataPackage_LoadFromTResource(a1, a2);
@@ -1738,8 +1744,8 @@ u32 vm_DF_DataPackage_GetFileID(u32 a1, u32 namePtr)
         {
             u32 file_id = 0; // 第一次应该返回0x1c
             uc_mem_read(uc, id_base + 2 * i, &file_id, 2);
-            vm_fileio_trace("df_get_file_id hit pkg=%08x name=%s id=%d index=%d local=1\n",
-                            a1, traceName, (int16_t)file_id, i);
+            VM_RESOURCE_TRACE("df_get_file_id hit pkg=%08x name=%s id=%d index=%d local=1\n",
+                              a1, traceName, (int16_t)file_id, i);
             uc_reg_write(uc, UC_ARM_REG_R0, &file_id);
             return file_id;
         }
@@ -1761,15 +1767,15 @@ u32 vm_DF_DataPackage_GetFileID(u32 a1, u32 namePtr)
             result = vm_DF_DataPackage_GetFileID(v7, namePtr);
             if (result >= 0)
             {
-                vm_fileio_trace("df_get_file_id hit pkg=%08x name=%s id=%d child=%08x\n",
-                                a1, traceName, result, v7);
+                VM_RESOURCE_TRACE("df_get_file_id hit pkg=%08x name=%s id=%d child=%08x\n",
+                                  a1, traceName, result, v7);
                 uc_reg_write(uc, UC_ARM_REG_R0, &result);
                 return result;
             }
         }
     }
     result = -1;
-    vm_fileio_trace("df_get_file_id miss pkg=%08x name=%s\n", a1, traceName);
+    VM_RESOURCE_TRACE("df_get_file_id miss pkg=%08x name=%s\n", a1, traceName);
     uc_reg_write(uc, UC_ARM_REG_R0, &result);
     return result;
 }
@@ -1831,9 +1837,9 @@ int vm_DF_DataPackage_DoReadData(int32_t a1, int32_t a2)
     u8 head[8] = {0};
     if (len > 0)
         uc_mem_read(MTK, buffer, head, SDL_min((u32)len, (u32)sizeof(head)));
-    vm_fileio_trace("df_read_data pkg=%08x index=%d dataBase=%08x seek=%08x len=%08x out=%08x head=%02x%02x%02x%02x%02x%02x%02x%02x\n",
-                    a1, a2, data_base, v5 + base_offset, len, buffer,
-                    head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7]);
+    VM_RESOURCE_TRACE("df_read_data pkg=%08x index=%d dataBase=%08x seek=%08x len=%08x out=%08x head=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+                      a1, a2, data_base, v5 + base_offset, len, buffer,
+                      head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7]);
     return vm_set_call_result(buffer);
 }
 
@@ -1872,8 +1878,8 @@ int vm_DF_DataPackage_GetFileByID(u32 a1, u32 fileId)
             if (flag)
             {
                 int data = vm_DF_DataPackage_DoReadData(a1, i);
-                vm_fileio_trace("df_get_file_by_id hit pkg=%08x id=%d index=%d flag=%u out=%08x\n",
-                                a1, (int16_t)fileId, i, flag, data);
+                VM_RESOURCE_TRACE("df_get_file_by_id hit pkg=%08x id=%d index=%d flag=%u out=%08x\n",
+                                  a1, (int16_t)fileId, i, flag, data);
                 return data;
             }
             else
@@ -1881,8 +1887,8 @@ int vm_DF_DataPackage_GetFileByID(u32 a1, u32 fileId)
                 uc_mem_read(uc, data_base + i * 4, &data_ptr, 4);
                 offset = offset_base;
                 offset = data_ptr + offset;
-                vm_fileio_trace("df_get_file_by_id hit pkg=%08x id=%d index=%d flag=%u out=%08x\n",
-                                a1, (int16_t)fileId, i, flag, offset);
+                VM_RESOURCE_TRACE("df_get_file_by_id hit pkg=%08x id=%d index=%d flag=%u out=%08x\n",
+                                  a1, (int16_t)fileId, i, flag, offset);
                 return vm_set_call_result(offset);
             }
         }
@@ -1900,13 +1906,13 @@ int vm_DF_DataPackage_GetFileByID(u32 a1, u32 fileId)
             result = vm_DF_DataPackage_GetFileByID(v7, fileId);
             if (result)
             {
-                vm_fileio_trace("df_get_file_by_id child pkg=%08x id=%d child=%08x out=%08x\n",
-                                a1, (int16_t)fileId, v7, result);
+                VM_RESOURCE_TRACE("df_get_file_by_id child pkg=%08x id=%d child=%08x out=%08x\n",
+                                  a1, (int16_t)fileId, v7, result);
                 return vm_set_call_result(result);
             }
         }
     }
-    vm_fileio_trace("df_get_file_by_id miss pkg=%08x id=%d\n", a1, (int16_t)fileId);
+    VM_RESOURCE_TRACE("df_get_file_by_id miss pkg=%08x id=%d\n", a1, (int16_t)fileId);
     return vm_set_call_result(0);
 }
 
@@ -1917,7 +1923,7 @@ int vm_DF_DataPackage_GetFile(int a1, int namePtr)
     char traceName[128] = {0};
     if (namePtr)
         vm_readStringByPtr(namePtr, traceName);
-    vm_fileio_trace("df_get_file pkg=%08x name=%s id=%d out=%08x\n", a1, traceName, FileID, data);
+    VM_RESOURCE_TRACE("df_get_file pkg=%08x name=%s id=%d out=%08x\n", a1, traceName, FileID, data);
     return data;
 }
 
@@ -2290,7 +2296,7 @@ int vm_IMG_CreateImageFormStream(u32 a1, u32 a2)
 
     if (a1 == 0)
     {
-        vm_fileio_trace("img_create_stream null stream resultPtr=%08x\n", a2);
+        VM_RESOURCE_TRACE("img_create_stream null stream resultPtr=%08x\n", a2);
         return vm_set_call_result(0);
     }
 
@@ -2299,9 +2305,9 @@ int vm_IMG_CreateImageFormStream(u32 a1, u32 a2)
     // uc_mem_read(uc, a1, cbeTextString, 32); // debug
     u8 imageHead[8] = {0};
     uc_mem_read(uc, a1, imageHead, sizeof(imageHead));
-    vm_fileio_trace("img_create_stream stream=%08x resultPtr=%08x type=%u head=%02x%02x%02x%02x%02x%02x%02x%02x\n",
-                    a1, v3, n3, imageHead[0], imageHead[1], imageHead[2], imageHead[3],
-                    imageHead[4], imageHead[5], imageHead[6], imageHead[7]);
+    VM_RESOURCE_TRACE("img_create_stream stream=%08x resultPtr=%08x type=%u head=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+                      a1, v3, n3, imageHead[0], imageHead[1], imageHead[2], imageHead[3],
+                      imageHead[4], imageHead[5], imageHead[6], imageHead[7]);
 
     if (n3)
     {
@@ -2569,6 +2575,7 @@ void vm_initManagerTable()
     vm_configManagerTable(VM_MANAGER_VMIM_TABLE_ADDRESS, VM_MANAGER_VMIM_FUNC_LIST_ADDRESS);
     vm_configManagerTable(VM_MANAGER_APPSTORE_TABLE_ADDRESS, VM_APPSTORE_FUNC_LIST_ADDRESS);
     vm_InitDlLoadManager(VM_DL_LOAD_MANAGER_ADDRESS);
+    vm_configManagerTableCount(VM_DL_PAY_MANAGER_ADDRESS, VM_DL_PAY_FUNC_LIST_ADDRESS, 16);
     vm_InitDlRsManager(VM_DL_RS_MANAGER_ADDRESS);
     vm_InitDlImageManager(VM_DL_IMAGE_MANAGER_ADDRESS);
 }
@@ -2599,10 +2606,10 @@ void vm_IMG_CreateImageFormRes(u32 a1)
             uc_mem_read(MTK, DataPackage + 6 * 4, &tmp2, 4);
             Data = tmp1 + tmp2;
         }
-        vm_fileio_trace("img_create_res id=%u dataPackage=%08x flag=%u data=%08x\n", a1, DataPackage, tmp2, Data);
+        VM_RESOURCE_TRACE("img_create_res id=%u dataPackage=%08x flag=%u data=%08x\n", a1, DataPackage, tmp2, Data);
         return vm_IMG_CreateImageFormStream(Data, 0);
     }
-    vm_fileio_trace("img_create_res no_datapackage id=%u\n", a1);
+    VM_RESOURCE_TRACE("img_create_res no_datapackage id=%u\n", a1);
     return vm_set_call_result(tmp1);
 }
 // ok
