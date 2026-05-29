@@ -394,7 +394,7 @@ int vm_cbfs_vm_file_open(int openMode, int namePtr, int rwPtr)
     rwBuff[sizeof(rwBuff) - 1] = 0;
     vm_file_select_mode(openMode, rwBuff, mode, sizeof(mode));
     int handle = vm_get_file_handle(nameBuff, mode);
-    vm_fileio_trace("file_open_request openMode=%x name=%s hint=%s selected=%s handle=%d\n", openMode, nameBuff, rwBuff, mode, handle);
+    vm_fileio_trace("file_open_request openMode=%x name=%s hint=%s selected=%s handle=%d last=%08x\n", openMode, nameBuff, rwBuff, mode, handle, lastAddress);
     return vm_set_call_result(handle);
 }
 // ok

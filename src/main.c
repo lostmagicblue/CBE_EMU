@@ -4,6 +4,7 @@
 #define DEBUG_PRINT(...) ((void)0)
 #define TRACE_STARTUP_UI 0
 #define TRACE_RESOURCE_IO 0
+#define TRACE_LCD_TEXT 0
 
 #ifdef _WIN32
 #include <direct.h>
@@ -175,9 +176,13 @@ static u32 g_lastStartupUpdateObj = 0xffffffff;
 static u8 g_lastStartupProgress = 0xff;
 static u8 g_lastStartupUpdateState = 0xff;
 static u8 g_startupAdvanceAfterUpdate = 0;
+static u8 g_installCheckFlagHookLogged = 0;
+static u8 g_installCheckFuncHookLogged = 0;
 
 static uc_err add_manager_code_hooks(uc_engine *uc);
 static void vm_net_trace(const char *fmt, ...);
+static void hook_game_install_check_flag_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
+static void hook_game_install_check_func_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
 
 static bool vm_address_in_range(u32 address, u32 begin, u32 size)
 {
@@ -815,6 +820,76 @@ static void vm_net_trace_bytes(const char *tag, const u8 *data, u32 len)
     fclose(fp);
 }
 
+static void vm_trace_lcd_text(const char *apiName, u32 idx, u32 strPtr, int x, int y, u16 color, const u8 *gbkText)
+{
+#if TRACE_LCD_TEXT
+    u32 lr = 0;
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    gbk_to_utf8((u8 *)gbkText, sprintfBuff, mySizeOf(sprintfBuff));
+    vm_net_trace("lcd_text api=%s idx=%u ptr=%08x x=%d y=%d color=%04x lr=%08x last=%08x text=%s\n",
+                 apiName, idx, strPtr, x, y, color, lr, lastAddress, sprintfBuff);
+#else
+    (void)apiName;
+    (void)idx;
+    (void)strPtr;
+    (void)x;
+    (void)y;
+    (void)color;
+    (void)gbkText;
+#endif
+}
+
+static void hook_game_install_check_flag_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    (void)size;
+    (void)user_data;
+
+    u32 r0 = 0, r4 = 0, lr = 0;
+    uc_reg_read(uc, UC_ARM_REG_R0, &r0);
+    uc_reg_read(uc, UC_ARM_REG_R4, &r4);
+    uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+
+    u32 startupObj = 0;
+    u8 localFlag = 0xff;
+    if (r4)
+        uc_mem_read(uc, r4 + 0x10, &startupObj, 4);
+    if (startupObj)
+        uc_mem_read(uc, startupObj + 0x140, &localFlag, 1);
+
+    if (startupObj && localFlag == 0)
+    {
+        r0 = 1;
+        uc_reg_write(uc, UC_ARM_REG_R0, &r0);
+        if (!g_installCheckFlagHookLogged)
+        {
+            vm_net_trace("install_check_hook flag pc=%08x obj=%08x localFlag=0 -> continue_check lr=%08x\n",
+                         (u32)address, startupObj, lr);
+            g_installCheckFlagHookLogged = 1;
+        }
+    }
+}
+
+static void hook_game_install_check_func_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    (void)address;
+    (void)size;
+    (void)user_data;
+
+    u32 lr = 0;
+    uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+    if ((lr & ~1u) == 0x0103b162)
+    {
+        u32 r0 = 0;
+        uc_reg_write(uc, UC_ARM_REG_R0, &r0);
+        if (!g_installCheckFuncHookLogged)
+        {
+            vm_net_trace("install_check_hook result caller=%08x -> installed\n", lr);
+            g_installCheckFuncHookLogged = 1;
+        }
+        vm_bx(lr);
+    }
+}
+
 static u32 vm_net_mock_build_response_from_rules(const u8 *request, u32 requestLen, u8 *out, u32 outCap)
 {
     static const vm_net_mock_rule rules[] = {
@@ -939,7 +1014,7 @@ static bool vm_net_mock_put_object_string(u8 *out, u32 outCap, u32 *pos, const c
 
 static u32 vm_net_mock_build_version_response(u8 *out, u32 outCap)
 {
-    u32 pos = 11;
+    u32 pos = 9;
     u8 result = 1;
     if (outCap < pos)
         return 0;
@@ -958,19 +1033,17 @@ static u32 vm_net_mock_build_version_response(u8 *out, u32 outCap)
     out[2] = (u8)(pos >> 8);
     out[3] = (u8)pos;
     out[4] = 1;
-    out[5] = 1;
-    out[6] = 0x12;
-    out[7] = 5;
-    out[8] = 0;
-    out[9] = (u8)((pos - 5) >> 8);
-    out[10] = (u8)(pos - 5);
+    out[5] = 0x12;
+    out[6] = 5;
+    out[7] = (u8)((pos - 9) >> 8);
+    out[8] = (u8)(pos - 9);
     vm_net_trace("mock_version_response result=%u delivered=%u\n", result, g_netMockUpdateDelivered);
     return pos;
 }
 
 static u32 vm_net_mock_build_update_chunk_response(u8 *out, u32 outCap)
 {
-    u32 pos = 11;
+    u32 pos = 9;
     if (outCap < pos)
         return 0;
 
@@ -996,12 +1069,10 @@ static u32 vm_net_mock_build_update_chunk_response(u8 *out, u32 outCap)
     out[2] = (u8)(pos >> 8);
     out[3] = (u8)pos;
     out[4] = 1;
-    out[5] = 1;
-    out[6] = 0x12;
-    out[7] = 6;
-    out[8] = 0;
-    out[9] = (u8)((pos - 5) >> 8);
-    out[10] = (u8)(pos - 5);
+    out[5] = 0x12;
+    out[6] = 6;
+    out[7] = (u8)((pos - 9) >> 8);
+    out[8] = (u8)(pos - 9);
     return pos;
 }
 
@@ -1100,8 +1171,8 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
     vm_net_channel *channel = scheduler_find_net_channel(connectId);
     if (channel && channel->callback)
     {
-        vm_net_trace("queue_data_event connect=%u cb=%08x ctx=%08x event=7 payload=512 len=%u\n", connectId, channel->callback, channel->context, g_netMockResponseLen);
-        scheduler_queue_net_event(7, responsePtr, 512, 512, channel->callback, channel->context);
+        vm_net_trace("queue_data_event connect=%u cb=%08x ctx=%08x event=7 len=%u\n", connectId, channel->callback, channel->context, g_netMockResponseLen);
+        scheduler_queue_net_event(7, responsePtr, g_netMockResponseLen, g_netMockResponseLen, channel->callback, channel->context);
     }
     else
     {
@@ -3257,6 +3328,7 @@ static bool hook_vm_manager_lcd_func(u32 address)
             uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
             uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
             vm_readStringGbkByReg(UC_ARM_REG_R0, cbeTextString);
+            vm_trace_lcd_text("vMDrawString", idx, tmp1, (int)tmp2, (int)tmp3, (u16)tmp4, cbeTextString);
             drawFontString(cbeTextString, tmp2, tmp3, (u16)tmp4);
             tmp1 = 1;
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
@@ -3272,6 +3344,8 @@ static bool hook_vm_manager_lcd_func(u32 address)
 
             // gbk_to_utf8(cbeTextString, sprintfBuff, mySizeOf(sprintfBuff));
             DEBUG_PRINT("[call]vMDrawStringEx(%d,%d,%s)\n", tmp2, tmp3, sprintfBuff);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
+            vm_trace_lcd_text("vMDrawStringEx", idx, tmp1, (int)tmp2, (int)tmp3, color, cbeTextString);
 
             drawFontString(cbeTextString, tmp2, tmp3, color);
             tmp1 = 1;
@@ -3285,6 +3359,8 @@ static bool hook_vm_manager_lcd_func(u32 address)
             u16 color = 0xffff;
             uc_mem_read(MTK, tmp4 + 16, &color, 2);
             vm_readStringGbkByReg(UC_ARM_REG_R1, cbeTextString);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
+            vm_trace_lcd_text("vMShowStringClipAlign", idx, tmp1, (int)tmp2, (int)tmp3, color, cbeTextString);
             drawFontString(cbeTextString, tmp2, tmp3, color);
             vm_set_call_result(1);
         }
@@ -3296,6 +3372,8 @@ static bool hook_vm_manager_lcd_func(u32 address)
             u16 color = 0xffff;
             uc_mem_read(MTK, tmp4 + 16, &color, 2);
             vm_readStringGbkByReg(UC_ARM_REG_R1, cbeTextString);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
+            vm_trace_lcd_text("vMShowStringClip", idx, tmp1, (int)tmp2, (int)tmp3, color, cbeTextString);
             drawFontString(cbeTextString, tmp2, tmp3, color);
             vm_set_call_result(1);
         }
@@ -3307,6 +3385,8 @@ static bool hook_vm_manager_lcd_func(u32 address)
             u16 color = 0xffff;
             uc_mem_read(MTK, tmp4 + 16, &color, 2);
             vm_readStringGbkByReg(UC_ARM_REG_R1, cbeTextString);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
+            vm_trace_lcd_text("vMShowStringRect", idx, tmp1, (int)tmp2, (int)tmp3, color, cbeTextString);
             drawFontString(cbeTextString, tmp2, tmp3, color);
             vm_set_call_result(1);
         }
@@ -4482,6 +4562,8 @@ static bool hook_vm_manager_network_func(u32 address)
                 uc_mem_write(MTK, tmp4, &tmp5, 4);
             scheduler_register_net_channel(tmp5, tmp3, tmp4);
             vm_net_trace("open_channel host=%08x type=%u cb=%08x ctx=%08x connect=%u last=%08x\n", tmp1, tmp2, tmp3, tmp4, tmp5, lastAddress);
+            u8 netState = 1;
+            uc_mem_write(MTK, Global_R9 + 0x9588 + 0x0c, &netState, 1);
             scheduler_queue_net_task(tmp1, tmp2, tmp3, tmp4);
             vm_set_call_result(1);
         }
@@ -4495,6 +4577,8 @@ static bool hook_vm_manager_network_func(u32 address)
         {
             vm_net_trace("close_channel connect=%u last=%08x\n", tmp1, lastAddress);
             scheduler_unregister_net_channel(tmp1);
+            u8 netState = 0;
+            uc_mem_write(MTK, Global_R9 + 0x9588 + 0x0c, &netState, 1);
             vm_set_call_result(0);
         }
         else if (idx == 3)
@@ -4904,8 +4988,31 @@ static bool hook_vm_manager_billing_func(u32 address)
         }
         else if (idx == 19)
         {
-            printf("[call]CDownGetFileNameByAppID\n");
-            vm_set_call_result(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+            uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+            if (!vm_host_file_exists("Wpay9990Ker42WqvgaV100.CBM"))
+            {
+                if (tmp2)
+                    vm_set_var(tmp2, 0);
+                vm_net_trace("CDownGetFileNameByAppID appid=%u missing Wpay9990Ker42WqvgaV100.CBM -> 0\n", tmp1);
+                vm_set_call_result(0);
+            }
+            else
+            {
+                u32 namePtr = vm_alloc_host_string("Wpay9990Ker42Wqvga");
+                u8 type = 0;
+                u16 version = 100;
+                if (tmp2)
+                    uc_mem_write(MTK, tmp2, &namePtr, 4);
+                if (tmp3)
+                    uc_mem_write(MTK, tmp3, &type, 1);
+                if (tmp4)
+                    uc_mem_write(MTK, tmp4, &version, 2);
+                vm_net_trace("CDownGetFileNameByAppID appid=%u nameOut=%08x typeOut=%08x verOut=%08x name=%08x version=%u\n", tmp1, tmp2, tmp3, tmp4, namePtr, version);
+                vm_set_call_result(1);
+            }
         }
         else if (idx == 20)
         {
@@ -6890,6 +6997,8 @@ static uc_err add_manager_code_hooks(uc_engine *uc)
     ADD_MANAGER_CODE_HOOK(VM_DL_RS_FUNC_LIST_ADDRESS, hook_vm_dl_rs_code_callback);
     ADD_MANAGER_CODE_HOOK(VM_DL_IMAGE_FUNC_LIST_ADDRESS, hook_vm_dl_image_code_callback);
     ADD_MANAGER_CODE_HOOK(VM_VIDEO_FUNC_LIST_ADDRESS, hook_vm_video_code_callback);
+    ADD_MANAGER_CODE_HOOK_RANGE(0x0103b07c, 0x0103b07d, hook_game_install_check_func_callback);
+    ADD_MANAGER_CODE_HOOK_RANGE(0x0103b15a, 0x0103b15b, hook_game_install_check_flag_callback);
 
 #undef ADD_MANAGER_CODE_HOOK
 #undef ADD_MANAGER_CODE_HOOK_RANGE
