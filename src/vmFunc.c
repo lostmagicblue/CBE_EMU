@@ -5,7 +5,27 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
+#include <stdarg.h>
+#ifdef _WIN32
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#endif
+
 FILE *openFileList[16];
+
+static void vm_fileio_trace(const char *fmt, ...)
+{
+    FILE *fp = fopen("storage_trace.log", "a");
+    if (fp == NULL)
+        return;
+
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(fp, fmt, args);
+    va_end(args);
+    fclose(fp);
+}
 #define VM_PSEUDO_DIR_HANDLE ((FILE *)-1)
 
 u32 vm_malloc_var();
@@ -151,7 +171,88 @@ static int vm_is_cbm_resource_path(const char *nameBuf)
     return strcasecmp(ext, ".cbm") == 0;
 }
 
-int vm_get_file_handle(char *nameBuf)
+static int vm_file_mode_is_writeable(const char *mode)
+{
+    if (mode == NULL)
+        return 0;
+    return strchr(mode, 'w') != NULL || strchr(mode, 'a') != NULL || strchr(mode, '+') != NULL;
+}
+
+static void vm_file_make_dir(const char *path)
+{
+    if (path == NULL || path[0] == 0 || strcmp(path, ".") == 0)
+        return;
+#ifdef _WIN32
+    _mkdir(path);
+#else
+    mkdir(path, 0755);
+#endif
+}
+
+static void vm_file_ensure_parent_dirs(const char *path)
+{
+    char tmp[256];
+    size_t len;
+    if (path == NULL)
+        return;
+
+    len = strlen(path);
+    if (len >= sizeof(tmp))
+        len = sizeof(tmp) - 1;
+    memcpy(tmp, path, len);
+    tmp[len] = 0;
+
+    for (size_t i = 0; tmp[i]; ++i)
+    {
+        if (tmp[i] == '\\')
+            tmp[i] = '/';
+    }
+
+    for (size_t i = 0; tmp[i]; ++i)
+    {
+        if (tmp[i] != '/')
+            continue;
+        tmp[i] = 0;
+        vm_file_make_dir(tmp);
+        tmp[i] = '/';
+    }
+}
+
+static void vm_file_select_mode(int openMode, const char *modeHint, char *mode, size_t modeSize)
+{
+    snprintf(mode, modeSize, "rb");
+    if (modeHint && modeHint[0])
+    {
+        char hint[8] = {0};
+        size_t pos = 0;
+        for (size_t i = 0; modeHint[i] && pos + 1 < sizeof(hint); ++i)
+        {
+            char ch = modeHint[i];
+            if (ch == 'r' || ch == 'w' || ch == 'a' || ch == 'b' || ch == '+')
+                hint[pos++] = ch;
+        }
+        if (pos)
+        {
+            snprintf(mode, modeSize, "%s", hint);
+            return;
+        }
+    }
+
+    if (openMode & 0x10)
+        snprintf(mode, modeSize, "ab+");
+    else if (openMode & 0x08)
+        snprintf(mode, modeSize, "wb+");
+    else if (openMode & 0x04)
+        snprintf(mode, modeSize, "rb+");
+    else if (openMode == 1)
+        snprintf(mode, modeSize, "wb+");
+    else if (openMode == 3)
+        snprintf(mode, modeSize, "rb+");
+    else if (openMode == 0 || openMode == 2)
+        snprintf(mode, modeSize, "rb");
+}
+
+int vm_get_file_handle(char *nameBuf, const char *mode)
 {
     int handle = -1;
     for (int i = 0; i < 16; i++)
@@ -163,10 +264,21 @@ int vm_get_file_handle(char *nameBuf)
                 openFileList[i] = VM_PSEUDO_DIR_HANDLE;
                 return i;
             }
-            FILE *f = fopen(nameBuf, "rb");
+            FILE *f = fopen(nameBuf, mode);
+            if (f == NULL && vm_file_mode_is_writeable(mode))
+            {
+                vm_file_ensure_parent_dirs(nameBuf);
+                f = fopen(nameBuf, mode);
+                if (f == NULL)
+                    f = fopen(nameBuf, "wb+");
+            }
             if (f == NULL)
+            {
+                vm_fileio_trace("file_open_fail path=%s mode=%s\n", nameBuf, mode);
                 return -1;
+            }
             openFileList[i] = f;
+            vm_fileio_trace("file_open handle=%d path=%s mode=%s\n", i, nameBuf, mode);
             return i;
         }
     }
@@ -187,8 +299,9 @@ int vm_dir_exists(int a1)
 // ok
 int vm_cbfs_vm_file_open(int openMode, int namePtr, int rwPtr)
 {
-    char rwBuff[128];
+    char rwBuff[128] = {0};
     char nameBuff[128];
+    char mode[8];
     u8 rawName[256];
     uc_mem_read(MTK, namePtr, rawName, sizeof(rawName));
     memset(nameBuff, 0, sizeof(nameBuff));
@@ -203,8 +316,12 @@ int vm_cbfs_vm_file_open(int openMode, int namePtr, int rwPtr)
     {
         vm_readStringByPtr(namePtr, nameBuff);
     }
-    uc_mem_read(MTK, rwPtr, &rwBuff, 128);
-    int handle = vm_get_file_handle(nameBuff);
+    if (rwPtr)
+        uc_mem_read(MTK, rwPtr, &rwBuff, 128);
+    rwBuff[sizeof(rwBuff) - 1] = 0;
+    vm_file_select_mode(openMode, rwBuff, mode, sizeof(mode));
+    int handle = vm_get_file_handle(nameBuff, mode);
+    vm_fileio_trace("file_open_request openMode=%x name=%s hint=%s selected=%s handle=%d\n", openMode, nameBuff, rwBuff, mode, handle);
     return vm_set_call_result(handle);
 }
 // ok
@@ -233,6 +350,7 @@ int vm_cbfs_vm_file_write(int bufferPtr, int size, int fileHandle)
     uc_mem_read(MTK, bufferPtr, buffer, size);
     int r = fwrite(buffer, 1, size, openFileList[fileHandle]);
     SDL_free(buffer);
+    vm_fileio_trace("file_write handle=%d size=%d result=%d\n", fileHandle, size, r);
     return vm_set_call_result(r);
 }
 // ok
@@ -313,6 +431,7 @@ int vm_cbfs_vm_file_close(int fileHandle)
     }
     int r = fclose(openFileList[fileHandle]);
     openFileList[fileHandle] = NULL;
+    vm_fileio_trace("file_close handle=%d result=%d\n", fileHandle, r);
     return vm_set_call_result(r);
 }
 u8 vm_DF_DataPackage_GetPackageIndex(int a1)

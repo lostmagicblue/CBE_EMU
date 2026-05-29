@@ -3,6 +3,11 @@
 
 #define DEBUG_PRINT(...) ((void)0)
 
+#ifdef _WIN32
+#include <direct.h>
+#endif
+#include <stdarg.h>
+
 #include "main.h"
 #include "lcd.h"
 static u32 vm_load_resource_blob_from_cbe(const char *name);
@@ -126,11 +131,21 @@ typedef struct
     u8 active;
     u8 fired;
     u16 delayTicks;
+    u32 eventType;
     u32 r0;
     u32 r1;
+    u32 r2;
     u32 callback;
     u32 context;
 } vm_net_task;
+
+typedef struct
+{
+    u8 active;
+    u32 connectId;
+    u32 callback;
+    u32 context;
+} vm_net_channel;
 
 typedef struct
 {
@@ -143,11 +158,19 @@ typedef struct
 
 static u32 g_schedulerTick = 0;
 static vm_net_task g_netTasks[VM_SCHED_MAX_NET_TASKS];
+static vm_net_channel g_netChannels[VM_SCHED_MAX_NET_TASKS];
 static vm_timer_task g_timerTasks[VM_SCHED_MAX_TIMERS];
 static u32 g_schedulerStartTicks = 0;
 static u32 g_nextNetConnectId = 1;
+static u8 g_netMockResponse[1024];
+static u32 g_netMockResponseLen = 0;
+static u32 g_netMockResponseOffset = 0;
+static u32 g_netMockResponseVmPtr = 0;
+static u8 g_lastStartupScreenState = 0xff;
+static u32 g_lastStartupUpdateObj = 0xffffffff;
 
 static uc_err add_manager_code_hooks(uc_engine *uc);
+static void vm_net_trace(const char *fmt, ...);
 
 static bool vm_address_in_range(u32 address, u32 begin, u32 size)
 {
@@ -470,12 +493,20 @@ static void scheduler_normalize_startup_screen_state(void)
     u32 updateObj = 0;
     uc_mem_read(MTK, debugUiObj + 0x3d, &state, 1);
     uc_mem_read(MTK, debugUiObj + 0x140, &updateObj, 4);
-    if (state == 10 && updateObj == 0)
+    if (state != g_lastStartupScreenState || updateObj != g_lastStartupUpdateObj)
     {
         u8 hasLocalUpdate = 0;
-        u8 nextState = 11;
         uc_mem_read(MTK, Global_R9 + 0x5496, &hasLocalUpdate, 1);
-        if (hasLocalUpdate == 1)
+        vm_net_trace("startup_screen state=%u updateObj=%08x hasLocalUpdate=%u tick=%u\n", state, updateObj, hasLocalUpdate, g_schedulerTick);
+        g_lastStartupScreenState = state;
+        g_lastStartupUpdateObj = updateObj;
+    }
+    if (state == 10 && updateObj == 0)
+    {
+        u8 musicSettingReady = 0;
+        u8 nextState = 11;
+        uc_mem_read(MTK, Global_R9 + 0x5496, &musicSettingReady, 1);
+        if (musicSettingReady == 1)
             nextState = 9;
         uc_mem_write(MTK, debugUiObj + 0x3d, &nextState, 1);
     }
@@ -637,11 +668,57 @@ static uc_err scheduler_dispatch_timers(void)
     return UC_ERR_OK;
 }
 
-static void scheduler_queue_net_task(u32 r0, u32 r1, u32 callback, u32 context)
+static void scheduler_register_net_channel(u32 connectId, u32 callback, u32 context)
 {
     for (u32 i = 0; i < VM_SCHED_MAX_NET_TASKS; ++i)
     {
-        if (g_netTasks[i].active && g_netTasks[i].callback == callback && g_netTasks[i].context == context)
+        if (g_netChannels[i].active && g_netChannels[i].connectId == connectId)
+        {
+            g_netChannels[i].callback = callback;
+            g_netChannels[i].context = context;
+            return;
+        }
+    }
+    for (u32 i = 0; i < VM_SCHED_MAX_NET_TASKS; ++i)
+    {
+        if (!g_netChannels[i].active)
+        {
+            g_netChannels[i].active = 1;
+            g_netChannels[i].connectId = connectId;
+            g_netChannels[i].callback = callback;
+            g_netChannels[i].context = context;
+            return;
+        }
+    }
+}
+
+static vm_net_channel *scheduler_find_net_channel(u32 connectId)
+{
+    for (u32 i = 0; i < VM_SCHED_MAX_NET_TASKS; ++i)
+    {
+        if (g_netChannels[i].active && g_netChannels[i].connectId == connectId)
+            return &g_netChannels[i];
+    }
+    return NULL;
+}
+
+static void scheduler_unregister_net_channel(u32 connectId)
+{
+    for (u32 i = 0; i < VM_SCHED_MAX_NET_TASKS; ++i)
+    {
+        if (g_netChannels[i].active && g_netChannels[i].connectId == connectId)
+        {
+            memset(&g_netChannels[i], 0, sizeof(g_netChannels[i]));
+            return;
+        }
+    }
+}
+
+static void scheduler_queue_net_event(u32 eventType, u32 r0, u32 r1, u32 r2, u32 callback, u32 context)
+{
+    for (u32 i = 0; i < VM_SCHED_MAX_NET_TASKS; ++i)
+    {
+        if (g_netTasks[i].active && g_netTasks[i].eventType == eventType && g_netTasks[i].r0 == r0 && g_netTasks[i].r1 == r1 && g_netTasks[i].r2 == r2 && g_netTasks[i].callback == callback && g_netTasks[i].context == context)
             return;
     }
     for (u32 i = 0; i < VM_SCHED_MAX_NET_TASKS; ++i)
@@ -651,14 +728,24 @@ static void scheduler_queue_net_task(u32 r0, u32 r1, u32 callback, u32 context)
             g_netTasks[i].active = 1;
             g_netTasks[i].fired = 0;
             g_netTasks[i].delayTicks = 6;
+            g_netTasks[i].eventType = eventType;
             g_netTasks[i].r0 = r0;
             g_netTasks[i].r1 = r1;
+            g_netTasks[i].r2 = r2;
             g_netTasks[i].callback = callback;
             g_netTasks[i].context = context;
-            DEBUG_PRINT("[probe_net] queue r0=%x r1=%x cb=%x ctx=%x tick=%u last=%x\n", r0, r1, callback, context, g_schedulerTick, lastAddress);
+            DEBUG_PRINT("[probe_net] queue event=%u r0=%x r1=%x r2=%x cb=%x ctx=%x tick=%u last=%x\n", eventType, r0, r1, r2, callback, context, g_schedulerTick, lastAddress);
+            vm_net_trace("queue_event event=%u r0=%08x r1=%08x r2=%08x cb=%08x ctx=%08x tick=%u last=%08x\n", eventType, r0, r1, r2, callback, context, g_schedulerTick, lastAddress);
             return;
         }
     }
+}
+
+static void scheduler_queue_net_task(u32 r0, u32 r1, u32 callback, u32 context)
+{
+    (void)r0;
+    (void)r1;
+    scheduler_queue_net_event(5, 0, 0, 0, callback, context);
 }
 
 static uc_err scheduler_dispatch_net_tasks(void)
@@ -677,19 +764,393 @@ static uc_err scheduler_dispatch_net_tasks(void)
         {
             task->fired = 1;
             task->active = 0;
-            DEBUG_PRINT("[probe_net] fire r0=%x r1=%x cb=%x ctx=%x tick=%u\n", task->r0, task->r1, task->callback, task->context, g_schedulerTick);
+            DEBUG_PRINT("[probe_net_fire] event=%u r0=%x r1=%x r2=%x cb=%x ctx=%x tick=%u\n", task->eventType, task->r0, task->r1, task->r2, task->callback, task->context, g_schedulerTick);
+            vm_net_trace("fire_event event=%u r0=%08x r1=%08x r2=%08x cb=%08x ctx=%08x tick=%u\n", task->eventType, task->r0, task->r1, task->r2, task->callback, task->context, g_schedulerTick);
             u32 netCurrentReqAddr = Global_R9 + 0x9588 + 4;
             u32 oldCurrentReq = 0;
             uc_mem_read(MTK, netCurrentReqAddr, &oldCurrentReq, 4);
             u32 request = task->context - 4;
             uc_mem_write(MTK, netCurrentReqAddr, &request, 4);
-            uc_err err = vm_call4(task->callback, 0, 0, 0, 5);
+            u8 oldNetState = 0;
+            u8 forceNetState = 0;
+            if (task->eventType == 7)
+            {
+                u32 netCb14 = 0;
+                u32 netCb44 = 0;
+                uc_mem_read(MTK, Global_R9 + 0x9588 + 0x14, &netCb14, 4);
+                uc_mem_read(MTK, Global_R9 + 0x9588 + 0x44, &netCb44, 4);
+                uc_mem_read(MTK, Global_R9 + 0x9588 + 0xc, &oldNetState, 1);
+                forceNetState = 1;
+                uc_mem_write(MTK, Global_R9 + 0x9588 + 0xc, &forceNetState, 1);
+                vm_net_trace("force_net_state old=%u new=%u cb14=%08x cb44=%08x\n", oldNetState, forceNetState, netCb14, netCb44);
+            }
+            uc_err err = vm_call4(task->callback, task->r0, task->r1, task->r2, task->eventType);
+            if (task->eventType == 7)
+            {
+                u8 updateFlags[4] = {0};
+                u8 hasLocalUpdate = 0;
+                u8 updateState = 0;
+                uc_mem_read(MTK, Global_R9 + 0x954c + 0x10, updateFlags, sizeof(updateFlags));
+                uc_mem_read(MTK, Global_R9 + 0x5496, &hasLocalUpdate, 1);
+                uc_mem_read(MTK, Global_R9 + 0x4cb6, &updateState, 1);
+                if (updateState == 2 && updateFlags[0] == 1 && updateFlags[1] == 1 && updateFlags[2] == 1 && updateFlags[3] == 1 && hasLocalUpdate != 0)
+                {
+                    hasLocalUpdate = 0;
+                    uc_mem_write(MTK, Global_R9 + 0x5496, &hasLocalUpdate, 1);
+                }
+                vm_net_trace("after_data_event updateState=%u hasLocalUpdate=%u flags=%u,%u,%u,%u\n",
+                             updateState, hasLocalUpdate, updateFlags[0], updateFlags[1], updateFlags[2], updateFlags[3]);
+                uc_mem_write(MTK, Global_R9 + 0x9588 + 0xc, &oldNetState, 1);
+            }
             uc_mem_write(MTK, netCurrentReqAddr, &oldCurrentReq, 4);
             if (err != UC_ERR_OK)
                 return err;
         }
     }
     return UC_ERR_OK;
+}
+
+typedef struct
+{
+    const char *name;
+    const char *contains;
+    const char *responseFile;
+    const u8 *response;
+    u32 responseLen;
+} vm_net_mock_rule;
+
+static bool vm_net_mock_request_contains(const u8 *request, u32 requestLen, const char *needle)
+{
+    u32 needleLen = needle ? (u32)strlen(needle) : 0;
+    if (request == NULL || needleLen == 0 || requestLen < needleLen)
+        return false;
+
+    for (u32 i = 0; i + needleLen <= requestLen; ++i)
+    {
+        if (memcmp(request + i, needle, needleLen) == 0)
+            return true;
+    }
+    return false;
+}
+
+static u32 vm_net_mock_copy_response(const u8 *response, u32 responseLen, u8 *out, u32 outCap)
+{
+    if (response == NULL || responseLen == 0 || out == NULL || outCap == 0)
+        return 0;
+    u32 copyLen = responseLen < outCap ? responseLen : outCap;
+    memcpy(out, response, copyLen);
+    return copyLen;
+}
+
+static u32 vm_net_mock_load_response_file(const char *path, u8 *out, u32 outCap)
+{
+    if (path == NULL || out == NULL || outCap == 0)
+        return 0;
+
+    FILE *fp = fopen(path, "rb");
+    if (fp == NULL)
+        return 0;
+
+    size_t len = fread(out, 1, outCap, fp);
+    fclose(fp);
+    return (u32)len;
+}
+
+static void vm_net_trace(const char *fmt, ...)
+{
+    FILE *fp = fopen("net_trace.log", "a");
+    if (fp == NULL)
+        return;
+
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(fp, fmt, args);
+    va_end(args);
+    fclose(fp);
+}
+
+static void vm_net_trace_bytes(const char *tag, const u8 *data, u32 len)
+{
+    FILE *fp = fopen("net_trace.log", "a");
+    if (fp == NULL)
+        return;
+
+    u32 dumpLen = len < 160 ? len : 160;
+    fprintf(fp, "%s len=%u dump=%u hex=", tag, len, dumpLen);
+    for (u32 i = 0; i < dumpLen; ++i)
+        fprintf(fp, "%02x", data[i]);
+    fprintf(fp, " ascii=");
+    for (u32 i = 0; i < dumpLen; ++i)
+    {
+        u8 ch = data[i];
+        fputc((ch >= 0x20 && ch <= 0x7e) ? ch : '.', fp);
+    }
+    fputc('\n', fp);
+    fclose(fp);
+}
+
+static u32 vm_net_mock_build_response_from_rules(const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    static const vm_net_mock_rule rules[] = {
+        /* 服务器版本握手。可用 bin/net_mocks/version-handshake.bin 覆盖响应体。 */
+        {"version-handshake", "version", "net_mocks/version-handshake.bin", NULL, 0},
+    };
+
+    for (u32 i = 0; i < sizeof(rules) / sizeof(rules[0]); ++i)
+    {
+        const vm_net_mock_rule *rule = &rules[i];
+        if (!vm_net_mock_request_contains(request, requestLen, rule->contains))
+            continue;
+        u32 fileLen = vm_net_mock_load_response_file(rule->responseFile, out, outCap);
+        if (fileLen)
+        {
+            vm_net_trace("mock_rule name=%s source=file path=%s len=%u\n", rule->name, rule->responseFile, fileLen);
+            return fileLen;
+        }
+        if (rule->response && rule->responseLen)
+        {
+            vm_net_trace("mock_rule name=%s source=builtin len=%u\n", rule->name, rule->responseLen);
+            return vm_net_mock_copy_response(rule->response, rule->responseLen, out, outCap);
+        }
+        vm_net_trace("mock_rule name=%s source=fallback\n", rule->name);
+        break;
+    }
+    return 0;
+}
+
+static bool vm_net_mock_put_bytes(u8 *out, u32 outCap, u32 *pos, const void *data, u32 len)
+{
+    if (*pos + len > outCap)
+        return false;
+    memcpy(out + *pos, data, len);
+    *pos += len;
+    return true;
+}
+
+static bool vm_net_mock_put_u8(u8 *out, u32 outCap, u32 *pos, u8 value)
+{
+    return vm_net_mock_put_bytes(out, outCap, pos, &value, 1);
+}
+
+static bool vm_net_mock_put_be16(u8 *out, u32 outCap, u32 *pos, u16 value)
+{
+    u8 bytes[2] = {(u8)(value >> 8), (u8)value};
+    return vm_net_mock_put_bytes(out, outCap, pos, bytes, sizeof(bytes));
+}
+
+static bool vm_net_mock_put_be32(u8 *out, u32 outCap, u32 *pos, u32 value)
+{
+    u8 bytes[4] = {(u8)(value >> 24), (u8)(value >> 16), (u8)(value >> 8), (u8)value};
+    return vm_net_mock_put_bytes(out, outCap, pos, bytes, sizeof(bytes));
+}
+
+static bool vm_net_mock_put_name(u8 *out, u32 outCap, u32 *pos, const char *name)
+{
+    u32 nameLen = (u32)strlen(name) + 1;
+    if (nameLen > 0xff)
+        return false;
+    return vm_net_mock_put_u8(out, outCap, pos, (u8)nameLen) &&
+           vm_net_mock_put_bytes(out, outCap, pos, name, nameLen - 1) &&
+           vm_net_mock_put_u8(out, outCap, pos, 0);
+}
+
+static bool vm_net_mock_put_int_field(u8 *out, u32 outCap, u32 *pos, const char *name, u32 value)
+{
+    return vm_net_mock_put_name(out, outCap, pos, name) &&
+           vm_net_mock_put_u8(out, outCap, pos, 0x06) &&
+           vm_net_mock_put_be16(out, outCap, pos, 4) &&
+           vm_net_mock_put_be32(out, outCap, pos, value);
+}
+
+static bool vm_net_mock_put_string_field(u8 *out, u32 outCap, u32 *pos, const char *name, const char *value)
+{
+    u32 valueLen = (u32)strlen(value);
+    return vm_net_mock_put_name(out, outCap, pos, name) &&
+           vm_net_mock_put_u8(out, outCap, pos, 0x10) &&
+           vm_net_mock_put_be16(out, outCap, pos, (u16)valueLen) &&
+           vm_net_mock_put_bytes(out, outCap, pos, value, valueLen);
+}
+
+static bool vm_net_mock_put_object_entry(u8 *out, u32 outCap, u32 *pos, const char *name, const u8 *value, u16 valueLen)
+{
+    u32 nameLen = (u32)strlen(name);
+    if (nameLen > 0xff)
+        return false;
+    return vm_net_mock_put_u8(out, outCap, pos, (u8)nameLen) &&
+           vm_net_mock_put_bytes(out, outCap, pos, name, nameLen) &&
+           vm_net_mock_put_be16(out, outCap, pos, valueLen) &&
+           vm_net_mock_put_bytes(out, outCap, pos, value, valueLen);
+}
+
+static bool vm_net_mock_put_object_u8(u8 *out, u32 outCap, u32 *pos, const char *name, u8 value)
+{
+    u8 encoded[] = {0x00, 0x01, value};
+    return vm_net_mock_put_object_entry(out, outCap, pos, name, encoded, sizeof(encoded));
+}
+
+static bool vm_net_mock_put_object_u32(u8 *out, u32 outCap, u32 *pos, const char *name, u32 value)
+{
+    u8 encoded[] = {0x00, 0x04, (u8)(value >> 24), (u8)(value >> 16), (u8)(value >> 8), (u8)value};
+    return vm_net_mock_put_object_entry(out, outCap, pos, name, encoded, sizeof(encoded));
+}
+
+static bool vm_net_mock_put_object_blob(u8 *out, u32 outCap, u32 *pos, const char *name, const u8 *data, u16 dataLen)
+{
+    u8 encoded[520];
+    if ((u32)dataLen + 2 > sizeof(encoded))
+        return false;
+    encoded[0] = (u8)(dataLen >> 8);
+    encoded[1] = (u8)dataLen;
+    if (dataLen)
+        memcpy(encoded + 2, data, dataLen);
+    return vm_net_mock_put_object_entry(out, outCap, pos, name, encoded, dataLen + 2);
+}
+
+static bool vm_net_mock_put_object_string(u8 *out, u32 outCap, u32 *pos, const char *name, const char *value)
+{
+    return vm_net_mock_put_object_blob(out, outCap, pos, name, (const u8 *)value, (u16)strlen(value));
+}
+
+static u32 vm_net_mock_build_version_response(u8 *out, u32 outCap)
+{
+    u32 pos = 11;
+    if (outCap < pos)
+        return 0;
+
+    u8 updateData[256];
+    u32 updateLen = vm_net_mock_load_response_file("JHOnlineData/mmorpg_updateversioncbm", updateData, sizeof(updateData));
+    if (updateLen == 0)
+        updateLen = 40;
+
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
+        return 0;
+    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "totalsize", updateLen))
+        return 0;
+    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "crc", 0))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "type", 0))
+        return 0;
+    if (!vm_net_mock_put_object_string(out, outCap, &pos, "name", "mmorpg_updateversioncbm"))
+        return 0;
+    if (!vm_net_mock_put_object_blob(out, outCap, &pos, "data", updateData, (u16)updateLen))
+        return 0;
+
+    out[0] = 'W';
+    out[1] = 'T';
+    out[2] = (u8)(pos >> 8);
+    out[3] = (u8)pos;
+    out[4] = 1;
+    out[5] = 1;
+    out[6] = 0x12;
+    out[7] = 7;
+    out[8] = 0;
+    out[9] = (u8)((pos - 5) >> 8);
+    out[10] = (u8)(pos - 5);
+    return pos;
+}
+
+static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    if (request == NULL || requestLen == 0 || outCap == 0)
+        return 0;
+
+    u32 hookedLen = vm_net_mock_build_response_from_rules(request, requestLen, out, outCap);
+    if (hookedLen)
+        return hookedLen;
+
+    if (vm_net_mock_request_contains(request, requestLen, "version"))
+    {
+        hookedLen = vm_net_mock_build_version_response(out, outCap);
+        if (hookedLen)
+        {
+            vm_net_trace("mock_default source=builtin-version len=%u\n", hookedLen);
+            return hookedLen;
+        }
+    }
+
+    hookedLen = vm_net_mock_load_response_file("net_mocks/default.bin", out, outCap);
+    if (hookedLen)
+    {
+        vm_net_trace("mock_default source=file len=%u\n", hookedLen);
+        return hookedLen;
+    }
+
+    if (requestLen >= 2 && request[0] == 'W' && request[1] == 'T')
+    {
+        vm_net_trace("mock_default source=echo-wt len=%u\n", requestLen);
+        return vm_net_mock_copy_response(request, requestLen, out, outCap);
+    }
+
+    static const u8 ok[] = {'O', 'K', 0};
+    if (outCap < sizeof(ok))
+        return 0;
+    memcpy(out, ok, sizeof(ok));
+    return sizeof(ok);
+}
+
+static u32 vm_net_mock_sync_response_to_vm(void)
+{
+    if (g_netMockResponseLen == 0)
+        return 0;
+
+    if (g_netMockResponseVmPtr)
+    {
+        vm_free(g_netMockResponseVmPtr);
+        g_netMockResponseVmPtr = 0;
+    }
+
+    g_netMockResponseVmPtr = vm_malloc(g_netMockResponseLen);
+    uc_mem_write(MTK, g_netMockResponseVmPtr, g_netMockResponse, g_netMockResponseLen);
+    return g_netMockResponseVmPtr;
+}
+
+static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
+{
+    if (dataPtr == 0 || dataLen == 0)
+        return;
+
+    u8 request[512];
+    u32 readLen = dataLen < sizeof(request) ? dataLen : sizeof(request);
+    uc_mem_read(MTK, dataPtr, request, readLen);
+    vm_net_trace("send connect=%u dataPtr=%08x dataLen=%u readLen=%u\n", connectId, dataPtr, dataLen, readLen);
+    vm_net_trace_bytes("send_payload", request, readLen);
+
+    g_netMockResponseLen = vm_net_mock_build_response(request, readLen, g_netMockResponse, sizeof(g_netMockResponse));
+    g_netMockResponseOffset = 0;
+    if (g_netMockResponseLen == 0)
+        return;
+    u32 responsePtr = vm_net_mock_sync_response_to_vm();
+    if (responsePtr == 0)
+        return;
+    vm_net_trace("mock_response ptr=%08x len=%u\n", responsePtr, g_netMockResponseLen);
+    vm_net_trace_bytes("mock_response_payload", g_netMockResponse, g_netMockResponseLen);
+
+    vm_net_channel *channel = scheduler_find_net_channel(connectId);
+    if (channel && channel->callback)
+    {
+        vm_net_trace("queue_data_event connect=%u cb=%08x ctx=%08x\n", connectId, channel->callback, channel->context);
+        scheduler_queue_net_event(7, responsePtr, g_netMockResponseLen, 0, channel->callback, channel->context);
+    }
+    else
+    {
+        vm_net_trace("queue_data_event_miss connect=%u\n", connectId);
+    }
+}
+
+static u32 vm_net_mock_read_data(u32 dst, u32 dstLen)
+{
+    if (dst == 0 || dstLen == 0 || g_netMockResponseOffset >= g_netMockResponseLen)
+    {
+        vm_net_trace("getdata dst=%08x dstLen=%u copied=0 offset=%u len=%u\n", dst, dstLen, g_netMockResponseOffset, g_netMockResponseLen);
+        return vm_set_call_result(0);
+    }
+
+    u32 remain = g_netMockResponseLen - g_netMockResponseOffset;
+    u32 copyLen = dstLen < remain ? dstLen : remain;
+    uc_mem_write(MTK, dst, g_netMockResponse + g_netMockResponseOffset, copyLen);
+    g_netMockResponseOffset += copyLen;
+    vm_net_trace("getdata dst=%08x dstLen=%u copied=%u offset=%u len=%u\n", dst, dstLen, copyLen, g_netMockResponseOffset, g_netMockResponseLen);
+    return vm_set_call_result(copyLen);
 }
 
 static uc_err scheduler_dispatch_tscreen_event(u32 tScreenEventEntry, u32 screenPtr)
@@ -953,6 +1414,176 @@ u8 *SimpleRamMatch(u8 *start, u8 *end, u8 *matchStart, int matchLen)
 #define LOAD_CBE_PATH "CBE/皇牌空战.CBE"
 #define LOAD_CBE_PATH "CBE/涂鸦跳跃.CBE"
 #define LOAD_CBE_PATH "CBE/江湖OL.CBE"
+
+static void vm_persist_ensure_dir(void)
+{
+#ifdef _WIN32
+    _mkdir("nvram");
+#else
+    mkdir("nvram", 0755);
+#endif
+}
+
+static void vm_persist_sanitize_name(const char *src, char *dst, size_t dstSize)
+{
+    size_t pos = 0;
+    if (dstSize == 0)
+        return;
+
+    for (size_t i = 0; src && src[i] && pos + 1 < dstSize; ++i)
+    {
+        char ch = src[i];
+        if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == '-')
+            dst[pos++] = ch;
+        else
+            dst[pos++] = '_';
+    }
+    dst[pos] = 0;
+}
+
+static void vm_persist_build_path(char *path, size_t pathSize, const char *kind, u32 slot)
+{
+    char appName[96];
+    vm_persist_sanitize_name(LOAD_CBE_PATH, appName, sizeof(appName));
+    snprintf(path, pathSize, "nvram/%s_%s_%08x.bin", appName, kind, slot);
+}
+
+static u32 vm_persist_read_file(const char *path, u8 *buffer, u32 size)
+{
+    if (path == NULL || buffer == NULL || size == 0)
+        return 0;
+
+    FILE *fp = fopen(path, "rb");
+    if (fp == NULL)
+        return 0;
+
+    size_t readLen = fread(buffer, 1, size, fp);
+    fclose(fp);
+    return (u32)readLen;
+}
+
+static u32 vm_persist_write_file(const char *path, const u8 *buffer, u32 size)
+{
+    if (path == NULL || buffer == NULL || size == 0)
+        return 0;
+
+    vm_persist_ensure_dir();
+    FILE *fp = fopen(path, "wb");
+    if (fp == NULL)
+        return 0;
+
+    size_t writeLen = fwrite(buffer, 1, size, fp);
+    fclose(fp);
+    return (u32)writeLen;
+}
+
+static void vm_storage_trace(const char *fmt, ...)
+{
+    FILE *fp = fopen("storage_trace.log", "a");
+    if (fp == NULL)
+        return;
+
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(fp, fmt, args);
+    va_end(args);
+    fclose(fp);
+}
+
+static u32 vm_nv_read(u32 reqPtr)
+{
+    if (reqPtr == 0)
+        return vm_set_call_result(0);
+
+    u32 slot = vm_get_var(reqPtr);
+    u32 dst = vm_get_var(reqPtr + 4);
+    u32 size = vm_get_var_short(reqPtr + 8);
+    if (dst == 0 || size == 0)
+        return vm_set_call_result(0);
+
+    char path[160];
+    u8 buffer[1024];
+    u32 readLen = size < sizeof(buffer) ? size : sizeof(buffer);
+    vm_persist_build_path(path, sizeof(path), "nv", slot);
+    readLen = vm_persist_read_file(path, buffer, readLen);
+    if (readLen)
+        uc_mem_write(MTK, dst, buffer, readLen);
+    if (readLen < size)
+    {
+        u32 zeroOffset = readLen;
+        while (zeroOffset < size)
+        {
+            u32 zeroLen = SDL_min(size - zeroOffset, (u32)sizeof(emptyBuff));
+            uc_mem_write(MTK, dst + zeroOffset, emptyBuff, zeroLen);
+            zeroOffset += zeroLen;
+        }
+    }
+
+    DEBUG_PRINT("[call]vmDlFuncNvRead slot=%x size=%u read=%u\n", slot, size, readLen);
+    vm_storage_trace("nv_read req=%08x slot=%08x dst=%08x size=%u read=%u path=%s\n", reqPtr, slot, dst, size, readLen, path);
+    return vm_set_call_result(0);
+}
+
+static u32 vm_nv_write(u32 reqPtr)
+{
+    if (reqPtr == 0)
+        return vm_set_call_result(0);
+
+    u32 slot = vm_get_var(reqPtr);
+    u32 src = vm_get_var(reqPtr + 4);
+    u32 size = vm_get_var_short(reqPtr + 8);
+    if (src == 0 || size == 0)
+        return vm_set_call_result(0);
+
+    char path[160];
+    u8 buffer[1024];
+    u32 writeLen = size < sizeof(buffer) ? size : sizeof(buffer);
+    uc_mem_read(MTK, src, buffer, writeLen);
+    vm_persist_build_path(path, sizeof(path), "nv", slot);
+    u32 savedLen = vm_persist_write_file(path, buffer, writeLen);
+
+    DEBUG_PRINT("[call]vmDlFuncNvWrite slot=%x size=%u saved=%u\n", slot, size, savedLen);
+    vm_storage_trace("nv_write req=%08x slot=%08x src=%08x size=%u saved=%u path=%s\n", reqPtr, slot, src, size, savedLen, path);
+    return vm_set_call_result(0);
+}
+
+static u32 vm_sys_set_setting_profile(u32 profile)
+{
+    u8 value[4];
+    memcpy(value, &profile, sizeof(profile));
+    char path[160];
+    vm_persist_build_path(path, sizeof(path), "sys_profile", 0);
+    u32 savedLen = vm_persist_write_file(path, value, sizeof(value));
+    vm_storage_trace("sys_set_profile profile=%u saved=%u path=%s\n", profile, savedLen, path);
+    return vm_set_call_result(0);
+}
+
+static u32 vm_sys_get_setting_profile(void)
+{
+    u32 profile = 0;
+    char path[160];
+    vm_persist_build_path(path, sizeof(path), "sys_profile", 0);
+    u32 readLen = vm_persist_read_file(path, (u8 *)&profile, sizeof(profile));
+    vm_storage_trace("sys_get_profile profile=%u read=%u path=%s\n", profile, readLen, path);
+    return vm_set_call_result(profile);
+}
+
+static u32 vm_sys_get_setting_profile_name(u32 profile, u32 dst, u32 dstLen)
+{
+    static const char *names[] = {"Normal", "Silent", "Meeting", "Outdoor"};
+    const char *name = names[0];
+    if (profile < sizeof(names) / sizeof(names[0]))
+        name = names[profile];
+    if (dst && dstLen)
+    {
+        u32 len = (u32)strlen(name) + 1;
+        if (len > dstLen)
+            len = dstLen;
+        uc_mem_write(MTK, dst, name, len);
+    }
+    vm_storage_trace("sys_get_profile_name profile=%u dst=%08x len=%u name=%s\n", profile, dst, dstLen, name);
+    return vm_set_call_result(0);
+}
 
 void RunArmProgram(void *param)
 {
@@ -2353,18 +2984,19 @@ static bool hook_vm_sys_manager_func(u32 address)
         }
         else if (idx == 111)
         {
-            printf("[call]vmSysSetSettingProfile\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            vm_sys_set_setting_profile(tmp1);
         }
         else if (idx == 112)
         {
-            printf("[call]vmSysGetSettingProfile\n");
-            assert(0);
+            vm_sys_get_setting_profile();
         }
         else if (idx == 113)
         {
-            printf("[call]vmSysGetSettingProfileName\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+            vm_sys_get_setting_profile_name(tmp1, tmp2, tmp3);
         }
         else if (idx == 114)
         {
@@ -3743,27 +4375,33 @@ static bool hook_vm_manager_network_func(u32 address)
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
         u32 idx = (address - VM_MANAGER_NETWORK_FUNC_LIST_ADDRESS) / 4;
-        DEBUG_PRINT("[probe_net_idx] idx=%u last=%x\n", idx, lastAddress);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+        DEBUG_PRINT("[probe_net_idx] idx=%u r0=%x r1=%x r2=%x r3=%x last=%x\n", idx, tmp1, tmp2, tmp3, tmp4, lastAddress);
         if (idx == 0)
         {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-            uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
             tmp5 = g_nextNetConnectId++;
             if (tmp5 == 0)
                 tmp5 = g_nextNetConnectId++;
             if (tmp4)
                 uc_mem_write(MTK, tmp4, &tmp5, 4);
+            scheduler_register_net_channel(tmp5, tmp3, tmp4);
+            vm_net_trace("open_channel host=%08x type=%u cb=%08x ctx=%08x connect=%u last=%08x\n", tmp1, tmp2, tmp3, tmp4, tmp5, lastAddress);
             scheduler_queue_net_task(tmp1, tmp2, tmp3, tmp4);
             vm_set_call_result(1);
         }
         else if (idx == 1)
         {
-            vm_set_call_result(0);
+            vm_net_trace("send_call connect=%u len=%u data=%08x r3=%08x last=%08x\n", tmp1, tmp2, tmp3, tmp4, lastAddress);
+            vm_net_mock_on_send(tmp1, tmp3, tmp2);
+            vm_set_call_result(tmp2);
         }
         else if (idx == 2)
         {
+            vm_net_trace("close_channel connect=%u last=%08x\n", tmp1, lastAddress);
+            scheduler_unregister_net_channel(tmp1);
             vm_set_call_result(0);
         }
         else if (idx == 3)
@@ -3780,26 +4418,26 @@ static bool hook_vm_manager_network_func(u32 address)
         }
         else if (idx == 6 || idx == 7 || idx == 18)
         {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-            uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+            vm_net_trace("open_channel_ex idx=%u r0=%08x r1=%08x cb=%08x ctx=%08x last=%08x\n", idx, tmp1, tmp2, tmp3, tmp4, lastAddress);
             scheduler_queue_net_task(tmp1, tmp2, tmp3, tmp4);
             vm_set_call_result(1);
         }
         else if (idx == 17)
         {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+            vm_net_trace("http_get_ex r0=%08x cb=%08x ctx=%08x last=%08x\n", tmp1, tmp2, tmp3, lastAddress);
             scheduler_queue_net_task(tmp1, 0, tmp2, tmp3);
             vm_set_call_result(1);
         }
-        else if (idx == 4 || idx == 19 || idx == 29 || idx == 30)
+        else if (idx == 4 || idx == 19 || idx == 20 || idx == 29 || idx == 30)
         {
+            vm_net_trace("net_success_stub idx=%u r0=%08x r1=%08x r2=%08x r3=%08x last=%08x\n", idx, tmp1, tmp2, tmp3, tmp4, lastAddress);
             vm_set_call_result(1);
         }
-        else if (idx == 5 || idx == 12 || idx == 13 || idx == 21 || idx == 24 || idx == 25 || idx == 33 || idx == 34 || idx == 36 || idx == 37 || idx == 39 || idx == 41 || idx == 42)
+        else if (idx == 36)
+        {
+            vm_net_mock_read_data(tmp1, tmp2);
+        }
+        else if (idx == 5 || idx == 12 || idx == 13 || idx == 21 || idx == 24 || idx == 25 || idx == 33 || idx == 34 || idx == 37 || idx == 39 || idx == 41 || idx == 42)
         {
             vm_set_call_result(0);
         }
@@ -4380,6 +5018,13 @@ static bool hook_vm_manager_screen_func(u32 address)
             vmAddedScreen = tmp1;
             vm_set_call_result(0);
         }
+        else if (idx == 6)
+        {
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+            vm_net_trace("screen_manager idx=6 r0=%08x r1=%08x last=%08x\n", tmp1, tmp2, lastAddress);
+            vm_set_call_result(0);
+        }
         else
         {
             printf("[impl]vmScreenManager调用位置:%d\n", idx);
@@ -4707,15 +5352,12 @@ static bool hook_vm_manager_vmim_func(u32 address)
         else if (idx == 2)
         {
             uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            tmp2 = vm_get_var(tmp1 + 4);
-            tmp3 = vm_get_var_short(tmp1 + 8);
-            if (tmp2 && tmp3)
-                uc_mem_write(MTK, tmp2, emptyBuff, tmp3);
-            vm_set_call_result(0);
+            vm_nv_read(tmp1);
         }
         else if (idx == 3)
         {
-            vm_set_call_result(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            vm_nv_write(tmp1);
         }
         else if (idx == 4)
         {
@@ -6153,6 +6795,31 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         normalize_program_exit_pc(g_currentEmuEntry);
         uc_emu_stop(MTK);
         return;
+    }
+    u32 tracePc = (u32)address & ~1u;
+    if (tracePc == 0x103489a || tracePc == 0x103b2d6 || tracePc == 0x103b59a || tracePc == 0x103b620 ||
+        tracePc == 0x10346e0 || tracePc == 0x103467a || tracePc == 0x10346c6 || tracePc == 0x10346cc ||
+        tracePc == 0x10346d0 || tracePc == 0x10346dc || tracePc == 0x1033b9a || tracePc == 0x1033c30 ||
+        tracePc == 0x1033c64 || tracePc == 0x1033c68 || tracePc == 0x1037472 || tracePc == 0x10374a0 ||
+        tracePc == 0x10374a4 || tracePc == 0x10374ac || tracePc == 0x1037552 || tracePc == 0x1037554 ||
+        tracePc == 0x103755e || tracePc == 0x103757e || tracePc == 0x1037588 || tracePc == 0x1037598 ||
+        tracePc == 0x10372d6 || tracePc == 0x103730e || tracePc == 0x1037318 || tracePc == 0x1037324 ||
+        tracePc == 0x1037334 || tracePc == 0x1037348 || tracePc == 0x1037358 || tracePc == 0x1037378 ||
+        tracePc == 0x103745e)
+    {
+        u32 r0 = 0, r1 = 0, r2 = 0, r3 = 0, lr = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+        vm_net_trace("pc_trace pc=%08x r0=%08x r1=%08x r2=%08x r3=%08x lr=%08x\n", tracePc, r0, r1, r2, r3, lr);
+        if (tracePc == 0x1033b9a && r1)
+        {
+            u8 bytes[16] = {0};
+            if (uc_mem_read(MTK, r1, bytes, sizeof(bytes)) == UC_ERR_OK)
+                vm_net_trace_bytes("parse_object_input", bytes, sizeof(bytes));
+        }
     }
     if (((u32)address & ~1u) == 0x103b07c)
     {

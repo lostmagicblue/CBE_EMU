@@ -38,6 +38,30 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             ;
     }
 #endif
+    if (type == UC_MEM_WRITE && Global_R9 != 0)
+    {
+        u32 debugUiObj = 0;
+        if (uc_mem_read(uc, Global_R9 + 0x9928 + 0x10, &debugUiObj, 4) == UC_ERR_OK && debugUiObj != 0)
+        {
+            u32 stateAddr = debugUiObj + 0x3d;
+            if (address <= stateAddr && stateAddr < address + size)
+            {
+                u32 pc = 0, lr = 0;
+                u8 oldState = 0;
+                u8 newState = (u8)(value >> ((stateAddr - (u32)address) * 8));
+                uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+                uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+                uc_mem_read(uc, stateAddr, &oldState, 1);
+                FILE *fp = fopen("net_trace.log", "a");
+                if (fp)
+                {
+                    fprintf(fp, "startup_state_write addr=%08x size=%u old=%u new=%u pc=%08x lr=%08x last=%08x\n",
+                            (u32)address, size, oldState, newState, pc, lr, lastAddress);
+                    fclose(fp);
+                }
+            }
+        }
+    }
     // if (type == UC_MEM_WRITE && ((address == 0x10353C0)))
     // {
     //     printf("write[%x:", address);
