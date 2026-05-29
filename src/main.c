@@ -166,8 +166,12 @@ static u8 g_netMockResponse[1024];
 static u32 g_netMockResponseLen = 0;
 static u32 g_netMockResponseOffset = 0;
 static u32 g_netMockResponseVmPtr = 0;
+static u8 g_netMockResponseIsUpdateChunk = 0;
 static u8 g_lastStartupScreenState = 0xff;
 static u32 g_lastStartupUpdateObj = 0xffffffff;
+static u8 g_lastStartupProgress = 0xff;
+static u8 g_lastStartupUpdateState = 0xff;
+static u8 g_startupAdvanceAfterUpdate = 0;
 
 static uc_err add_manager_code_hooks(uc_engine *uc);
 static void vm_net_trace(const char *fmt, ...);
@@ -496,10 +500,29 @@ static void scheduler_normalize_startup_screen_state(void)
     if (state != g_lastStartupScreenState || updateObj != g_lastStartupUpdateObj)
     {
         u8 hasLocalUpdate = 0;
+        u8 progress = 0;
+        u8 updateState = 0;
         uc_mem_read(MTK, Global_R9 + 0x5496, &hasLocalUpdate, 1);
-        vm_net_trace("startup_screen state=%u updateObj=%08x hasLocalUpdate=%u tick=%u\n", state, updateObj, hasLocalUpdate, g_schedulerTick);
+        uc_mem_read(MTK, Global_R9 + 0x5494, &progress, 1);
+        uc_mem_read(MTK, Global_R9 + 0x4cb6, &updateState, 1);
+        vm_net_trace("startup_screen state=%u updateObj=%08x hasLocalUpdate=%u progress=%u updateState=%u tick=%u\n", state, updateObj, hasLocalUpdate, progress, updateState, g_schedulerTick);
         g_lastStartupScreenState = state;
         g_lastStartupUpdateObj = updateObj;
+        g_lastStartupProgress = progress;
+        g_lastStartupUpdateState = updateState;
+    }
+    else
+    {
+        u8 progress = 0;
+        u8 updateState = 0;
+        uc_mem_read(MTK, Global_R9 + 0x5494, &progress, 1);
+        uc_mem_read(MTK, Global_R9 + 0x4cb6, &updateState, 1);
+        if (progress != g_lastStartupProgress || updateState != g_lastStartupUpdateState)
+        {
+            vm_net_trace("startup_progress progress=%u updateState=%u state=%u tick=%u\n", progress, updateState, state, g_schedulerTick);
+            g_lastStartupProgress = progress;
+            g_lastStartupUpdateState = updateState;
+        }
     }
     if (state == 10 && updateObj == 0)
     {
@@ -790,16 +813,52 @@ static uc_err scheduler_dispatch_net_tasks(void)
                 u8 updateFlags[4] = {0};
                 u8 hasLocalUpdate = 0;
                 u8 updateState = 0;
+                u8 downloadState = 0;
+                u8 updateIndex = 0;
+                u16 updateRemain = 0;
+                u16 updateDoneCount = 0;
+                u32 downloadReceived = 0;
+                u32 downloadTotal = 0;
                 uc_mem_read(MTK, Global_R9 + 0x954c + 0x10, updateFlags, sizeof(updateFlags));
+                uc_mem_read(MTK, Global_R9 + 0x954c + 0x8, &updateIndex, 1);
+                uc_mem_read(MTK, Global_R9 + 0x954c + 0x8, &updateRemain, 2);
+                uc_mem_read(MTK, Global_R9 + 0x954c + 0xa, &updateDoneCount, 2);
                 uc_mem_read(MTK, Global_R9 + 0x5496, &hasLocalUpdate, 1);
                 uc_mem_read(MTK, Global_R9 + 0x4cb6, &updateState, 1);
-                if (updateState == 2 && updateFlags[0] == 1 && updateFlags[1] == 1 && updateFlags[2] == 1 && updateFlags[3] == 1 && hasLocalUpdate != 0)
+                uc_mem_read(MTK, Global_R9 + 0x95e8, &downloadState, 1);
+                uc_mem_read(MTK, Global_R9 + 0x95e8 + 0x18, &downloadReceived, 4);
+                uc_mem_read(MTK, Global_R9 + 0x95e8 + 0x28, &downloadTotal, 4);
+                if (downloadState == 3 && updateFlags[0] == 0 && updateFlags[1] == 1 && updateFlags[2] == 1 && updateFlags[3] == 1)
                 {
-                    hasLocalUpdate = 0;
-                    uc_mem_write(MTK, Global_R9 + 0x5496, &hasLocalUpdate, 1);
+                    u8 done = 1;
+                    u8 idle = 0;
+                    uc_mem_write(MTK, Global_R9 + 0x954c + 0x10, &done, 1);
+                    uc_mem_write(MTK, Global_R9 + 0x95e8, &idle, 1);
+                    updateFlags[0] = 1;
+                    downloadState = 0;
+                    vm_net_trace("complete_update_chunk flag=0\n");
+                    u8 progress = updateIndex + 1;
+                    u8 completeState = 2;
+                    u16 noRemain = 0;
+                    u16 doneCount = 1;
+                    uc_mem_write(MTK, Global_R9 + 0x5494, &progress, 1);
+                    uc_mem_write(MTK, Global_R9 + 0x4cb6, &completeState, 1);
+                    uc_mem_write(MTK, Global_R9 + 0x954c + 0x8, &noRemain, 2);
+                    uc_mem_write(MTK, Global_R9 + 0x954c + 0xa, &doneCount, 2);
+                    updateState = completeState;
+                    updateRemain = noRemain;
+                    updateDoneCount = doneCount;
+                    if (!g_startupAdvanceAfterUpdate)
+                    {
+                        g_startupAdvanceAfterUpdate = 1;
+                        vm_net_trace("startup_advance_after_update entry=0100369c arg=2\n");
+                        uc_err advanceErr = vm_call4(0x100369c, 2, 0, 0, 0);
+                        if (advanceErr != UC_ERR_OK)
+                            return advanceErr;
+                    }
                 }
-                vm_net_trace("after_data_event updateState=%u hasLocalUpdate=%u flags=%u,%u,%u,%u\n",
-                             updateState, hasLocalUpdate, updateFlags[0], updateFlags[1], updateFlags[2], updateFlags[3]);
+                vm_net_trace("after_data_event updateState=%u downloadState=%u updateIndex=%u remain=%u done=%u received=%u total=%u hasLocalUpdate=%u flags=%u,%u,%u,%u\n",
+                             updateState, downloadState, updateIndex, updateRemain, updateDoneCount, downloadReceived, downloadTotal, hasLocalUpdate, updateFlags[0], updateFlags[1], updateFlags[2], updateFlags[3]);
                 uc_mem_write(MTK, Global_R9 + 0x9588 + 0xc, &oldNetState, 1);
             }
             uc_mem_write(MTK, netCurrentReqAddr, &oldCurrentReq, 4);
@@ -854,6 +913,70 @@ static u32 vm_net_mock_load_response_file(const char *path, u8 *out, u32 outCap)
     size_t len = fread(out, 1, outCap, fp);
     fclose(fp);
     return (u32)len;
+}
+
+static bool vm_net_mock_buffer_has_nonzero(const u8 *data, u32 len)
+{
+    for (u32 i = 0; i < len; ++i)
+    {
+        if (data[i] != 0)
+            return true;
+    }
+    return false;
+}
+
+static u32 vm_net_mock_load_update_payload(u8 *out, u32 outCap)
+{
+    static const char *payloadPaths[] = {
+        "JHOnlineData/MMORPGTempcbm.mock",
+        "JHOnlineData/MMORPGTempcbm",
+        "JHOnlineData/mmBattleMstarWqvga.cbm",
+        "JHOnlineData/mmGameMstarWqvga.cbm",
+        "JHOnlineData/mmTitleMstarWqvga.cbm",
+    };
+    for (u32 i = 0; i < sizeof(payloadPaths) / sizeof(payloadPaths[0]); ++i)
+    {
+        u32 len = vm_net_mock_load_response_file(payloadPaths[i], out, outCap);
+        if (len == 0)
+            continue;
+        if (!vm_net_mock_buffer_has_nonzero(out, len))
+        {
+            vm_net_trace("mock_update_payload skip_zero path=%s len=%u\n", payloadPaths[i], len);
+            continue;
+        }
+        vm_net_trace("mock_update_payload path=%s len=%u\n", payloadPaths[i], len);
+        return len;
+    }
+    return 0;
+}
+
+static void vm_net_mock_save_tempdata(const u8 *data, u32 len)
+{
+    if (data == NULL || len == 0)
+        return;
+    FILE *fp = fopen("JHOnlineData/mmorpgTempdata", "wb");
+    if (fp == NULL)
+        return;
+    fwrite(data, 1, len, fp);
+    u8 payload[65536];
+    u32 payloadLen = vm_net_mock_load_update_payload(payload, sizeof(payload));
+    if (payloadLen > 0)
+    {
+        fwrite(payload, 1, payloadLen, fp);
+        if (payloadLen < sizeof(payload))
+        {
+            static const u8 zeros[256] = {0};
+            u32 remain = (u32)sizeof(payload) - payloadLen;
+            while (remain > 0)
+            {
+                u32 chunk = remain > sizeof(zeros) ? (u32)sizeof(zeros) : remain;
+                fwrite(zeros, 1, chunk, fp);
+                remain -= chunk;
+            }
+        }
+    }
+    fclose(fp);
+    vm_net_trace("mock_save_tempdata headerLen=%u payloadLen=%u\n", len, payloadLen);
 }
 
 static void vm_net_trace(const char *fmt, ...)
@@ -1017,13 +1140,35 @@ static u32 vm_net_mock_build_version_response(u8 *out, u32 outCap)
     if (outCap < pos)
         return 0;
 
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
+        return 0;
+
+    out[0] = 'W';
+    out[1] = 'T';
+    out[2] = (u8)(pos >> 8);
+    out[3] = (u8)pos;
+    out[4] = 1;
+    out[5] = 1;
+    out[6] = 0x12;
+    out[7] = 5;
+    out[8] = 0;
+    out[9] = (u8)((pos - 5) >> 8);
+    out[10] = (u8)(pos - 5);
+    return pos;
+}
+
+static u32 vm_net_mock_build_update_chunk_response(u8 *out, u32 outCap)
+{
+    u32 pos = 11;
+    if (outCap < pos)
+        return 0;
+
     u8 updateData[256];
     u32 updateLen = vm_net_mock_load_response_file("JHOnlineData/mmorpg_updateversioncbm", updateData, sizeof(updateData));
     if (updateLen == 0)
         updateLen = 40;
+    vm_net_mock_save_tempdata(updateData, updateLen);
 
-    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
-        return 0;
     if (!vm_net_mock_put_object_u32(out, outCap, &pos, "totalsize", updateLen))
         return 0;
     if (!vm_net_mock_put_object_u32(out, outCap, &pos, "crc", 0))
@@ -1042,7 +1187,7 @@ static u32 vm_net_mock_build_version_response(u8 *out, u32 outCap)
     out[4] = 1;
     out[5] = 1;
     out[6] = 0x12;
-    out[7] = 7;
+    out[7] = 6;
     out[8] = 0;
     out[9] = (u8)((pos - 5) >> 8);
     out[10] = (u8)(pos - 5);
@@ -1057,6 +1202,17 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     u32 hookedLen = vm_net_mock_build_response_from_rules(request, requestLen, out, outCap);
     if (hookedLen)
         return hookedLen;
+
+    if (vm_net_mock_request_contains(request, requestLen, "start") && vm_net_mock_request_contains(request, requestLen, "id"))
+    {
+        hookedLen = vm_net_mock_build_update_chunk_response(out, outCap);
+        if (hookedLen)
+        {
+            g_netMockResponseIsUpdateChunk = 1;
+            vm_net_trace("mock_default source=builtin-update-chunk len=%u\n", hookedLen);
+            return hookedLen;
+        }
+    }
 
     if (vm_net_mock_request_contains(request, requestLen, "version"))
     {
@@ -1115,10 +1271,20 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
     vm_net_trace("send connect=%u dataPtr=%08x dataLen=%u readLen=%u\n", connectId, dataPtr, dataLen, readLen);
     vm_net_trace_bytes("send_payload", request, readLen);
 
+    g_netMockResponseIsUpdateChunk = 0;
     g_netMockResponseLen = vm_net_mock_build_response(request, readLen, g_netMockResponse, sizeof(g_netMockResponse));
     g_netMockResponseOffset = 0;
     if (g_netMockResponseLen == 0)
         return;
+    if (g_netMockResponseIsUpdateChunk)
+    {
+        u8 downloadState = 2;
+        u16 downloadType = 0;
+        uc_mem_write(MTK, Global_R9 + 0x95e8, &downloadState, 1);
+        uc_mem_write(MTK, Global_R9 + 0x95e8 + 2, &downloadType, 2);
+        vm_net_trace("prepare_update_download state=%u type=%u\n", downloadState, downloadType);
+        g_netMockResponseIsUpdateChunk = 0;
+    }
     u32 responsePtr = vm_net_mock_sync_response_to_vm();
     if (responsePtr == 0)
         return;
@@ -2112,11 +2278,23 @@ static bool hook_vm_manager_func(u32 address)
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
         u32 idx = (address - VM_MANAGER_FUNC_LIST_ADDRESS) / 4;
-        if (idx == 1)
+        if (idx == 0)
+        {
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            vm_configManagerTableCount(tmp1, VM_MANAGER_FILEIO_FUNC_LIST_ADDRESS, 30);
+            vm_set_call_result(tmp1);
+        }
+        else if (idx == 1)
         {
             tmp1 = VM_MANAGER_FILEIO_TABLE_ADDRESS;
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
             DEBUG_PRINT("[call]vMGetIoManager\n");
+        }
+        else if (idx == 2)
+        {
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            vm_configManagerTableCount(tmp1, VM_MANAGER_LCD_FUNC_LIST_ADDRESS, 95);
+            vm_set_call_result(tmp1);
         }
         else if (idx == 3)
         {
@@ -2124,11 +2302,23 @@ static bool hook_vm_manager_func(u32 address)
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
             DEBUG_PRINT("[call]vMGetLcdManager\n");
         }
+        else if (idx == 4)
+        {
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            vm_configManagerTableCount(tmp1, VM_MANAGER_TIMER_FUNC_LIST_ADDRESS, 10);
+            vm_set_call_result(tmp1);
+        }
         else if (idx == 5)
         {
             tmp1 = VM_MANAGER_TIMER_TABLE_ADDRESS;
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
             DEBUG_PRINT("[call]vMGetTimeManager\n");
+        }
+        else if (idx == 6)
+        {
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            vm_configManagerTableCount(tmp1, VM_MANAGER_CTRL_FUNC_LIST_ADDRESS, 21);
+            vm_set_call_result(tmp1);
         }
         else if (idx == 7)
         {
@@ -2153,11 +2343,23 @@ static bool hook_vm_manager_func(u32 address)
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
             DEBUG_PRINT("[call]vMGetMemoryManager\n");
         }
+        else if (idx == 10)
+        {
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            vm_configManagerTableCount(tmp1, VM_MANAGER_BILLING_FUNC_LIST_ADDRESS, 38);
+            vm_set_call_result(tmp1);
+        }
         else if (idx == 11)
         {
             tmp1 = VM_MANAGER_BILLING_TABLE_ADDRESS;
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
             DEBUG_PRINT("[call]vMGetBillingManager\n");
+        }
+        else if (idx == 12)
+        {
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            vm_configManagerTableCount(tmp1, VM_MANAGER_SCREEN_FUNC_LIST_ADDRESS, 11);
+            vm_set_call_result(tmp1);
         }
         else if (idx == 13)
         {
@@ -2184,11 +2386,23 @@ static bool hook_vm_manager_func(u32 address)
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
             DEBUG_PRINT("[call]vMGetNetManager\n");
         }
+        else if (idx == 16)
+        {
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            vm_configManagerTableCount(tmp1, VM_MANAGER_UCS2_FUNC_LIST_ADDRESS, 11);
+            vm_set_call_result(tmp1);
+        }
         else if (idx == 17)
         {
             tmp1 = VM_MANAGER_UCS2_TABLE_ADDRESS;
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
             DEBUG_PRINT("[call]vMGetUcs2StrManager\n");
+        }
+        else if (idx == 18)
+        {
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            vm_configManagerTableCount(tmp1, VM_SYS_MANAGER_FUNC_LIST_ADDRESS, 115);
+            vm_set_call_result(tmp1);
         }
         else if (idx == 19)
         {
@@ -2211,17 +2425,41 @@ static bool hook_vm_manager_func(u32 address)
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
             DEBUG_PRINT("[call]vMGetDFScriptManager\n");
         }
+        else if (idx == 22)
+        {
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            vm_configManagerTableCount(tmp1, VM_MANAGER_GAME_LCD_FUNC_LIST_ADDRESS, 24);
+            vm_set_call_result(tmp1);
+        }
         else if (idx == 23)
         {
             tmp1 = VM_MANAGER_GAME_LCD_TABLE_ADDRESS;
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
             DEBUG_PRINT("[call]vMGetGameLcdManager\n");
         }
+        else if (idx == 24)
+        {
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            vm_configManagerTableCount(tmp1, VM_MANAGER_GAME_UTIL_FUNC_LIST_ADDRESS, 40);
+            vm_set_call_result(tmp1);
+        }
         else if (idx == 25)
         {
             tmp1 = VM_MANAGER_GAME_UTIL_TABLE_ADDRESS;
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
             DEBUG_PRINT("[call]vMGetGameUtilManager\n");
+        }
+        else if (idx == 26)
+        {
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            if (tmp1)
+            {
+                tmp3 = VM_MANAGER_DF_ENGINE_FUNC_LIST_ADDRESS + 8 * 4;
+                uc_mem_write(MTK, tmp1 + 8 * 4, &tmp3, 4);
+                tmp3 = VM_MANAGER_DF_ENGINE_FUNC_LIST_ADDRESS + 10 * 4;
+                uc_mem_write(MTK, tmp1 + 10 * 4, &tmp3, 4);
+            }
+            vm_set_call_result(tmp1);
         }
         else if (idx == 27)
         {
@@ -2244,6 +2482,12 @@ static bool hook_vm_manager_func(u32 address)
             tmp1 = VM_MANAGER_NETAPP_TABLE_ADDRESS;
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
             DEBUG_PRINT("[call]vMGetNetAppManager\n");
+        }
+        else if (idx == 30)
+        {
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            vm_configManagerTableCount(tmp1, VM_MANAGER_AUDIO_FUNC_LIST_ADDRESS, 31);
+            vm_set_call_result(tmp1);
         }
         else if (idx == 31)
         {
@@ -2273,13 +2517,22 @@ static bool hook_vm_manager_func(u32 address)
         }
         else if (idx == 34)
         {
-            printf("[call]vMInitManager\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            if (tmp1)
+            {
+                for (tmp2 = 0; tmp2 < 40; tmp2++)
+                {
+                    tmp3 = VM_MANAGER_FUNC_LIST_ADDRESS + tmp2 * 4;
+                    uc_mem_write(MTK, tmp1 + tmp2 * 4, &tmp3, 4);
+                }
+            }
+            vm_set_call_result(0);
         }
         else if (idx == 35)
         {
-            printf("[call]vMInitGSensorManager\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            vm_configManagerTableCount(tmp1, VM_MANAGER_SENSOR_FUNC_LIST_ADDRESS, 11);
+            vm_set_call_result(tmp1);
         }
         else if (idx == 36)
         {
@@ -2289,8 +2542,9 @@ static bool hook_vm_manager_func(u32 address)
         }
         else if (idx == 37)
         {
-            printf("[call]vMInitVmStdManager\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            vm_configManagerTableCount(tmp1, VM_MANAGER_STDIO_FUNC_LIST_ADDRESS, 22);
+            vm_set_call_result(tmp1);
         }
         else if (idx == 38)
         {
@@ -2329,8 +2583,9 @@ static bool hook_vm_manager_func(u32 address)
         }
         else if (idx == 45)
         {
-            printf("[call]vMInitVmImManager\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            vm_configManagerTableCount(tmp1, VM_MANAGER_VMIM_FUNC_LIST_ADDRESS, 6);
+            vm_set_call_result(tmp1);
         }
         else if (idx == 46)
         {
@@ -2340,8 +2595,9 @@ static bool hook_vm_manager_func(u32 address)
         }
         else if (idx == 49)
         {
-            printf("[call]VmInitVideoManager\n");
-            assert(0);
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            vm_configManagerTableCount(tmp1, VM_VIDEO_FUNC_LIST_ADDRESS, 38);
+            vm_set_call_result(tmp1);
         }
         else if (idx == 50)
         {
@@ -2490,10 +2746,26 @@ static bool hook_vm_sys_manager_func(u32 address)
         {
             u32 line = 0;
             u32 lr = 0;
+            u32 sp = 0;
             vm_readStringByReg(UC_ARM_REG_R0, cbeTextString);
             uc_reg_read(MTK, UC_ARM_REG_R1, &line);
             uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
-            printf("[call]vMAssert(%s:%u, lr:%x, last:%x)\n", cbeTextString, line, lr, lastAddress);
+            uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+            printf("[call]vMAssert(%s:%u, lr:%x, sp:%x, last:%x)\n", cbeTextString, line, lr, sp, lastAddress);
+            vm_net_trace("vMAssert file=%s line=%u lr=%08x sp=%08x last=%08x\n", cbeTextString, line, lr, sp, lastAddress);
+            for (u32 off = 0; off < 0x80; off += 4)
+            {
+                u32 word = 0;
+                if (uc_mem_read(MTK, sp + off, &word, 4) != UC_ERR_OK)
+                    break;
+                printf("assert_stack[%02x]=%08x\n", off, word);
+                if ((word >= 0x01000000 && word < 0x01100000) ||
+                    (word >= 0x1000000 && word < 0x1100000) ||
+                    (word >= ROM_ADDRESS && word < ROM_ADDRESS + 0x800000))
+                {
+                    vm_net_trace("vMAssert_stack off=%02x word=%08x\n", off, word);
+                }
+            }
             dumpCpuInfo();
             fflush(stdout);
             assert(0);
@@ -2816,8 +3088,8 @@ static bool hook_vm_sys_manager_func(u32 address)
         }
         else if (idx == 79)
         {
-            printf("[call]vmDlGet_sp_bf\n");
-            assert(0);
+            tmp1 = Global_R9;
+            vm_set_call_result(tmp1);
         }
         else if (idx == 80)
         {
@@ -5849,8 +6121,7 @@ static bool hook_vm_df_datapackage_func(u32 address)
         }
         else if (idx == 2)
         {
-            printf("[call]DF_DataPackage_ReleasePackage\n");
-            assert(0);
+            vm_set_call_result(0);
         }
         else if (idx == 3)
         {
@@ -6797,7 +7068,9 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         return;
     }
     u32 tracePc = (u32)address & ~1u;
-    if (tracePc == 0x103489a || tracePc == 0x103b2d6 || tracePc == 0x103b59a || tracePc == 0x103b620 ||
+    if (tracePc == 0x10035a2 || tracePc == 0x100369c || tracePc == 0x103489a || tracePc == 0x103b2d6 ||
+        tracePc == 0x103b45a || tracePc == 0x103b4aa || tracePc == 0x103b4f4 || tracePc == 0x103b51a ||
+        tracePc == 0x103b584 || tracePc == 0x103b59a || tracePc == 0x103b620 || tracePc == 0x103b684 ||
         tracePc == 0x10346e0 || tracePc == 0x103467a || tracePc == 0x10346c6 || tracePc == 0x10346cc ||
         tracePc == 0x10346d0 || tracePc == 0x10346dc || tracePc == 0x1033b9a || tracePc == 0x1033c30 ||
         tracePc == 0x1033c64 || tracePc == 0x1033c68 || tracePc == 0x1037472 || tracePc == 0x10374a0 ||

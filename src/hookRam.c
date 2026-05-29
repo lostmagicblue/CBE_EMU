@@ -40,6 +40,42 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
 #endif
     if (type == UC_MEM_WRITE && Global_R9 != 0)
     {
+        struct WatchGlobal
+        {
+            u32 offset;
+            const char *name;
+        };
+        static const struct WatchGlobal watchGlobals[] = {
+            {0x4cb6, "update_state"},
+            {0x5494, "startup_progress"},
+            {0x5496, "has_local_update"},
+            {0x54b0, "startup_dispatch_flag"},
+            {0x95e8, "download_state"},
+            {0x955c, "update_flag0"},
+            {0x955d, "update_flag1"},
+            {0x955e, "update_flag2"},
+            {0x955f, "update_flag3"},
+        };
+        for (unsigned i = 0; i < sizeof(watchGlobals) / sizeof(watchGlobals[0]); ++i)
+        {
+            u32 watchAddr = Global_R9 + watchGlobals[i].offset;
+            if (address <= watchAddr && watchAddr < address + size)
+            {
+                u32 pc = 0, lr = 0;
+                u8 oldValue = 0;
+                u8 newValue = (u8)(value >> ((watchAddr - (u32)address) * 8));
+                uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+                uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+                uc_mem_read(uc, watchAddr, &oldValue, 1);
+                FILE *fp = fopen("net_trace.log", "a");
+                if (fp)
+                {
+                    fprintf(fp, "global_write name=%s off=%04x addr=%08x size=%u old=%u new=%u pc=%08x lr=%08x last=%08x\n",
+                            watchGlobals[i].name, watchGlobals[i].offset, (u32)address, size, oldValue, newValue, pc, lr, lastAddress);
+                    fclose(fp);
+                }
+            }
+        }
         u32 debugUiObj = 0;
         if (uc_mem_read(uc, Global_R9 + 0x9928 + 0x10, &debugUiObj, 4) == UC_ERR_OK && debugUiObj != 0)
         {

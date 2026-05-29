@@ -13,6 +13,7 @@
 #endif
 
 FILE *openFileList[16];
+static char openFileNames[16][256];
 
 static void vm_fileio_trace(const char *fmt, ...)
 {
@@ -25,6 +26,45 @@ static void vm_fileio_trace(const char *fmt, ...)
     vfprintf(fp, fmt, args);
     va_end(args);
     fclose(fp);
+}
+
+static void vm_fileio_trace_bytes(const char *tag, int handle, const char *path, const void *data, int len)
+{
+    FILE *fp = fopen("storage_trace.log", "a");
+    if (fp == NULL)
+        return;
+
+    const u8 *bytes = (const u8 *)data;
+    int dumpLen = len < 48 ? len : 48;
+    fprintf(fp, "%s handle=%d path=%s len=%d dump=%d hex=", tag, handle, path ? path : "", len, dumpLen);
+    for (int i = 0; i < dumpLen; ++i)
+        fprintf(fp, "%02x", bytes[i]);
+    fprintf(fp, " ascii=");
+    for (int i = 0; i < dumpLen; ++i)
+    {
+        u8 ch = bytes[i];
+        fputc((ch >= 0x20 && ch <= 0x7e) ? ch : '.', fp);
+    }
+    fputc('\n', fp);
+    fclose(fp);
+}
+
+static void vm_trim_mmorpg_tempdata_header(void)
+{
+    FILE *fp = fopen("JHOnlineData/mmorpgTempdata", "rb");
+    if (fp == NULL)
+        return;
+    u8 header[40];
+    size_t len = fread(header, 1, sizeof(header), fp);
+    fclose(fp);
+    if (len != sizeof(header))
+        return;
+    fp = fopen("JHOnlineData/mmorpgTempdata", "wb");
+    if (fp == NULL)
+        return;
+    fwrite(header, 1, sizeof(header), fp);
+    fclose(fp);
+    vm_fileio_trace("file_trim_tempdata_header len=%u\n", (unsigned)sizeof(header));
 }
 #define VM_PSEUDO_DIR_HANDLE ((FILE *)-1)
 
@@ -75,6 +115,7 @@ void vm_DF_GetMemoryBlock();
 u32 vm_set_call_result(u32 r);
 void vm_initManagerTable();
 void vm_configManagerTable(u32 a, u32 b);
+void vm_configManagerTableCount(u32 tableAddr, u32 funcAddr, u32 count);
 void vm_InitDlRsManager(u32 tmp1);
 void vm_InitDlImageManager(u32 tmp1);
 // 真机
@@ -255,6 +296,14 @@ static void vm_file_select_mode(int openMode, const char *modeHint, char *mode, 
 int vm_get_file_handle(char *nameBuf, const char *mode)
 {
     int handle = -1;
+    char binaryMode[8];
+    const char *openMode = mode;
+    const char *dot = strrchr(nameBuf, '.');
+    if (dot && (_stricmp(dot, ".cbm") == 0 || _stricmp(dot, ".cbe") == 0) && mode && strchr(mode, 'b') == NULL)
+    {
+        snprintf(binaryMode, sizeof(binaryMode), "%sb", mode);
+        openMode = binaryMode;
+    }
     for (int i = 0; i < 16; i++)
     {
         if (openFileList[i] == NULL)
@@ -262,23 +311,25 @@ int vm_get_file_handle(char *nameBuf, const char *mode)
             if (vm_is_pseudo_dir_path(nameBuf))
             {
                 openFileList[i] = VM_PSEUDO_DIR_HANDLE;
+                snprintf(openFileNames[i], sizeof(openFileNames[i]), "%s", nameBuf);
                 return i;
             }
-            FILE *f = fopen(nameBuf, mode);
-            if (f == NULL && vm_file_mode_is_writeable(mode))
+            FILE *f = fopen(nameBuf, openMode);
+            if (f == NULL && vm_file_mode_is_writeable(openMode))
             {
                 vm_file_ensure_parent_dirs(nameBuf);
-                f = fopen(nameBuf, mode);
+                f = fopen(nameBuf, openMode);
                 if (f == NULL)
                     f = fopen(nameBuf, "wb+");
             }
             if (f == NULL)
             {
-                vm_fileio_trace("file_open_fail path=%s mode=%s\n", nameBuf, mode);
+                vm_fileio_trace("file_open_fail path=%s mode=%s\n", nameBuf, openMode);
                 return -1;
             }
             openFileList[i] = f;
-            vm_fileio_trace("file_open handle=%d path=%s mode=%s\n", i, nameBuf, mode);
+            snprintf(openFileNames[i], sizeof(openFileNames[i]), "%s", nameBuf);
+            vm_fileio_trace("file_open handle=%d path=%s mode=%s\n", i, nameBuf, openMode);
             return i;
         }
     }
@@ -335,7 +386,14 @@ int vm_cbfs_vm_file_read(int bufferPtr, int size, int handle)
     int readed = fread(tmp, 1, size, openFileList[handle]);
 
     if (readed > 0)
+    {
         uc_mem_write(MTK, bufferPtr, tmp, readed);
+        vm_fileio_trace_bytes("file_read", handle, openFileNames[handle], tmp, readed);
+    }
+    else
+    {
+        vm_fileio_trace("file_read handle=%d path=%s size=%d result=%d\n", handle, openFileNames[handle], size, readed);
+    }
     SDL_free(tmp);
     return vm_set_call_result(readed);
 }
@@ -349,8 +407,12 @@ int vm_cbfs_vm_file_write(int bufferPtr, int size, int fileHandle)
     void *buffer = SDL_malloc(size);
     uc_mem_read(MTK, bufferPtr, buffer, size);
     int r = fwrite(buffer, 1, size, openFileList[fileHandle]);
+    if (r > 0)
+        vm_fileio_trace_bytes("file_write_data", fileHandle, openFileNames[fileHandle], buffer, r);
+    if (r > 0 && strstr(openFileNames[fileHandle], "MMORPGTempcbm") != NULL)
+        vm_trim_mmorpg_tempdata_header();
     SDL_free(buffer);
-    vm_fileio_trace("file_write handle=%d size=%d result=%d\n", fileHandle, size, r);
+    vm_fileio_trace("file_write handle=%d path=%s size=%d result=%d\n", fileHandle, openFileNames[fileHandle], size, r);
     return vm_set_call_result(r);
 }
 // ok
@@ -361,6 +423,9 @@ int vm_cbfs_vm_file_seek(int handle, int pos, int type)
     if (openFileList[handle] == VM_PSEUDO_DIR_HANDLE)
         return vm_set_call_result(0);
     int r = fseek(openFileList[handle], pos, type);
+    if (r == 0)
+        r = ftell(openFileList[handle]);
+    vm_fileio_trace("file_seek handle=%d path=%s pos=%d type=%d result=%d\n", handle, openFileNames[handle], pos, type, r);
     return vm_set_call_result(r);
 }
 // ok
@@ -371,6 +436,7 @@ int vm_cbfs_vm_file_tell(int fileHandle)
     if (openFileList[fileHandle] == VM_PSEUDO_DIR_HANDLE)
         return vm_set_call_result(0);
     int r = ftell(openFileList[fileHandle]);
+    vm_fileio_trace("file_tell handle=%d path=%s result=%d\n", fileHandle, openFileNames[fileHandle], r);
     return vm_set_call_result(r);
 }
 
@@ -417,6 +483,7 @@ int vm_cbfs_vm_file_getfilesize(int fileHandle)
     fseek(f, 0, SEEK_END);
     int r = ftell(f);
     fseek(f, 0, SEEK_SET);
+    vm_fileio_trace("file_getfilesize handle=%d path=%s result=%d\n", fileHandle, openFileNames[fileHandle], r);
     return vm_set_call_result(r);
 }
 // ok
@@ -427,11 +494,13 @@ int vm_cbfs_vm_file_close(int fileHandle)
     if (openFileList[fileHandle] == VM_PSEUDO_DIR_HANDLE)
     {
         openFileList[fileHandle] = NULL;
+        openFileNames[fileHandle][0] = 0;
         return vm_set_call_result(0);
     }
     int r = fclose(openFileList[fileHandle]);
+    vm_fileio_trace("file_close handle=%d path=%s result=%d\n", fileHandle, openFileNames[fileHandle], r);
     openFileList[fileHandle] = NULL;
-    vm_fileio_trace("file_close handle=%d result=%d\n", fileHandle, r);
+    openFileNames[fileHandle][0] = 0;
     return vm_set_call_result(r);
 }
 u8 vm_DF_DataPackage_GetPackageIndex(int a1)
@@ -2719,6 +2788,18 @@ void vm_configManagerTable(u32 tableAddr, u32 funcAddr)
 {
     u32 tmp, i;
     for (i = 0; i < (VM_MANAGER_FUNC_LIST_SIZE / 4); i++)
+    {
+        tmp = funcAddr + i * 4;
+        uc_mem_write(MTK, tableAddr + i * 4, &tmp, 4);
+    }
+}
+
+void vm_configManagerTableCount(u32 tableAddr, u32 funcAddr, u32 count)
+{
+    u32 tmp, i;
+    if (tableAddr == 0)
+        return;
+    for (i = 0; i < count; i++)
     {
         tmp = funcAddr + i * 4;
         uc_mem_write(MTK, tableAddr + i * 4, &tmp, 4);
