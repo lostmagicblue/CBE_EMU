@@ -5,6 +5,7 @@
 #define TRACE_STARTUP_UI 0
 #define TRACE_RESOURCE_IO 0
 #define TRACE_LCD_TEXT 0
+#define TRACE_LCD_SHAPES 0
 
 #ifdef _WIN32
 #include <direct.h>
@@ -242,6 +243,22 @@ static int vm_lcd_adjust_single_gbk_x(const u8 *gbkText, int x, int y)
     return adjustedX;
 }
 
+static void vm_trace_lcd_shape(const char *apiName, int x, int y, int w, int h, u32 color)
+{
+#if TRACE_LCD_SHAPES
+    if (y >= 35 && y <= 130)
+        vm_net_trace("lcd_shape api=%s x=%d y=%d w=%d h=%d color=%08x last=%08x\n",
+                     apiName, x, y, w, h, color, lastAddress);
+#else
+    (void)apiName;
+    (void)x;
+    (void)y;
+    (void)w;
+    (void)h;
+    (void)color;
+#endif
+}
+
 static void vm_lcd_draw_line(int x0, int y0, int x1, int y1, u16 color)
 {
     int dx = abs(x1 - x0);
@@ -268,6 +285,42 @@ static void vm_lcd_draw_line(int x0, int y0, int x1, int y1, u16 color)
             y0 += sy;
         }
     }
+}
+
+static int vm_lcd_try_unpack_packed_rect(u32 p0, u32 p1, int *x, int *y, int *w, int *h)
+{
+    if (((p0 | p1) & 0xffff0000u) == 0)
+        return 0;
+
+    int x0 = vm_lcd_coord_from_reg(p0);
+    int y0 = vm_lcd_coord_from_reg(p0 >> 16);
+    int x1 = vm_lcd_coord_from_reg(p1);
+    int y1 = vm_lcd_coord_from_reg(p1 >> 16);
+
+    if (x0 < -LCD_WIDTH || x0 > LCD_WIDTH * 2 ||
+        x1 < -LCD_WIDTH || x1 > LCD_WIDTH * 2 ||
+        y0 < -LCD_HEIGHT || y0 > LCD_HEIGHT * 2 ||
+        y1 < -LCD_HEIGHT || y1 > LCD_HEIGHT * 2)
+        return 0;
+
+    if (x1 < x0)
+    {
+        int t = x0;
+        x0 = x1;
+        x1 = t;
+    }
+    if (y1 < y0)
+    {
+        int t = y0;
+        y0 = y1;
+        y1 = t;
+    }
+
+    *x = x0;
+    *y = y0;
+    *w = x1 - x0 + 1;
+    *h = y1 - y0 + 1;
+    return 1;
 }
 
 static u32 vm_df_get_resource_by_id(u32 id)
@@ -3811,8 +3864,12 @@ static bool hook_vm_manager_lcd_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_SP, &tmp5);
         u16 color = 0xffff;
         uc_mem_read(MTK, tmp5, &color, 2);
-        vm_lcd_draw_line(vm_lcd_coord_from_reg(tmp1), vm_lcd_coord_from_reg(tmp2),
-                         vm_lcd_coord_from_reg(tmp3), vm_lcd_coord_from_reg(tmp4), color);
+        int x0 = vm_lcd_coord_from_reg(tmp1);
+        int y0 = vm_lcd_coord_from_reg(tmp2);
+        int x1 = vm_lcd_coord_from_reg(tmp3);
+        int y1 = vm_lcd_coord_from_reg(tmp4);
+        vm_trace_lcd_shape("vMDrawLine", x0, y0, x1, y1, color);
+        vm_lcd_draw_line(x0, y0, x1, y1, color);
         vm_set_call_result(1);
     }
     else if (idx == 16)
@@ -3820,29 +3877,39 @@ static bool hook_vm_manager_lcd_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
-        uc_reg_read(MTK, UC_ARM_REG_SP, &tmp5);
-        u16 color = 0xffff;
-        uc_mem_read(MTK, tmp5, &color, 2);
-        vm_lcd_draw_line(vm_lcd_coord_from_reg(tmp1), vm_lcd_coord_from_reg(tmp2),
-                         vm_lcd_coord_from_reg(tmp3), vm_lcd_coord_from_reg(tmp4), color);
+        int x0 = vm_lcd_coord_from_reg(tmp1);
+        int y0 = vm_lcd_coord_from_reg(tmp1 >> 16);
+        int x1 = vm_lcd_coord_from_reg(tmp2);
+        int y1 = vm_lcd_coord_from_reg(tmp2 >> 16);
+        u16 color = (u16)tmp3;
+        vm_trace_lcd_shape("vMDrawLineEx", x0, y0, x1, y1, color);
+        vm_lcd_draw_line(x0, y0, x1, y1, color);
         vm_set_call_result(1);
     }
     else if (idx == 17)
     {
-        u32 rectH, rectColor;
+        u32 rectH = 0, rectColor = 0;
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
         uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
         uc_reg_read(MTK, UC_ARM_REG_SP, &tmp5);
-        uc_mem_read(MTK, tmp5, &rectH, 4);
-        uc_mem_read(MTK, tmp5 + 4, &rectColor, 4);
-        int x = vm_lcd_coord_from_reg(tmp1);
-        int y = vm_lcd_coord_from_reg(tmp2);
-        int w = vm_lcd_coord_from_reg(tmp3);
-        int h = (int)rectH;
+        int x, y, w, h;
+        if (vm_lcd_try_unpack_packed_rect(tmp1, tmp2, &x, &y, &w, &h))
+        {
+            rectColor = tmp3;
+        }
+        else
+        {
+            uc_mem_read(MTK, tmp5, &rectH, 4);
+            uc_mem_read(MTK, tmp5 + 4, &rectColor, 4);
+            x = vm_lcd_coord_from_reg(tmp1);
+            y = vm_lcd_coord_from_reg(tmp2);
+            w = vm_lcd_coord_from_reg(tmp3);
+            h = (int)rectH;
+        }
         u16 color = (u16)rectColor;
+        vm_trace_lcd_shape("vMDrawRect", x, y, w, h, rectColor);
         if (w > 0 && h > 0)
         {
             if (x < 0)
@@ -3916,6 +3983,7 @@ static bool hook_vm_manager_lcd_func(u32 address)
         int w = vm_lcd_coord_from_reg(tmp3);
         int h = (int)rectH;
         u16 color = (u16)rectColor;
+        vm_trace_lcd_shape("vMDrawRectEx", x, y, w, h, rectColor);
         if (w > 0 && h > 0)
         {
             if (x < 0)
@@ -3975,13 +4043,22 @@ static bool hook_vm_manager_lcd_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
         uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
         uc_reg_read(MTK, UC_ARM_REG_SP, &tmp5);
-        u32 fillH, fillColor;
-        uc_mem_read(MTK, tmp5, &fillH, 4);
-        uc_mem_read(MTK, tmp5 + 4, &fillColor, 4);
-        int x = vm_lcd_coord_from_reg(tmp1);
-        int y = vm_lcd_coord_from_reg(tmp2);
-        int w = vm_lcd_coord_from_reg(tmp3);
-        int h = (int)fillH;
+        u32 fillH = 0, fillColor = 0;
+        int x, y, w, h;
+        if (vm_lcd_try_unpack_packed_rect(tmp1, tmp2, &x, &y, &w, &h))
+        {
+            fillColor = tmp3;
+        }
+        else
+        {
+            uc_mem_read(MTK, tmp5, &fillH, 4);
+            uc_mem_read(MTK, tmp5 + 4, &fillColor, 4);
+            x = vm_lcd_coord_from_reg(tmp1);
+            y = vm_lcd_coord_from_reg(tmp2);
+            w = vm_lcd_coord_from_reg(tmp3);
+            h = (int)fillH;
+        }
+        vm_trace_lcd_shape("vMFillRect", x, y, w, h, fillColor);
         if (x < 0)
         {
             w += x;
@@ -4033,6 +4110,7 @@ static bool hook_vm_manager_lcd_func(u32 address)
         int y = vm_lcd_coord_from_reg(tmp2);
         int w = vm_lcd_coord_from_reg(tmp3);
         int h = (int)fillH;
+        vm_trace_lcd_shape("vMFillRectEx", x, y, w, h, fillColor);
         if (x < 0)
         {
             w += x;
