@@ -6,14 +6,15 @@
 #include "stb_image.h"
 
 #include <stdarg.h>
+#include <sys/stat.h>
 #ifdef _WIN32
 #include <direct.h>
-#else
-#include <sys/stat.h>
 #endif
 
 FILE *openFileList[16];
 static char openFileNames[16][256];
+
+static void vm_read_string_by_ptr_limited(u32 ptr, char *dst, size_t dstSize);
 
 static void vm_fileio_trace(const char *fmt, ...)
 {
@@ -207,7 +208,35 @@ int vm_memcpy(int dstAddr, int srcAddr, int len)
 }
 static int vm_is_pseudo_dir_path(const char *nameBuf)
 {
-    return strcmp(nameBuf, "./") == 0 || strcmp(nameBuf, ".\\") == 0;
+    char normalized[256];
+    size_t len;
+    struct stat st;
+
+    if (nameBuf == NULL || nameBuf[0] == 0)
+        return 0;
+
+    if (strcmp(nameBuf, "./") == 0 || strcmp(nameBuf, ".\\") == 0)
+        return 1;
+
+    len = strlen(nameBuf);
+    if (len >= sizeof(normalized))
+        len = sizeof(normalized) - 1;
+    memcpy(normalized, nameBuf, len);
+    normalized[len] = 0;
+
+    for (size_t i = 0; normalized[i]; ++i)
+    {
+        if (normalized[i] == '\\')
+            normalized[i] = '/';
+    }
+
+    while (len > 0 && (normalized[len - 1] == '/' || normalized[len - 1] == '\\'))
+        normalized[--len] = 0;
+
+    if (len == 0)
+        return 0;
+
+    return stat(normalized, &st) == 0 && (st.st_mode & S_IFDIR);
 }
 
 static int vm_is_cbm_resource_path(const char *nameBuf)
@@ -373,7 +402,7 @@ int vm_dir_exists(int a1)
 int vm_cbfs_vm_file_open(int openMode, int namePtr, int rwPtr)
 {
     char rwBuff[128] = {0};
-    char nameBuff[128];
+    char nameBuff[256];
     char mode[8];
     u8 rawName[256];
     uc_mem_read(MTK, namePtr, rawName, sizeof(rawName));
@@ -387,14 +416,46 @@ int vm_cbfs_vm_file_open(int openMode, int namePtr, int rwPtr)
     }
     else
     {
-        vm_readStringByPtr(namePtr, nameBuff);
+        vm_read_string_by_ptr_limited(namePtr, nameBuff, sizeof(nameBuff));
     }
     if (rwPtr)
         uc_mem_read(MTK, rwPtr, &rwBuff, 128);
     rwBuff[sizeof(rwBuff) - 1] = 0;
     vm_file_select_mode(openMode, rwBuff, mode, sizeof(mode));
     int handle = vm_get_file_handle(nameBuff, mode);
-    vm_fileio_trace("file_open_request openMode=%x name=%s hint=%s selected=%s handle=%d last=%08x\n", openMode, nameBuff, rwBuff, mode, handle, lastAddress);
+    vm_fileio_trace("file_open_request openMode=%x namePtr=%08x name=%s hint=%s selected=%s handle=%d last=%08x\n",
+                    openMode, namePtr, nameBuff, rwBuff, mode, handle, lastAddress);
+    if (handle < 0)
+    {
+        u32 r[8] = {0};
+        uc_reg_read(MTK, UC_ARM_REG_R0, &r[0]);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &r[1]);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &r[2]);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &r[3]);
+        uc_reg_read(MTK, UC_ARM_REG_R4, &r[4]);
+        uc_reg_read(MTK, UC_ARM_REG_R5, &r[5]);
+        uc_reg_read(MTK, UC_ARM_REG_R6, &r[6]);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &r[7]);
+        vm_fileio_trace("file_open_fail_regs namePtr=%08x r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x lr=%08x last=%08x\n",
+                        namePtr, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], lastAddress);
+        vm_fileio_trace_bytes("file_open_fail_mem_namePtr", -1, nameBuff, rawName, sizeof(rawName));
+        for (u32 i = 4; i <= 6; ++i)
+        {
+            if ((r[i] >= ROM_ADDRESS && r[i] < ROM_ADDRESS + 0x1000000) ||
+                (r[i] >= VM_Memory_Pool_ADDRESS && r[i] < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE) ||
+                (r[i] >= STACK_ADDRESS && r[i] < STACK_ADDRESS + 0x100000))
+            {
+                u8 bytes[96] = {0};
+                if (uc_mem_read(MTK, r[i], bytes, sizeof(bytes)) == UC_ERR_OK)
+                {
+                    char tag[64];
+                    snprintf(tag, sizeof(tag), "file_open_fail_mem_r%u_%08x", i, r[i]);
+                    vm_fileio_trace_bytes(tag, -1, nameBuff, bytes, sizeof(bytes));
+                }
+            }
+        }
+    }
+    vm_fileio_trace_bytes("file_open_raw_name", -1, nameBuff, rawName, sizeof(rawName));
     return vm_set_call_result(handle);
 }
 // ok
@@ -697,7 +758,8 @@ int vm_DF_DataPackage_InitTxt(int a1, int a2)
 }
 u16 vm_DF_ReadShort(u32 bufPtr, u32 offsetPtr)
 {
-    u32 offset, ret;
+    u32 offset;
+    u16 ret = 0;
     uc_mem_read(MTK, offsetPtr, &offset, 4);
 
     uc_mem_read(MTK, bufPtr + offset, &ret, 2);
@@ -763,7 +825,7 @@ int vm_DF_ReadStringEx(int a1, int a2, int a3)
     u8 len;
     int buf_ptr;
     offset = vm_get_var(a3);
-    len = vm_get_var(a2 + offset);
+    len = vm_get_var_byte(a2 + offset);
 
     offset++;
 
@@ -776,7 +838,8 @@ int vm_DF_ReadStringEx(int a1, int a2, int a3)
     offset += len;
     vm_set_var(a3, offset);
 
-    vm_set_var(buf_ptr + len, 0);
+    u8 zero = 0;
+    uc_mem_write(MTK, buf_ptr + len, &zero, 1);
 
     return vm_set_call_result(0);
 }
@@ -2478,6 +2541,23 @@ void vm_readStringByReg(uc_arm_reg reg, u8 *dst)
     }
     *dst = 0;
 }
+
+static void vm_read_string_by_ptr_limited(u32 ptr, char *dst, size_t dstSize)
+{
+    if (dstSize == 0)
+        return;
+
+    size_t pos = 0;
+    while (pos + 1 < dstSize)
+    {
+        u8 ch = 0;
+        if (uc_mem_read(MTK, ptr + (u32)pos, &ch, 1) != UC_ERR_OK || ch == 0)
+            break;
+        dst[pos++] = (char)ch;
+    }
+    dst[pos] = 0;
+}
+
 void vm_readStringByPtr(u32 ptr, u8 *dst)
 {
     u8 tmp;
@@ -2607,6 +2687,7 @@ void vm_IMG_CreateImageFormRes(u32 a1)
 int vm_DF_ReadString(u32 a1, u32 a2)
 {
     u32 idx = 0;
+    u32 startIdx = 0;
     u8 len = 0;
     u32 result = 0;
     u8 ch = 0;
@@ -2616,6 +2697,7 @@ int vm_DF_ReadString(u32 a1, u32 a2)
     // idx = *a2
     // uc_mem_read(MTK, a1, cbeTextString, 64);//debug
     uc_mem_read(uc, a2, &idx, 4);
+    startIdx = idx;
 
     // len = *(uint8 *)(a1 + idx)
     uc_mem_read(uc, a1 + idx, &len, 1);
@@ -2652,6 +2734,22 @@ int vm_DF_ReadString(u32 a1, u32 a2)
     // null terminate
     zero = 0;
     uc_mem_write(uc, result + len, &zero, 1);
+    if (len > 0)
+    {
+        char outName[128] = {0};
+        u8 srcBytes[96] = {0};
+        u32 outLen = len < sizeof(outName) - 1 ? len : (u32)sizeof(outName) - 1;
+        uc_mem_read(uc, result, outName, outLen);
+        if (strstr(outName, "warrior") || strstr(outName, "rior") || strstr(outName, "jian") ||
+            strstr(outName, "guang") || strstr(outName, "death") || strstr(outName, "ying"))
+        {
+            u32 srcLen = len + 1 < sizeof(srcBytes) ? len + 1 : (u32)sizeof(srcBytes);
+            uc_mem_read(uc, a1 + startIdx, srcBytes, srcLen);
+            vm_fileio_trace("df_read_string base=%08x off=%u len=%u out=%08x text=%s next=%u last=%08x\n",
+                            a1, startIdx, len, result, outName, vm_get_var(a2), lastAddress);
+            vm_fileio_trace_bytes("df_read_string_src", -1, outName, srcBytes, srcLen);
+        }
+    }
     return vm_set_call_result(result);
     // vm_readStringByPtr(result, sprintfBuff);
     // printf("DF_ReadString(adr:%x)\n", result);

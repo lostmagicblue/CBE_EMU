@@ -56,6 +56,9 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             {0x955d, "update_flag1"},
             {0x955e, "update_flag2"},
             {0x955f, "update_flag3"},
+            {0x9588 + 0x0c, "net_state"},
+            {0x9588 + 0x14, "net_cb14"},
+            {0x9588 + 0x44, "net_cb44"},
         };
         for (unsigned i = 0; i < sizeof(watchGlobals) / sizeof(watchGlobals[0]); ++i)
         {
@@ -77,6 +80,27 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 }
             }
         }
+        u32 sceneBase = Global_R9 + 0x5c64;
+        if (address < sceneBase + 0x70 && address + size > sceneBase + 0x40)
+        {
+            u32 pc = 0, lr = 0;
+            u32 oldWords[12] = {0};
+            u32 sceneOffset = (u32)address - sceneBase;
+            uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+            uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+            uc_mem_read(uc, sceneBase + 0x40, oldWords, sizeof(oldWords));
+            FILE *fp = fopen("net_trace.log", "a");
+            if (fp)
+            {
+                fprintf(fp,
+                        "scene_field_write off=%04x addr=%08x size=%u value=%08llx pc=%08x lr=%08x last=%08x "
+                        "old40=%08x old44=%08x old48=%08x old4c=%08x old50=%08x old54=%08x old58=%08x old5c=%08x old60=%08x old64=%08x old68=%08x old6c=%08x\n",
+                        sceneOffset, (u32)address, size, (unsigned long long)value, pc, lr, lastAddress,
+                        oldWords[0], oldWords[1], oldWords[2], oldWords[3], oldWords[4], oldWords[5],
+                        oldWords[6], oldWords[7], oldWords[8], oldWords[9], oldWords[10], oldWords[11]);
+                fclose(fp);
+            }
+        }
         u32 debugUiObj = 0;
         if (uc_mem_read(uc, Global_R9 + 0x9928 + 0x10, &debugUiObj, 4) == UC_ERR_OK && debugUiObj != 0)
         {
@@ -94,6 +118,26 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 {
                     fprintf(fp, "startup_state_write addr=%08x size=%u old=%u new=%u pc=%08x lr=%08x last=%08x\n",
                             (u32)address, size, oldState, newState, pc, lr, lastAddress);
+                    fclose(fp);
+                }
+            }
+        }
+        u32 currentSceneActor = 0;
+        if (uc_mem_read(uc, Global_R9 + 0x5c64 + 0x60, &currentSceneActor, 4) == UC_ERR_OK && currentSceneActor != 0)
+        {
+            u32 watchBegin = currentSceneActor + 0x600;
+            u32 watchEnd = currentSceneActor + 0x700;
+            if (address < watchEnd && address + size > watchBegin)
+            {
+                u32 pc = 0, lr = 0;
+                uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+                uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+                FILE *fp = fopen("net_trace.log", "a");
+                if (fp)
+                {
+                    fprintf(fp, "scene_actor_write actor=%08x off=%04x addr=%08x size=%u value=%08llx pc=%08x lr=%08x last=%08x\n",
+                            currentSceneActor, (u32)address - currentSceneActor, (u32)address, size,
+                            (unsigned long long)value, pc, lr, lastAddress);
                     fclose(fp);
                 }
             }
@@ -118,7 +162,8 @@ bool hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_
     {
         u32 ptr = 0;
         uc_reg_read(MTK, regs[i], &ptr);
-        if (ptr >= ROM_ADDRESS && ptr < ROM_ADDRESS + 0x1000000)
+        if ((ptr >= ROM_ADDRESS && ptr < ROM_ADDRESS + 0x1000000) ||
+            (ptr >= VM_Memory_Pool_ADDRESS && ptr < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE))
         {
             printf("------------\nr%u object dump at %08x\n", i, ptr);
             dumpVirtMemory(ptr, 96);
