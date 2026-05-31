@@ -99,6 +99,7 @@ void vm_free_var(u32 addr);
 
 u32 vm_malloc(u32 size);
 void vm_free(u32 addr);
+u32 vm_malloc_user_size(u32 addr);
 int vm_strlen(int addr);
 int vm_memcpy(int dstAddr, int srcAddr, int len);
 u8 vm_DF_DataPackage_GetPackageIndex(int a1);
@@ -3034,6 +3035,30 @@ u32 vm_GetStreamDataFormRes(u32 a1, u32 a2, u32 a3, u32 a4)
     u8 b5 = 0, b6 = 0, b7 = 0, b8 = 0;
     u32 dest = 0;
     uc_engine *uc = MTK;
+    u8 resType = vm_get_var_byte(a1);
+
+    if (resType == 1)
+    {
+        u32 srcSize = vm_malloc_user_size(a1);
+        if (srcSize <= 1)
+        {
+            vm_fileio_trace("GetStreamDataFormRes type1 invalid src=%08x size=%u last=%08x\n",
+                            a1, srcSize, lastAddress);
+            return vm_set_call_result(0);
+        }
+
+        u32 rawLen = srcSize - 1;
+        dest = vm_malloc(rawLen);
+        for (u32 i = 0; i < rawLen; ++i)
+        {
+            u8 byte = vm_get_var_byte(a1 + 1 + i);
+            uc_mem_write(uc, dest + i, &byte, 1);
+        }
+        vm_fileio_trace("GetStreamDataFormRes src=%08x type=%u raw=%u dest=%08x last=%08x\n",
+                        a1, resType, rawLen, dest, lastAddress);
+        return vm_set_call_result(dest);
+    }
+
     // 读取 a1[1..4] -> v5（输入压缩长度）
     uc_mem_read(uc, a1 + 1, &b1, 1);
     uc_mem_read(uc, a1 + 2, &b2, 1);

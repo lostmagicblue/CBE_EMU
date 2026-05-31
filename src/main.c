@@ -1761,7 +1761,14 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
         return 0;
     if (!vm_net_mock_seq_put_i16(out, outCap, &pos, 0))
         return 0;
-    if (!vm_net_mock_seq_put_string(out, outCap, &pos, actorResource))
+    /*
+     * This field is copied to the scene-runtime actor constructor.  The known
+     * .actor packages are string-table resources, not the motion descriptor
+     * parsed by sub_100D6E2; passing them makes CBE read huge bogus counts.
+     * Use a missing descriptor so CBE follows its own resource-miss path while
+     * we continue reversing the exact server value.
+     */
+    if (!vm_net_mock_seq_put_string(out, outCap, &pos, "mock_missing_motion.actor"))
         return 0;
     if (!vm_net_mock_seq_put_i16(out, outCap, &pos, 0))
         return 0;
@@ -1771,7 +1778,7 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
     return pos;
 }
 
-static u32 vm_net_mock_build_login_response(u8 *out, u32 outCap)
+static u32 vm_net_mock_build_login_actor_response(u8 *out, u32 outCap)
 {
     u32 pos = 11;
     if (outCap < pos)
@@ -1807,15 +1814,52 @@ static u32 vm_net_mock_build_login_response(u8 *out, u32 outCap)
     out[8] = 0;
     out[9] = (u8)((pos - 5) >> 8);
     out[10] = (u8)(pos - 5);
-    vm_net_trace("mock_login_response actorinfo_len=%u top=1,1,%u job=%u sex=%u actor=%s len=%u\n",
+    u8 logJob = vm_net_mock_env_u8("CBE_ACTOR_JOB", 1);
+    u8 logSex = vm_net_mock_env_u8("CBE_ACTOR_SEX", 0);
+    vm_net_trace("mock_login_actor_response actorinfo_len=%u top=1,1,%u job=%u sex=%u actor=%s len=%u\n",
                  actorInfoLen,
                  topType,
-                 vm_net_mock_env_u8("CBE_ACTOR_JOB", 1),
-                 vm_net_mock_env_u8("CBE_ACTOR_SEX", 0),
-                 vm_net_mock_actor_resource_name(vm_net_mock_env_u8("CBE_ACTOR_JOB", 1),
-                                                 vm_net_mock_env_u8("CBE_ACTOR_SEX", 0)),
+                 logJob,
+                 logSex,
+                 vm_net_mock_actor_resource_name(logJob, logSex),
                  pos);
     return pos;
+}
+
+static u32 vm_net_mock_build_login_role_list_response(u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    if (outCap < pos)
+        return 0;
+
+    u32 objectStart = 0;
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x0a, 0x20, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
+        return 0;
+    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "roles", 0))
+        return 0;
+    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "maxroles", 3))
+        return 0;
+    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "allpgs", 0))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "num", 0))
+        return 0;
+    if (!vm_net_mock_put_object_blob(out, outCap, &pos, "roleinfo", NULL, 0))
+        return 0;
+
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    vm_net_trace("mock_login_role_list_response roles=0 maxroles=3 len=%u\n", pos);
+    return pos;
+}
+
+static u32 vm_net_mock_build_login_response(u8 *out, u32 outCap)
+{
+    const char *mode = getenv("CBE_LOGIN_RESPONSE");
+    if (mode && strcmp(mode, "roles") == 0)
+        return vm_net_mock_build_login_role_list_response(out, outCap);
+    return vm_net_mock_build_login_actor_response(out, outCap);
 }
 
 static u32 vm_net_mock_build_enter_game_response(u8 *out, u32 outCap)
@@ -2138,6 +2182,8 @@ static uc_err scheduler_dispatch_tscreen_event(u32 tScreenEventEntry, u32 screen
         simulateTouchDrag = evt->r0 == MR_MOUSE_MOVE;
         simulateTouchX = evt->r1 & 0xffff;
         simulateTouchY = (evt->r1 >> 16) & 0xffff;
+        vm_net_trace("touch_dispatch entry=%08x screen=%08x type=%u x=%u y=%u path=tscreen\n",
+                     tScreenEventEntry, screenPtr, evt->r0, simulateTouchX, simulateTouchY);
         if (tScreenEventEntry == 0)
             return UC_ERR_OK;
 
@@ -2544,6 +2590,7 @@ void mouseEvent(int type, int x, int y)
     else if (y > 399)
         y = 399;
 
+    vm_net_trace("mouse_event type=%d x=%d y=%d\n", type, x, y);
     EnqueueVMEvent(VM_EVENT_TOUCHSCREEN, type, (y << 16) | x);
 }
 
@@ -3170,6 +3217,9 @@ void RunArmProgram(void *param)
                                 simulateTouchDrag = evt->r0 == MR_MOUSE_MOVE;
                                 simulateTouchX = evt->r1 & 0xffff;
                                 simulateTouchY = (evt->r1 >> 16) & 0xffff;
+                                vm_net_trace("touch_dispatch entry=%08x screen=%08x type=%u x=%u y=%u path=logic pool=%u\n",
+                                             screenLogicEntry, screenThisPtr, evt->r0, simulateTouchX, simulateTouchY,
+                                             vm_is_pool_entry(screenLogicEntry) ? 1 : 0);
                             }
                             if (screenThisPtr && vm_is_pool_entry(screenLogicEntry))
                             {

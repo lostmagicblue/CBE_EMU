@@ -7,6 +7,7 @@ typedef struct VMBlock
 {
     u32 addr; // VM地址
     u32 size;
+    u32 req_size;
     int used;
     struct VMBlock *next;
 } VMBlock;
@@ -14,3 +15,4 @@ typedef struct VMBlock
 void InitVmMalloc();
 void vm_free(u32 addr);
 u32 vm_malloc(u32 size);
+u32 vm_malloc_user_size(u32 addr);

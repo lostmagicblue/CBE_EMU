@@ -7,6 +7,7 @@ void InitVmMalloc()
     vm_head = (VMBlock *)SDL_malloc(sizeof(VMBlock));
     vm_head->addr = VM_MALLOC_POOL_ADDRESS;
     vm_head->size = VM_MemoryBlock_SIZE;
+    vm_head->req_size = VM_MemoryBlock_SIZE;
     vm_head->used = 0;
     vm_head->next = NULL;
 }
@@ -14,6 +15,7 @@ void InitVmMalloc()
 u32 vm_malloc(u32 size)
 {
     VMBlock *cur = vm_head;
+    u32 req_size = size;
 
     // 8字节对齐（很重要）
     size = (size + 7) & ~7;
@@ -28,6 +30,7 @@ u32 vm_malloc(u32 size)
                 VMBlock *new_block = (VMBlock *)SDL_malloc(sizeof(VMBlock));
                 new_block->addr = cur->addr + size;
                 new_block->size = cur->size - size;
+                new_block->req_size = new_block->size;
                 new_block->used = 0;
                 new_block->next = cur->next;
 
@@ -35,6 +38,7 @@ u32 vm_malloc(u32 size)
             }
 
             cur->size = size;
+            cur->req_size = req_size;
             cur->used = 1;
 
             // printf("[vm_malloc] addr=0x%08X size=%u\n", cur->addr, size);
@@ -48,6 +52,27 @@ u32 vm_malloc(u32 size)
     assert(0);
     return 0;
 }
+
+u32 vm_malloc_user_size(u32 addr)
+{
+    VMBlock *cur = vm_head;
+
+    while (cur)
+    {
+        if (cur->used && addr >= cur->addr && addr < cur->addr + cur->size)
+        {
+            u32 offset = addr - cur->addr;
+            if (offset < cur->req_size)
+                return cur->req_size - offset;
+            return 0;
+        }
+
+        cur = cur->next;
+    }
+
+    return 0;
+}
+
 // ok
 void vm_free(u32 addr)
 {
