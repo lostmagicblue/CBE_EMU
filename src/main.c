@@ -135,6 +135,7 @@ u32 screenStructChange = 0;
 u32 screenStructNotifyLoadRes = 0;
 u32 vmAddedScreen = 0;
 static u32 g_screenStack[32];
+static u32 g_screenStackModuleBase[32];
 static u32 g_screenStackCount = 0;
 static u32 g_screenRemovedWithoutNext = 0;
 static u32 g_screenResumeExisting = 0;
@@ -453,7 +454,7 @@ static int vm_screen_stack_find(u32 screen)
     return -1;
 }
 
-static void vm_screen_stack_push(u32 screen)
+static void vm_screen_stack_push(u32 screen, u32 moduleBase)
 {
     if (screen == 0)
         return;
@@ -462,35 +463,48 @@ static void vm_screen_stack_push(u32 screen)
     if (existing >= 0)
     {
         for (u32 i = (u32)existing; i + 1 < g_screenStackCount; ++i)
+        {
             g_screenStack[i] = g_screenStack[i + 1];
+            g_screenStackModuleBase[i] = g_screenStackModuleBase[i + 1];
+        }
         g_screenStackCount--;
     }
 
     if (g_screenStackCount >= sizeof(g_screenStack) / sizeof(g_screenStack[0]))
     {
         memmove(g_screenStack, g_screenStack + 1, (sizeof(g_screenStack) / sizeof(g_screenStack[0]) - 1) * sizeof(g_screenStack[0]));
+        memmove(g_screenStackModuleBase, g_screenStackModuleBase + 1, (sizeof(g_screenStackModuleBase) / sizeof(g_screenStackModuleBase[0]) - 1) * sizeof(g_screenStackModuleBase[0]));
         g_screenStackCount--;
     }
 
-    g_screenStack[g_screenStackCount++] = screen;
+    g_screenStack[g_screenStackCount] = screen;
+    g_screenStackModuleBase[g_screenStackCount] = moduleBase;
+    g_screenStackCount++;
 }
 
-static bool vm_screen_stack_remove(u32 screen, u32 *newTop)
+static bool vm_screen_stack_remove(u32 screen, u32 *newTop, u32 *newTopModuleBase)
 {
     int existing = vm_screen_stack_find(screen);
     if (existing < 0)
     {
         if (newTop)
             *newTop = g_screenStackCount ? g_screenStack[g_screenStackCount - 1] : 0;
+        if (newTopModuleBase)
+            *newTopModuleBase = g_screenStackCount ? g_screenStackModuleBase[g_screenStackCount - 1] : 0;
         return false;
     }
 
     for (u32 i = (u32)existing; i + 1 < g_screenStackCount; ++i)
+    {
         g_screenStack[i] = g_screenStack[i + 1];
+        g_screenStackModuleBase[i] = g_screenStackModuleBase[i + 1];
+    }
     g_screenStackCount--;
 
     if (newTop)
         *newTop = g_screenStackCount ? g_screenStack[g_screenStackCount - 1] : 0;
+    if (newTopModuleBase)
+        *newTopModuleBase = g_screenStackCount ? g_screenStackModuleBase[g_screenStackCount - 1] : 0;
     return true;
 }
 
@@ -3042,7 +3056,10 @@ void RunArmProgram(void *param)
             }
             else
             {
-                p = vm_emu_start(screenInitEntry, exitAddr);
+                if (screenInitEntry)
+                    p = vm_emu_start(screenInitEntry, exitAddr);
+                else
+                    p = UC_ERR_OK;
                 printf("ScreenInit Ok\n");
             }
             if (p == UC_ERR_OK)
@@ -3066,11 +3083,19 @@ void RunArmProgram(void *param)
                             scheduler_prepare_screen_call(screenThisPtr);
                             uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
                         }
-                        p = vm_emu_start(screenResouceLoadEntry, exitAddr);
-                        if (p != UC_ERR_OK)
+                        if (screenResouceLoadEntry)
                         {
-                            printf("SCR_ResourceLoad异常:%s\n", uc_strerror(p));
-                            assert(0);
+                            p = vm_emu_start(screenResouceLoadEntry, exitAddr);
+                            if (p != UC_ERR_OK)
+                            {
+                                printf("SCR_ResourceLoad异常:%s\n", uc_strerror(p));
+                                assert(0);
+                            }
+                        }
+                        else
+                        {
+                            vm_net_trace("screen_resource_load_skip_null screen=%08x this=%08x\n",
+                                         screenFuncPtr, screenThisPtr);
                         }
                     }
                     if (screenStructChange == 1 || g_screenRemovedWithoutNext)
@@ -6727,19 +6752,19 @@ static bool hook_vm_manager_screen_func(u32 address)
     {
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         vmAddedScreen = tmp1;
-        vm_screen_stack_push(tmp1);
-        vm_net_trace("screen_manager idx=4 add r0=%08x depth=%u last=%08x\n", tmp1, g_screenStackCount, lastAddress);
+        u32 moduleBase = 0;
         if (lastAddress >= VM_Memory_Pool_ADDRESS && lastAddress < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
         {
-            u32 moduleBase = 0;
             uc_reg_read(MTK, UC_ARM_REG_R9, &moduleBase);
-            if (moduleBase)
-            {
-                g_currentScreenThis = tmp1 - 0x18;
-                g_currentScreenModuleBase = moduleBase;
-                vm_net_trace("screen_manager idx=4 module_context this=%08x r9=%08x last=%08x\n",
-                             g_currentScreenThis, g_currentScreenModuleBase, lastAddress);
-            }
+        }
+        vm_screen_stack_push(tmp1, moduleBase);
+        vm_net_trace("screen_manager idx=4 add r0=%08x depth=%u moduleBase=%08x last=%08x\n", tmp1, g_screenStackCount, moduleBase, lastAddress);
+        if (moduleBase)
+        {
+            g_currentScreenThis = tmp1 - 0x18;
+            g_currentScreenModuleBase = moduleBase;
+            vm_net_trace("screen_manager idx=4 module_context this=%08x r9=%08x last=%08x\n",
+                         g_currentScreenThis, g_currentScreenModuleBase, lastAddress);
         }
         u32 startupObj = 0;
         uc_mem_read(MTK, Global_R9 + 0x9928 + 0x10, &startupObj, 4);
@@ -6777,21 +6802,24 @@ static bool hook_vm_manager_screen_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         tmp3 = 0;
-        tmp4 = vm_screen_stack_remove(tmp1, &tmp3) ? 1 : 0;
-        vm_net_trace("screen_manager idx=6 remove r0=%08x r1=%08x ret=%u newTop=%08x depth=%u last=%08x\n",
-                     tmp1, tmp2, tmp4, tmp3, g_screenStackCount, lastAddress);
+        tmp5 = 0;
+        tmp4 = vm_screen_stack_remove(tmp1, &tmp3, &tmp5) ? 1 : 0;
+        vm_net_trace("screen_manager idx=6 remove r0=%08x r1=%08x ret=%u newTop=%08x newTopModule=%08x depth=%u last=%08x\n",
+                     tmp1, tmp2, tmp4, tmp3, tmp5, g_screenStackCount, lastAddress);
         if (tmp4 && tmp1 == vmAddedScreen && tmp3)
         {
             g_activeScreenRemovedThisFrame = 1;
             g_screenResumeExisting = 1;
             vmAddedScreen = tmp3;
-            tmp5 = 0;
+            g_currentScreenThis = tmp3 - 0x18;
+            g_currentScreenModuleBase = tmp5;
+            u32 isInQuit = 0;
             uc_mem_write(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &tmp3, 4);
-            uc_mem_write(MTK, VM_SCREEN_isInQuit_ADDRESS, &tmp5, 4);
+            uc_mem_write(MTK, VM_SCREEN_isInQuit_ADDRESS, &isInQuit, 4);
             screenStructChange = 1;
             g_screenRemovedWithoutNext = 0;
-            vm_net_trace("screen_manager idx=6 promote_current_remove screen=%08x depth=%u resume=%u last=%08x\n",
-                         tmp3, g_screenStackCount, g_screenResumeExisting, lastAddress);
+            vm_net_trace("screen_manager idx=6 promote_current_remove screen=%08x moduleBase=%08x depth=%u resume=%u last=%08x\n",
+                         tmp3, g_currentScreenModuleBase, g_screenStackCount, g_screenResumeExisting, lastAddress);
         }
         else if (tmp4 && tmp1 == vmAddedScreen)
         {

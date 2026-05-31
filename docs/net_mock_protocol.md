@@ -95,8 +95,10 @@
 这些不是网络响应，但会影响启动网络流程是否能走完：
 
 - CBE 更新屏调用 screen manager idx `6` 移除自身后，模拟器需要恢复栈顶下层屏幕。
-- 下层屏幕可能没有 destroy 函数，destroy 为 0 时应跳过。
+- 动态 CBM screen 从内存池代码调用 `vmAddScreen` 时，需要保存调用时的 R9/module base；恢复下层 screen 时同步恢复该上下文。
+- screen 的 init/resourceLoad/destroy 入口都可能为 0，模拟器应当按空回调跳过。
 - 这些是模拟器屏幕管理语义修正，不是游戏状态注入。
+- pool screen 的无输入 logic tick 语义尚未确认，暂不主动合成 idle 事件；需要后续通过日志确认 CBE/固件是否有专用 idle event。
 
 ## 已验证启动链路
 
@@ -107,4 +109,3 @@
 5. `startup_handle_update_metadata` 解析 `type/id/code`，CBE 自己调用 screen remove。
 6. 模拟器恢复底层屏幕。
 7. CBE 加载 `JHOnlineData/mmTitleMstarWqvga.cbm` 并进入动态 CBM 屏幕。
-
