@@ -4,7 +4,7 @@
 #define DEBUG_PRINT(...) ((void)0)
 #define TRACE_STARTUP_UI 0
 #define TRACE_RESOURCE_IO 0
-#define TRACE_LCD_TEXT 0
+#define TRACE_LCD_TEXT 1
 #define TRACE_LCD_SHAPES 0
 
 #ifdef _WIN32
@@ -232,31 +232,6 @@ static bool vm_is_manager_func_stub_address(u32 address)
 static int vm_lcd_coord_from_reg(u32 value)
 {
     return (int)(int16_t)(value & 0xffff);
-}
-
-static int vm_lcd_adjust_single_gbk_x(const u8 *gbkText, int x, int y)
-{
-    static int hasPrev = 0;
-    static int prevRawX = 0;
-    static int prevAdjustedX = 0;
-    static int prevY = 0;
-
-    int len = gbkText ? strlen((const char *)gbkText) : 0;
-    if (len != 2 || gbkText[0] < 0x80)
-    {
-        hasPrev = 0;
-        return x;
-    }
-
-    int adjustedX = x;
-    if (hasPrev && y == prevY && x == prevRawX + getFontCellWidth())
-        adjustedX = prevAdjustedX + getFontWidth();
-
-    hasPrev = 1;
-    prevRawX = x;
-    prevAdjustedX = adjustedX;
-    prevY = y;
-    return adjustedX;
 }
 
 static void vm_trace_lcd_shape(const char *apiName, int x, int y, int w, int h, u32 color)
@@ -1264,11 +1239,16 @@ static void vm_net_trace_mem(const char *tag, u32 ptr, u32 len)
 static void vm_trace_lcd_text(const char *apiName, u32 idx, u32 strPtr, int x, int y, u16 color, const u8 *gbkText)
 {
 #if TRACE_LCD_TEXT
+    if (y < 50 || y > 130)
+        return;
     u32 lr = 0;
     uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
     gbk_to_utf8((u8 *)gbkText, sprintfBuff, mySizeOf(sprintfBuff));
-    vm_net_trace("lcd_text api=%s idx=%u ptr=%08x x=%d y=%d color=%04x lr=%08x last=%08x text=%s\n",
-                 apiName, idx, strPtr, x, y, color, lr, lastAddress, sprintfBuff);
+    int fullWidth = mesureStringWidth((char *)gbkText);
+    int curWidth = mesureStringWidthWithGbkWidth((char *)gbkText, getFontWidth());
+    int fontApiWidth = (g_currentFontType == 0) ? getFontCellWidth() : getFontWidth();
+    vm_net_trace("lcd_text api=%s idx=%u ptr=%08x x=%d y=%d color=%04x fontType=%u fontApiW=%d fullW=%d curW=%d lr=%08x last=%08x text=%s\n",
+                 apiName, idx, strPtr, x, y, color, g_currentFontType, fontApiWidth, fullWidth, curWidth, lr, lastAddress, sprintfBuff);
 #else
     (void)apiName;
     (void)idx;
@@ -2078,6 +2058,83 @@ static void vm_lcd_fill_rect_local(int x, int y, int w, int h, u16 color)
     }
 }
 
+static void vm_lcd_sync_cache_rect_to_vm(int x, int y, int w, int h)
+{
+    if (x < 0)
+    {
+        w += x;
+        x = 0;
+    }
+    if (y < 0)
+    {
+        h += y;
+        y = 0;
+    }
+    if (x + w > LCD_WIDTH)
+        w = LCD_WIDTH - x;
+    if (y + h > LCD_HEIGHT)
+        h = LCD_HEIGHT - y;
+    if (w <= 0 || h <= 0)
+        return;
+
+    for (int row = 0; row < h; ++row)
+    {
+        u32 off = (y + row) * LCD_WIDTH + x;
+        uc_mem_write(MTK, VM_screenImage_ADDRESS + off * 2, Lcd_Cache_Buffer + off * 2, w * 2);
+    }
+}
+
+static void vm_lcd_sync_vm_rect_to_cache(int x, int y, int w, int h)
+{
+    if (x < 0)
+    {
+        w += x;
+        x = 0;
+    }
+    if (y < 0)
+    {
+        h += y;
+        y = 0;
+    }
+    if (x + w > LCD_WIDTH)
+        w = LCD_WIDTH - x;
+    if (y + h > LCD_HEIGHT)
+        h = LCD_HEIGHT - y;
+    if (w <= 0 || h <= 0)
+        return;
+
+    for (int row = 0; row < h; ++row)
+    {
+        u32 off = (y + row) * LCD_WIDTH + x;
+        uc_mem_read(MTK, VM_screenImage_ADDRESS + off * 2, Lcd_Cache_Buffer + off * 2, w * 2);
+    }
+}
+
+static int vm_lcd_current_gbk_width(void)
+{
+    return getFontWidth();
+}
+
+static int vm_lcd_measure_current_string(const u8 *gbkText)
+{
+    return mesureStringWidthWithGbkWidth((char *)gbkText, vm_lcd_current_gbk_width());
+}
+
+static void vm_lcd_draw_current_string(u8 *gbkText, int x, int y, u16 color)
+{
+    int w = vm_lcd_measure_current_string(gbkText);
+    int h = getFontHeight();
+    vm_lcd_sync_vm_rect_to_cache(x, y, w, h);
+    drawFontStringWithGbkWidth(gbkText, x, y, color, vm_lcd_current_gbk_width());
+}
+
+static void vm_lcd_sync_string_to_vm(const u8 *gbkText, int x, int y)
+{
+    int w = vm_lcd_measure_current_string(gbkText);
+    int h = getFontHeight();
+    vm_lcd_sync_cache_rect_to_vm(x, y, w, h);
+}
+
 static void vm_lcd_draw_rect_local(int x, int y, int w, int h, u16 color)
 {
     vm_lcd_fill_rect_local(x, y, w, 1, color);
@@ -2131,6 +2188,7 @@ static void vm_input_draw_overlay(void)
 
 static void vm_lcd_update_with_input_overlay(void)
 {
+    uc_mem_read(MTK, VM_screenImage_ADDRESS, Lcd_Cache_Buffer, LCD_WIDTH * LCD_HEIGHT * PIXEL_PER_BYTE);
     vm_input_draw_overlay();
     UpdateLcd();
 }
@@ -4497,7 +4555,7 @@ static bool hook_vm_manager_lcd_func(u32 address)
     else if (idx == 6)
     {
         DEBUG_PRINT("[call]vMGetFontWidth\n");
-        tmp1 = (g_currentFontType == 0) ? getFontCellWidth() : getFontWidth();
+        tmp1 = getFontWidth();
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
     }
     else if (idx == 7)
@@ -4509,7 +4567,7 @@ static bool hook_vm_manager_lcd_func(u32 address)
     else if (idx == 8)
     {
         vm_readStringGbkByReg(UC_ARM_REG_R0, cbeTextString);
-        tmp1 = mesureStringWidth(cbeTextString);
+        tmp1 = vm_lcd_measure_current_string(cbeTextString);
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         // gbk_to_utf8(cbeTextString, sprintfBuff, mySizeOf(sprintfBuff));
         DEBUG_PRINT("[call]vMGetStringWidth(%d,%x)\n", tmp1, cbeTextString[0]);
@@ -4530,9 +4588,9 @@ static bool hook_vm_manager_lcd_func(u32 address)
         vm_readStringGbkByReg(UC_ARM_REG_R0, cbeTextString);
         int x = vm_lcd_coord_from_reg(tmp2);
         int y = vm_lcd_coord_from_reg(tmp3);
-        x = vm_lcd_adjust_single_gbk_x(cbeTextString, x, y);
         vm_trace_lcd_text("vMDrawString", idx, tmp1, x, y, (u16)tmp4, cbeTextString);
-        drawFontString(cbeTextString, x, y, (u16)tmp4);
+        vm_lcd_draw_current_string(cbeTextString, x, y, (u16)tmp4);
+        vm_lcd_sync_string_to_vm(cbeTextString, x, y);
         tmp1 = 1;
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
     }
@@ -4552,7 +4610,8 @@ static bool hook_vm_manager_lcd_func(u32 address)
         int y = vm_lcd_coord_from_reg(tmp3);
         vm_trace_lcd_text("vMDrawStringEx", idx, tmp1, x, y, color, cbeTextString);
 
-        drawFontString(cbeTextString, x, y, color);
+        vm_lcd_draw_current_string(cbeTextString, x, y, color);
+        vm_lcd_sync_string_to_vm(cbeTextString, x, y);
         tmp1 = 1;
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
     }
@@ -4568,7 +4627,8 @@ static bool hook_vm_manager_lcd_func(u32 address)
         int x = vm_lcd_coord_from_reg(tmp2);
         int y = vm_lcd_coord_from_reg(tmp3);
         vm_trace_lcd_text("vMShowStringClipAlign", idx, tmp1, x, y, color, cbeTextString);
-        drawFontString(cbeTextString, x, y, color);
+        vm_lcd_draw_current_string(cbeTextString, x, y, color);
+        vm_lcd_sync_string_to_vm(cbeTextString, x, y);
         vm_set_call_result(1);
     }
     else if (idx == 13)
@@ -4583,7 +4643,8 @@ static bool hook_vm_manager_lcd_func(u32 address)
         int x = vm_lcd_coord_from_reg(tmp2);
         int y = vm_lcd_coord_from_reg(tmp3);
         vm_trace_lcd_text("vMShowStringClip", idx, tmp1, x, y, color, cbeTextString);
-        drawFontString(cbeTextString, x, y, color);
+        vm_lcd_draw_current_string(cbeTextString, x, y, color);
+        vm_lcd_sync_string_to_vm(cbeTextString, x, y);
         vm_set_call_result(1);
     }
     else if (idx == 14)
@@ -4598,7 +4659,8 @@ static bool hook_vm_manager_lcd_func(u32 address)
         int x = vm_lcd_coord_from_reg(tmp2);
         int y = vm_lcd_coord_from_reg(tmp3);
         vm_trace_lcd_text("vMShowStringRect", idx, tmp1, x, y, color, cbeTextString);
-        drawFontString(cbeTextString, x, y, color);
+        vm_lcd_draw_current_string(cbeTextString, x, y, color);
+        vm_lcd_sync_string_to_vm(cbeTextString, x, y);
         vm_set_call_result(1);
     }
     else if (idx == 15)
@@ -4616,6 +4678,11 @@ static bool hook_vm_manager_lcd_func(u32 address)
         int y1 = vm_lcd_coord_from_reg(tmp4);
         vm_trace_lcd_shape("vMDrawLine", x0, y0, x1, y1, color);
         vm_lcd_draw_line(x0, y0, x1, y1, color);
+        int sx = x0 < x1 ? x0 : x1;
+        int sy = y0 < y1 ? y0 : y1;
+        int ex = x0 > x1 ? x0 : x1;
+        int ey = y0 > y1 ? y0 : y1;
+        vm_lcd_sync_cache_rect_to_vm(sx, sy, ex - sx + 1, ey - sy + 1);
         vm_set_call_result(1);
     }
     else if (idx == 16)
@@ -4630,6 +4697,11 @@ static bool hook_vm_manager_lcd_func(u32 address)
         u16 color = (u16)tmp3;
         vm_trace_lcd_shape("vMDrawLineEx", x0, y0, x1, y1, color);
         vm_lcd_draw_line(x0, y0, x1, y1, color);
+        int sx = x0 < x1 ? x0 : x1;
+        int sy = y0 < y1 ? y0 : y1;
+        int ex = x0 > x1 ? x0 : x1;
+        int ey = y0 > y1 ? y0 : y1;
+        vm_lcd_sync_cache_rect_to_vm(sx, sy, ex - sx + 1, ey - sy + 1);
         vm_set_call_result(1);
     }
     else if (idx == 17)

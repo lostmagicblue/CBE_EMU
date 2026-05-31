@@ -93,9 +93,48 @@ void drawFontChar(u16 gbCode, int x, int y, u16 color)
     SDL_free(bitMapData);
 }
 
+void drawFontCharWithWidth(u16 gbCode, int x, int y, u16 color, int drawWidth)
+{
+    if (drawWidth <= 0)
+        return;
+
+    char *bitMapData = SDL_malloc(bitmapDataSize);
+    if (bitMapData == NULL)
+        return;
+    if (getFontBitMap(gbCode, bitMapData))
+    {
+        for (int j = 0; j < fontHeight; j++)
+        {
+            int py = y + j;
+            if (py < 0 || py >= LCD_HEIGHT)
+                continue;
+            for (int i = 0; i < drawWidth; i++)
+            {
+                int px = x + i;
+                if (px < 0 || px >= LCD_WIDTH)
+                    continue;
+
+                int srcX = (i * fontWidth) / drawWidth;
+                int byteIndex = j * linePitch + srcX / 8;
+                int bitIndex = 7 - (srcX % 8);
+                if ((bitMapData[byteIndex] >> bitIndex) & 1)
+                {
+                    int offset = py * LCD_WIDTH + px;
+                    ((u16 *)Lcd_Cache_Buffer)[offset] = color;
+                }
+            }
+        }
+    }
+    SDL_free(bitMapData);
+}
+
 void drawFontString(u8 *gbkStr, int x, int y, u16 color)
 {
-    u8 *start = gbkStr;
+    drawFontStringWithGbkWidth(gbkStr, x, y, color, getFontWidth());
+}
+
+void drawFontStringWithGbkWidth(u8 *gbkStr, int x, int y, u16 color, int gbkWidth)
+{
     u32 i = 0;
     u32 ri = 0;
     u16 c;
@@ -106,21 +145,26 @@ void drawFontString(u8 *gbkStr, int x, int y, u16 color)
             break;
         else if (c < 0x80)
         {
-            drawFontChar((c << 8), x + ri, y, color);
+            drawFontCharWithWidth((c << 8), x + ri, y, color, getFontCellWidth());
             ri += getFontCellWidth();
             i += 1;
         }
         else
         {
             c = (gbkStr[i] ) | (gbkStr[i + 1]<< 8);
-            drawFontChar(c, x + ri, y, color);
-            ri += fontWidth;
+            drawFontCharWithWidth(c, x + ri, y, color, gbkWidth);
+            ri += gbkWidth;
             i += 2;
         }
     }
 }
 
 int mesureStringWidth(char *gbkStr)
+{
+    return mesureStringWidthWithGbkWidth(gbkStr, getFontWidth());
+}
+
+int mesureStringWidthWithGbkWidth(char *gbkStr, int gbkWidth)
 {
     if (gbkStr == NULL)
         return 0;
@@ -135,7 +179,7 @@ int mesureStringWidth(char *gbkStr)
         }
         else
         {
-            width += getFontWidth();
+            width += gbkWidth;
             i += gbkStr[i + 1] ? 2 : 1;
         }
     }
