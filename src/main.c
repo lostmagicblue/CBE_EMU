@@ -4,7 +4,7 @@
 #define DEBUG_PRINT(...) ((void)0)
 #define TRACE_STARTUP_UI 0
 #define TRACE_RESOURCE_IO 0
-#define TRACE_LCD_TEXT 1
+#define TRACE_LCD_TEXT 0
 #define TRACE_LCD_SHAPES 0
 
 #ifdef _WIN32
@@ -994,6 +994,32 @@ static bool vm_net_mock_get_object_u8_field(const u8 *request, u32 requestLen, c
     return false;
 }
 
+static bool vm_net_mock_get_object_u32_field(const u8 *request, u32 requestLen, const char *field, u32 *value)
+{
+    u32 fieldLen = (u32)strlen(field);
+    if (fieldLen == 0 || fieldLen > 0xff || requestLen < fieldLen + 8)
+        return false;
+
+    for (u32 i = 0; i + fieldLen + 8 <= requestLen; ++i)
+    {
+        if (request[i] != (u8)fieldLen)
+            continue;
+        if (memcmp(request + i + 1, field, fieldLen) != 0)
+            continue;
+        u32 p = i + 1 + fieldLen;
+        if (p < requestLen && request[p] == 0)
+            p++;
+        if (p + 7 <= requestLen && request[p] == 0x06 && request[p + 1] == 0 && request[p + 2] == 4)
+        {
+            if (value)
+                *value = ((u32)request[p + 3] << 24) | ((u32)request[p + 4] << 16) |
+                         ((u32)request[p + 5] << 8) | (u32)request[p + 6];
+            return true;
+        }
+    }
+    return false;
+}
+
 static void vm_net_ensure_business_callback(const char *reason)
 {
     if (g_netCurrentObject == 0)
@@ -1113,7 +1139,6 @@ static u32 vm_net_mock_load_update_payload(u8 *out, u32 outCap)
 {
     static const char *payloadPaths[] = {
         "JHOnlineData/MMORPGTempcbm.mock",
-        "JHOnlineData/MMORPGTempcbm",
         "JHOnlineData/mmBattleMstarWqvga.cbm",
         "JHOnlineData/mmGameMstarWqvga.cbm",
         "JHOnlineData/mmTitleMstarWqvga.cbm",
@@ -1123,6 +1148,11 @@ static u32 vm_net_mock_load_update_payload(u8 *out, u32 outCap)
         u32 len = vm_net_mock_load_response_file(payloadPaths[i], out, outCap);
         if (len == 0)
             continue;
+        if (len < 1024)
+        {
+            vm_net_trace("mock_update_payload skip_too_small path=%s len=%u\n", payloadPaths[i], len);
+            continue;
+        }
         if (!vm_net_mock_buffer_has_nonzero(out, len))
         {
             vm_net_trace("mock_update_payload skip_zero path=%s len=%u\n", payloadPaths[i], len);
@@ -1403,6 +1433,37 @@ static bool vm_net_mock_put_object_string(u8 *out, u32 outCap, u32 *pos, const c
     return vm_net_mock_put_object_blob(out, outCap, pos, name, (const u8 *)value, (u16)strlen(value));
 }
 
+static bool vm_net_mock_begin_wt_object(u8 *out, u32 outCap, u32 *pos, u8 major, u8 kind, u8 subtype, u32 *objectStart)
+{
+    if (*pos + 6 > outCap)
+        return false;
+    if (objectStart)
+        *objectStart = *pos;
+    out[(*pos)++] = major;
+    out[(*pos)++] = kind;
+    out[(*pos)++] = subtype;
+    out[(*pos)++] = 0;
+    out[(*pos)++] = 0;
+    out[(*pos)++] = 0;
+    return true;
+}
+
+static void vm_net_mock_finish_wt_object(u8 *out, u32 objectStart, u32 pos)
+{
+    u32 objectLen = pos - objectStart;
+    out[objectStart + 4] = (u8)(objectLen >> 8);
+    out[objectStart + 5] = (u8)objectLen;
+}
+
+static void vm_net_mock_finish_wt_packet(u8 *out, u32 pos, u8 objectCount)
+{
+    out[0] = 'W';
+    out[1] = 'T';
+    out[2] = (u8)(pos >> 8);
+    out[3] = (u8)pos;
+    out[4] = objectCount;
+}
+
 static u8 vm_net_mock_env_u8(const char *name, u8 fallback)
 {
     const char *spec = getenv(name);
@@ -1428,58 +1489,76 @@ static u32 vm_net_mock_build_version_response(u8 *out, u32 outCap)
         result = 0;
     }
 
-    if (!vm_net_mock_put_object_entry(out, outCap, &pos, "result", &result, 1))
+    u32 objectStart = 0;
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x12, 5, &objectStart))
         return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", result))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
 
-    out[0] = 'W';
-    out[1] = 'T';
-    out[2] = (u8)(pos >> 8);
-    out[3] = (u8)pos;
-    out[4] = 1;
-    out[5] = 1;
-    out[6] = 0x12;
-    out[7] = 5;
-    out[8] = 0;
-    out[9] = (u8)((pos - 5) >> 8);
-    out[10] = (u8)(pos - 5);
-    vm_net_trace("mock_version_response result=%u delivered=%u\n", result, g_netMockUpdateDelivered);
+    u8 objectCount = 1;
+    if (result == 0)
+    {
+        /* CBE parses subtype 5 in handle_version_update_response and subtype 9
+         * in startup_update_net_callback.  Keep both objects: removing subtype 9
+         * leaves the startup screen stuck after update_state becomes 2.
+         */
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x12, 9, &objectStart))
+            return 0;
+        if (!vm_net_mock_put_object_u8(out, outCap, &pos, "type", 0))
+            return 0;
+        if (!vm_net_mock_put_object_u32(out, outCap, &pos, "id", 0))
+            return 0;
+        if (!vm_net_mock_put_object_u32(out, outCap, &pos, "code", 0))
+            return 0;
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        objectCount = 2;
+    }
+
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    vm_net_trace("mock_version_response result=%u objects=%u delivered=%u\n", result, objectCount, g_netMockUpdateDelivered);
     return pos;
 }
 
-static u32 vm_net_mock_build_update_chunk_response(u8 *out, u32 outCap)
+static u32 vm_net_mock_build_update_chunk_response(const u8 *request, u32 requestLen, u8 *out, u32 outCap)
 {
     u32 pos = 11;
     if (outCap < pos)
         return 0;
 
-    u8 updateData[256];
-    u32 updateLen = vm_net_mock_load_response_file("JHOnlineData/mmorpg_updateversioncbm", updateData, sizeof(updateData));
+    static u8 updateData[131072];
+    u32 updateLen = vm_net_mock_load_update_payload(updateData, sizeof(updateData));
     if (updateLen == 0)
-        updateLen = 40;
-    vm_net_mock_save_tempdata(updateData, updateLen);
+        return 0;
+
+    u32 start = 0;
+    vm_net_mock_get_object_u32_field(request, requestLen, "start", &start);
+    if (start >= updateLen)
+        start = 0;
+
+    u32 chunkLen = updateLen - start;
+    if (chunkLen > 0x1000)
+        chunkLen = 0x1000;
+    u32 crc = vm_net_mock_signed_byte_sum(updateData, start + chunkLen);
 
     if (!vm_net_mock_put_object_u32(out, outCap, &pos, "totalsize", updateLen))
         return 0;
-    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "crc", 0))
+    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "crc", crc))
         return 0;
     if (!vm_net_mock_put_object_u8(out, outCap, &pos, "type", 0))
         return 0;
-    if (!vm_net_mock_put_object_string(out, outCap, &pos, "name", "mmorpg_updateversioncbm"))
+    if (!vm_net_mock_put_object_string(out, outCap, &pos, "name", "MMORPGTempcbm"))
         return 0;
-    if (!vm_net_mock_put_object_blob(out, outCap, &pos, "data", updateData, (u16)updateLen))
+    if (!vm_net_mock_put_object_blob(out, outCap, &pos, "data", updateData + start, (u16)chunkLen))
         return 0;
 
-    out[0] = 'W';
-    out[1] = 'T';
-    out[2] = (u8)(pos >> 8);
-    out[3] = (u8)pos;
-    out[4] = 1;
+    vm_net_mock_finish_wt_packet(out, pos, 1);
     out[5] = 1;
     out[6] = 0x12;
     out[7] = 6;
     out[8] = 0;
-    out[9] = (u8)((pos - 5) >> 8);
-    out[10] = (u8)(pos - 5);
+    vm_net_mock_finish_wt_object(out, 5, pos);
+    vm_net_trace("mock_update_chunk_response start=%u chunk=%u totalsize=%u crc=%u\n", start, chunkLen, updateLen, crc);
     return pos;
 }
 
@@ -1819,6 +1898,9 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     if (request == NULL || requestLen == 0 || outCap == 0)
         return 0;
 
+    /* First principle for protocol research: only emulate server/API behavior.
+     * Do not advance CBE state here by forcing return values or writing globals.
+     */
     u32 hookedLen = vm_net_mock_build_response_from_rules(request, requestLen, out, outCap);
     if (hookedLen)
         return hookedLen;
@@ -1847,7 +1929,7 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
 
     if (vm_net_mock_request_contains(request, requestLen, "start") && vm_net_mock_request_contains(request, requestLen, "id"))
     {
-        hookedLen = vm_net_mock_build_update_chunk_response(out, outCap);
+        hookedLen = vm_net_mock_build_update_chunk_response(request, requestLen, out, outCap);
         if (hookedLen)
         {
             vm_net_trace("mock_default source=builtin-update-chunk len=%u\n", hookedLen);
@@ -1919,6 +2001,9 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
     uc_mem_read(MTK, dataPtr, request, readLen);
     vm_net_trace("send connect=%u dataPtr=%08x dataLen=%u readLen=%u\n", connectId, dataPtr, dataLen, readLen);
     vm_net_trace_bytes("send_payload", request, readLen);
+    bool closeAfterData = vm_net_mock_request_contains(request, readLen, "version") &&
+                          !vm_net_mock_request_contains(request, readLen, "start") &&
+                          vm_net_mock_has_installed_update();
 
     g_netMockResponseLen = vm_net_mock_build_response(request, readLen, g_netMockResponse, sizeof(g_netMockResponse));
     g_netMockResponseOffset = 0;
@@ -1937,6 +2022,11 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
     {
         vm_net_trace("queue_data_event connect=%u cb=%08x ctx=%08x event=7 len=%u\n", connectId, channel->callback, channel->context, g_netMockResponseLen);
         scheduler_queue_net_event(7, responsePtr, g_netMockResponseLen, g_netMockResponseLen, channel->callback, channel->context);
+        if (closeAfterData)
+        {
+            vm_net_trace("queue_close_event connect=%u cb=%08x ctx=%08x event=9\n", connectId, channel->callback, channel->context);
+            scheduler_queue_net_event(9, 0, 0, 0, channel->callback, channel->context);
+        }
     }
     else
     {
@@ -3110,11 +3200,19 @@ void RunArmProgram(void *param)
                 }
                 else
                 {
-                    p = vm_emu_start(screenDestoryEntry, exitAddr);
-                    if (p != UC_ERR_OK)
+                    if (screenDestoryEntry)
                     {
-                        printf("SCR_Destory异常\n");
-                        break;
+                        p = vm_emu_start(screenDestoryEntry, exitAddr);
+                        if (p != UC_ERR_OK)
+                        {
+                            printf("SCR_Destory异常\n");
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        vm_net_trace("screen_destroy_skip_null screen=%08x this=%08x\n",
+                                     screenFuncPtr, screenThisPtr);
                     }
                 }
             }
@@ -6682,10 +6780,10 @@ static bool hook_vm_manager_screen_func(u32 address)
         tmp4 = vm_screen_stack_remove(tmp1, &tmp3) ? 1 : 0;
         vm_net_trace("screen_manager idx=6 remove r0=%08x r1=%08x ret=%u newTop=%08x depth=%u last=%08x\n",
                      tmp1, tmp2, tmp4, tmp3, g_screenStackCount, lastAddress);
-        if (tmp4 && tmp1 == vmAddedScreen && tmp3 && g_screenStackCount >= 3)
+        if (tmp4 && tmp1 == vmAddedScreen && tmp3)
         {
             g_activeScreenRemovedThisFrame = 1;
-            g_screenResumeExisting = 0;
+            g_screenResumeExisting = 1;
             vmAddedScreen = tmp3;
             tmp5 = 0;
             uc_mem_write(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &tmp3, 4);
@@ -8548,6 +8646,11 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     if (tracePc == 0x10035a2 || tracePc == 0x100369c || tracePc == 0x1003cfc || tracePc == 0x103489a || tracePc == 0x103b2d6 ||
         tracePc == 0x103b45a || tracePc == 0x103b4aa || tracePc == 0x103b4f4 || tracePc == 0x103b51a ||
         tracePc == 0x103b584 || tracePc == 0x103b59a || tracePc == 0x103b620 || tracePc == 0x103b684 ||
+        tracePc == 0x1039dc8 || tracePc == 0x1039df4 || tracePc == 0x1039e12 ||
+        tracePc == 0x103a77c || tracePc == 0x103a784 || tracePc == 0x103a796 || tracePc == 0x103a7ac ||
+        tracePc == 0x103a7ba || tracePc == 0x103a7c2 || tracePc == 0x103a7c6 ||
+        tracePc == 0x103ac84 || tracePc == 0x103ac88 || tracePc == 0x103ac90 ||
+        tracePc == 0x103ac9c || tracePc == 0x103ac9e ||
         tracePc == 0x10348a8 || tracePc == 0x10348b6 || tracePc == 0x10348c0 ||
         tracePc == 0x10348d8 || tracePc == 0x10348de || tracePc == 0x10348ec ||
         tracePc == 0x10346e0 || tracePc == 0x103467a || tracePc == 0x10346c6 || tracePc == 0x10346cc ||
@@ -8654,6 +8757,40 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
             }
             vm_net_trace("startup_install_decision pc=%08x startupObj=%08x updateInfo=%08x localFlag=%u state=%u detail=%04x hasLocalUpdate=%u updateState=%u r0=%08x r1=%08x lr=%08x\n",
                          tracePc, startupObj, updateInfo, localFlag, state, stateDetail, hasLocalUpdate, updateState, r0, r1, lr);
+        }
+        if (tracePc == 0x1039dc8 || tracePc == 0x1039df4 || tracePc == 0x1039e12 ||
+            tracePc == 0x103a77c || tracePc == 0x103a784 || tracePc == 0x103a796 || tracePc == 0x103a7ac ||
+            tracePc == 0x103a7ba || tracePc == 0x103a7c2 || tracePc == 0x103a7c6 ||
+            tracePc == 0x103ac84 || tracePc == 0x103ac88 || tracePc == 0x103ac90 ||
+            tracePc == 0x103ac9c || tracePc == 0x103ac9e)
+        {
+            u32 startupObj = 0, updateWidget = 0, taskHandle = 0, loaderObj = 0, loaderInner = 0, loaderInner16 = 0;
+            u8 state = 0xff, updateState = 0xff, hasLocalUpdate = 0xff;
+            u16 waitTicks = 0, spinnerTicks = 0;
+            if (Global_R9)
+            {
+                uc_mem_read(MTK, Global_R9 + 0x9928 + 0x10, &startupObj, 4);
+                uc_mem_read(MTK, Global_R9 + 0x4cb6, &updateState, 1);
+                uc_mem_read(MTK, Global_R9 + 0x5496, &hasLocalUpdate, 1);
+                uc_mem_read(MTK, Global_R9 + 0x9944, &loaderObj, 4);
+            }
+            if (startupObj)
+            {
+                uc_mem_read(MTK, startupObj + 0x1c, &taskHandle, 4);
+                uc_mem_read(MTK, startupObj + 0x3d, &state, 1);
+                uc_mem_read(MTK, startupObj + 0x9e, &waitTicks, 2);
+                uc_mem_read(MTK, startupObj + 0x20, &spinnerTicks, 2);
+                uc_mem_read(MTK, startupObj + 0x140, &updateWidget, 4);
+            }
+            if (loaderObj)
+            {
+                uc_mem_read(MTK, loaderObj + 0x20, &loaderInner, 4);
+                if (loaderInner)
+                    uc_mem_read(MTK, loaderInner + 0x10, &loaderInner16, 4);
+            }
+            vm_net_trace("startup_async_flow pc=%08x startupObj=%08x state=%u wait=%u spin=%u task=%08x updateWidget=%08x loader=%08x inner=%08x inner16=%08x hasLocalUpdate=%u updateState=%u r0=%08x r1=%08x r2=%08x r3=%08x lr=%08x\n",
+                         tracePc, startupObj, state, waitTicks, spinnerTicks, taskHandle, updateWidget,
+                         loaderObj, loaderInner, loaderInner16, hasLocalUpdate, updateState, r0, r1, r2, r3, lr);
         }
         if (tracePc == 0x100015c || tracePc == 0x1000164 || tracePc == 0x1000166 ||
             tracePc == 0x1000172 || tracePc == 0x100017c)
@@ -8985,6 +9122,17 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
                 fieldName = (const char *)cbeTextString;
             vm_net_trace("object_accessor pc=%08x name=%s r0=%08x r1=%08x r2=%08x r3=%08x lr=%08x\n",
                          tracePc, fieldName, r0, r1, r2, r3, lr);
+            if (tracePc == 0x1034772)
+            {
+                u32 target = 0;
+                u32 words[12] = {0};
+                uc_mem_read(MTK, r0 + 0x10, &target, 4);
+                uc_mem_read(MTK, r0, words, sizeof(words));
+                vm_net_trace("event_dispatch_call obj=%08x target=%08x args=%08x,%08x,%08x lr=%08x words=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
+                             r0, target, r1, r2, r3, lr,
+                             words[0], words[1], words[2], words[3], words[4], words[5],
+                             words[6], words[7], words[8], words[9], words[10], words[11]);
+            }
         }
         if ((tracePc == 0x1037386 || tracePc == 0x1037388 || tracePc == 0x1037398 ||
              tracePc == 0x10373be || tracePc == 0x10373ce || tracePc == 0x10373da ||

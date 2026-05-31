@@ -292,6 +292,8 @@ static int vm_is_cbm_resource_path(const char *nameBuf)
 static int vm_file_ext_requires_binary(const char *nameBuf)
 {
     const char *ext = strrchr(nameBuf, '.');
+    if (strstr(nameBuf, "cbm") != NULL || strstr(nameBuf, "CBM") != NULL)
+        return 1;
     if (ext == NULL)
         return 0;
     return _stricmp(ext, ".cbe") == 0 ||
@@ -532,8 +534,6 @@ int vm_cbfs_vm_file_write(int bufferPtr, int size, int fileHandle)
     int r = fwrite(buffer, 1, size, openFileList[fileHandle]);
     if (r > 0)
         vm_fileio_trace_bytes("file_write_data", fileHandle, openFileNames[fileHandle], buffer, r);
-    if (r > 0 && strstr(openFileNames[fileHandle], "MMORPGTempcbm") != NULL)
-        vm_trim_mmorpg_tempdata_header();
     SDL_free(buffer);
     vm_fileio_trace("file_write handle=%d path=%s size=%d result=%d\n", fileHandle, openFileNames[fileHandle], size, r);
     return vm_set_call_result(r);
