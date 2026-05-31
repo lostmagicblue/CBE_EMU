@@ -12,4 +12,6 @@ obj
 *.err
 *.log
 *.out
+*.i64
+*.til
 bin/JHOnlineData

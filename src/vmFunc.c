@@ -763,6 +763,19 @@ u16 vm_DF_ReadShort(u32 bufPtr, u32 offsetPtr)
     uc_mem_read(MTK, offsetPtr, &offset, 4);
 
     uc_mem_read(MTK, bufPtr + offset, &ret, 2);
+    if ((lastAddress >= 0x0100d780 && lastAddress <= 0x0100d8c0) ||
+        lastAddress == 0x0100dbdc)
+    {
+        u8 raw[8] = {0};
+        uc_mem_read(MTK, bufPtr + offset, raw, sizeof(raw));
+        vm_fileio_trace("df_read_short base=%08x off=%u raw=%02x%02x%02x%02x%02x%02x%02x%02x ret=%u next=%u last=%08x\n",
+                        bufPtr,
+                        offset,
+                        raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+                        ret,
+                        offset + 2,
+                        lastAddress);
+    }
     offset += 2;
     uc_mem_write(MTK, offsetPtr, &offset, 4);
     return vm_set_call_result(ret);
@@ -794,6 +807,17 @@ int vm_DF_ReadInt(int a1, int a2)
 
     offset += 4;
     vm_set_var(a2, offset);
+    if ((lastAddress >= 0x0100d560 && lastAddress <= 0x0100de90) ||
+        (lastAddress >= 0x0100d780 && lastAddress <= 0x0100d8c0))
+    {
+        vm_fileio_trace("df_read_int base=%08x off=%u raw=%02x%02x%02x%02x ret=%d next=%u last=%08x\n",
+                        a1,
+                        offset - 4,
+                        arr[0], arr[1], arr[2], arr[3],
+                        result,
+                        offset,
+                        lastAddress);
+    }
     return vm_set_call_result(result);
 }
 void vm_DF_WriteInt(a1, a2, value)
@@ -2930,7 +2954,6 @@ u32 vm_GetStreamDataFormRes(u32 a1, u32 a2, u32 a3, u32 a4)
     v8 = (u32)b8 | ((u32)b7 << 8) | ((u32)b6 << 16) | ((u32)b5 << 24);
 
     // printf("GetStreamDataFormRes data=%x bufInSize=%d,bufOutSize=%d", a1, v5, v8);
-
     dest = vm_malloc(v8);
 
     // _rt_memclr(dest, v8)
@@ -2945,6 +2968,24 @@ u32 vm_GetStreamDataFormRes(u32 a1, u32 a2, u32 a3, u32 a4)
     vm_LzssDecode(a1 + 9, v5, dest, ptr);
     v8 = vm_get_var(ptr);
     vm_free_var(ptr);
+    if ((lastAddress >= 0x0100d530 && lastAddress <= 0x0100d590) ||
+        (lastAddress >= 0x0100db80 && lastAddress <= 0x0100de90))
+    {
+        u8 head[32] = {0};
+        u32 dumpLen = v8 < sizeof(head) ? v8 : (u32)sizeof(head);
+        if (dumpLen > 0)
+            uc_mem_read(MTK, dest, head, dumpLen);
+        vm_fileio_trace("GetStreamDataFormRes src=%08x type=%u comp=%u outCap=%u out=%u dest=%08x head=%02x%02x%02x%02x%02x%02x%02x%02x %02x%02x%02x%02x%02x%02x%02x%02x last=%08x\n",
+                        a1,
+                        vm_get_var_byte(a1),
+                        v5,
+                        (u32)b8 | ((u32)b7 << 8) | ((u32)b6 << 16) | ((u32)b5 << 24),
+                        v8,
+                        dest,
+                        head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7],
+                        head[8], head[9], head[10], head[11], head[12], head[13], head[14], head[15],
+                        lastAddress);
+    }
     return vm_set_call_result(dest);
 }
 // ok

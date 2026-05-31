@@ -205,16 +205,10 @@ static u8 g_lastStartupScreenState = 0xff;
 static u32 g_lastStartupUpdateObj = 0xffffffff;
 static u8 g_lastStartupProgress = 0xff;
 static u8 g_lastStartupUpdateState = 0xff;
-static u8 g_startupAdvanceAfterUpdate = 0;
-static u8 g_startupUpdateCallbackDispatched = 0;
-static u8 g_installCheckFlagHookLogged = 0;
-static u8 g_installCheckFuncHookLogged = 0;
 static u32 g_currentFontType = 0;
 
 static uc_err add_manager_code_hooks(uc_engine *uc);
 static void vm_net_trace(const char *fmt, ...);
-static void hook_game_install_check_flag_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
-static void hook_game_install_check_func_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
 static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
 
 static bool vm_address_in_range(u32 address, u32 begin, u32 size)
@@ -523,63 +517,6 @@ static bool vm_screen_stack_remove(u32 screen, u32 *newTop)
     if (newTop)
         *newTop = g_screenStackCount ? g_screenStack[g_screenStackCount - 1] : 0;
     return true;
-}
-
-static uc_err scheduler_dispatch_startup_update_callback(u32 exitAddr, u32 thumbExitAddr)
-{
-    u8 updateState = 0;
-    u32 callbackTable = 0;
-    u32 updateCallbackTable = 0;
-    u32 callback = 0;
-
-    uc_mem_read(MTK, Global_R9 + 0x4cb6, &updateState, 1);
-    if (updateState == 0)
-        return UC_ERR_OK;
-
-    uc_mem_read(MTK, Global_R9 + 0x54b0, &callbackTable, 4);
-    if (callbackTable == 0)
-        return UC_ERR_OK;
-    updateCallbackTable = callbackTable + 0x88;
-    uc_mem_read(MTK, updateCallbackTable + 0x0c, &callback, 4);
-    if (callback == 0)
-        return UC_ERR_OK;
-
-    vm_net_trace("startup_update_callback state=%u table=%08x updateTable=%08x cb=%08x tick=%u\n",
-                 updateState, callbackTable, updateCallbackTable, callback, g_schedulerTick);
-    uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
-    uc_err err = vm_emu_start(callback, exitAddr);
-    if (err == UC_ERR_OK)
-    {
-        u32 startupObj = 0;
-        u32 nextScreen = 0;
-        u32 loaderCallback = 0;
-        u32 loaderArg0 = 0;
-        u32 loaderArg1 = 0;
-        u32 netMgrFn28 = 0;
-        u32 netMgrFn30 = 0;
-        u8 updateFlags[4] = {0};
-        u8 startupFlags[16] = {0};
-        u8 loaderFlag = 0;
-        uc_mem_read(MTK, Global_R9 + 0x9928 + 0x10, &startupObj, 4);
-        uc_mem_read(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &nextScreen, 4);
-        uc_mem_read(MTK, Global_R9 + 0x9c30 + 0x04, &loaderCallback, 4);
-        uc_mem_read(MTK, Global_R9 + 0x9c30 + 0x08, &loaderArg0, 4);
-        uc_mem_read(MTK, Global_R9 + 0x9c30 + 0x0c, &loaderArg1, 4);
-        uc_mem_read(MTK, Global_R9 + 0x9c30 + 0x10, &loaderFlag, 1);
-        uc_mem_read(MTK, Global_R9 + 0x9588 + 0x28, &netMgrFn28, 4);
-        uc_mem_read(MTK, Global_R9 + 0x9588 + 0x30, &netMgrFn30, 4);
-        uc_mem_read(MTK, Global_R9 + 0x954c + 0x10, updateFlags, sizeof(updateFlags));
-        uc_mem_read(MTK, Global_R9 + 0x5494, startupFlags, sizeof(startupFlags));
-        vm_net_trace("startup_update_after state=%u startupObj=%08x nextScreen=%08x screenChange=%u loader=%08x,%08x,%08x flag=%u net28=%08x net30=%08x updateFlags=%u,%u,%u,%u startupFlags=%02x,%02x,%02x,%02x,%02x,%02x,%02x,%02x tick=%u\n",
-                     updateState, startupObj, nextScreen, screenStructChange,
-                     loaderCallback, loaderArg0, loaderArg1, loaderFlag,
-                     netMgrFn28, netMgrFn30,
-                     updateFlags[0], updateFlags[1], updateFlags[2], updateFlags[3],
-                     startupFlags[0], startupFlags[1], startupFlags[2], startupFlags[3],
-                     startupFlags[4], startupFlags[5], startupFlags[6], startupFlags[7],
-                     g_schedulerTick);
-    }
-    return err;
 }
 
 u32 size_128mb = 1024 * 1024 * 128;
@@ -1002,9 +939,8 @@ static uc_err scheduler_dispatch_net_tasks(void)
                     vm_net_trace("update_chunk_complete_observed flag=0 downloadState=3\n");
                 }
                 if (updateState == 2 && updateFlags[0] == 1 && updateFlags[1] == 1 && updateFlags[2] == 1 && updateFlags[3] == 1 &&
-                    !g_startupAdvanceAfterUpdate)
+                    !g_netMockUpdateDelivered)
                 {
-                    g_startupAdvanceAfterUpdate = 1;
                     g_netMockUpdateDelivered = 1;
                     vm_net_trace("startup_no_update_complete flags=1,1,1,1\n");
                 }
@@ -1344,65 +1280,6 @@ static void vm_trace_lcd_text(const char *apiName, u32 idx, u32 strPtr, int x, i
 #endif
 }
 
-static void hook_game_install_check_flag_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
-{
-    (void)size;
-    (void)user_data;
-
-    u32 r0 = 0, r4 = 0, lr = 0;
-    uc_reg_read(uc, UC_ARM_REG_R0, &r0);
-    uc_reg_read(uc, UC_ARM_REG_R4, &r4);
-    uc_reg_read(uc, UC_ARM_REG_LR, &lr);
-
-    u32 startupObj = 0;
-    u8 localFlag = 0xff;
-    if (r4)
-        uc_mem_read(uc, r4 + 0x10, &startupObj, 4);
-    if (startupObj)
-        uc_mem_read(uc, startupObj + 0x140, &localFlag, 1);
-
-    if (startupObj && localFlag == 0)
-    {
-        /* The startup screen short-circuits at 0103b15a when this local flag is 0.
-         * Let it call the real install-query helper so only the install decision is
-         * overridden below, instead of forcing an internal screen transition.
-         */
-        r0 = 1;
-        uc_reg_write(uc, UC_ARM_REG_R0, &r0);
-        if (!g_installCheckFlagHookLogged)
-        {
-            vm_net_trace("install_check_hook flag pc=%08x obj=%08x localFlag=0 -> continue_check lr=%08x\n",
-                         (u32)address, startupObj, lr);
-            g_installCheckFlagHookLogged = 1;
-        }
-    }
-}
-
-static void hook_game_install_check_func_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
-{
-    (void)address;
-    (void)size;
-    (void)user_data;
-
-    u32 lr = 0;
-    uc_reg_read(uc, UC_ARM_REG_LR, &lr);
-    if ((lr & ~1u) == 0x0103b162)
-    {
-        u32 r0 = 0;
-        /* 0103b07c returns nonzero when the startup code should enter its install
-         * branch.  Firmware-side vmIsInnerApp/CDown state is not complete here yet,
-         * so make only this helper report "installed" for the startup caller.
-         */
-        uc_reg_write(uc, UC_ARM_REG_R0, &r0);
-        if (!g_installCheckFuncHookLogged)
-        {
-            vm_net_trace("install_check_hook result caller=%08x -> installed\n", lr);
-            g_installCheckFuncHookLogged = 1;
-        }
-        vm_bx(lr);
-    }
-}
-
 static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
 {
     (void)size;
@@ -1629,29 +1506,39 @@ static u32 vm_net_mock_build_update_chunk_response(u8 *out, u32 outCap)
 static bool vm_net_mock_seq_put_u32(u8 *out, u32 outCap, u32 *pos, u32 value)
 {
     return vm_net_mock_put_u8(out, outCap, pos, 0) &&
-           vm_net_mock_put_u8(out, outCap, pos, 0) &&
+           vm_net_mock_put_u8(out, outCap, pos, 4) &&
            vm_net_mock_put_be32(out, outCap, pos, value);
 }
 
 static bool vm_net_mock_seq_put_u8(u8 *out, u32 outCap, u32 *pos, u8 value)
 {
     return vm_net_mock_put_u8(out, outCap, pos, 0) &&
-           vm_net_mock_put_u8(out, outCap, pos, 0) &&
+           vm_net_mock_put_u8(out, outCap, pos, 1) &&
            vm_net_mock_put_u8(out, outCap, pos, value);
 }
 
 static bool vm_net_mock_seq_put_i16(u8 *out, u32 outCap, u32 *pos, u16 value)
 {
     return vm_net_mock_put_u8(out, outCap, pos, 0) &&
-           vm_net_mock_put_u8(out, outCap, pos, 0) &&
+           vm_net_mock_put_u8(out, outCap, pos, 2) &&
            vm_net_mock_put_be16(out, outCap, pos, value);
 }
 
 static bool vm_net_mock_seq_put_string(u8 *out, u32 outCap, u32 *pos, const char *value)
 {
-    u16 len = value ? (u16)strlen(value) : 0;
+    u16 len = value ? (u16)(strlen(value) + 1) : 1;
     return vm_net_mock_put_be16(out, outCap, pos, len) &&
            vm_net_mock_put_bytes(out, outCap, pos, value ? value : "", len);
+}
+
+static u32 vm_net_mock_build_pos_info(u8 *out, u32 outCap, u16 x, u16 y)
+{
+    u32 pos = 0;
+    if (!vm_net_mock_seq_put_i16(out, outCap, &pos, x))
+        return 0;
+    if (!vm_net_mock_seq_put_i16(out, outCap, &pos, y))
+        return 0;
+    return pos;
 }
 
 static const char *vm_net_mock_actor_resource_name(u8 actorJob, u8 actorSex)
@@ -1897,7 +1784,7 @@ static u32 vm_net_mock_build_game_type_response(const u8 *request, u32 requestLe
     if (requestType == 1)
         responseSub = 0x1a;
     else if (requestType == 2 || requestType == 3)
-        responseSub = vm_net_mock_env_u8(requestType == 2 ? "CBE_GAME_TYPE2_SUB" : "CBE_GAME_TYPE3_SUB", 0x19);
+        responseSub = vm_net_mock_env_u8(requestType == 2 ? "CBE_GAME_TYPE2_SUB" : "CBE_GAME_TYPE3_SUB", 0x1a);
 
     if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
         return 0;
@@ -1915,11 +1802,19 @@ static u32 vm_net_mock_build_game_type_response(const u8 *request, u32 requestLe
     else if (requestType == 2 || requestType == 3)
     {
         static const u8 emptyInfo[] = {0};
+        u8 posInfo[8];
+        u32 posInfoLen = vm_net_mock_build_pos_info(posInfo, sizeof(posInfo), 120, 120);
+        if (posInfoLen == 0)
+            return 0;
         if (!vm_net_mock_put_object_blob(out, outCap, &pos, "info", emptyInfo, 0))
             return 0;
         if (!vm_net_mock_put_object_blob(out, outCap, &pos, "giftinfo", emptyInfo, 0))
             return 0;
         if (!vm_net_mock_put_object_u32(out, outCap, &pos, "glamour", 0))
+            return 0;
+        if (!vm_net_mock_put_object_string(out, outCap, &pos, "scene", "\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x31"))
+            return 0;
+        if (!vm_net_mock_put_object_entry(out, outCap, &pos, "posinfo", posInfo, (u16)posInfoLen))
             return 0;
     }
 
@@ -2899,20 +2794,6 @@ void RunArmProgram(void *param)
                     break;
                 if (vmAddedScreen != screenBeforeCallback)
                     continue;
-                if (g_startupAdvanceAfterUpdate && !g_startupUpdateCallbackDispatched)
-                {
-                    g_startupUpdateCallbackDispatched = 1;
-                    p = scheduler_dispatch_startup_update_callback(exitAddr, thumbExitAddr);
-                    if (p != UC_ERR_OK)
-                    {
-                        printf("TScreen update callback异常:%s\n", uc_strerror(p));
-                        break;
-                    }
-                    if (screenStructChange == 1)
-                        break;
-                    if (vmAddedScreen != screenBeforeCallback)
-                        continue;
-                }
                 if (screenStructNotifyLoadRes == 1)
                 {
                     screenStructNotifyLoadRes = 0;
@@ -2956,17 +2837,6 @@ void RunArmProgram(void *param)
                 p = scheduler_tick();
                 if (p != UC_ERR_OK)
                     break;
-                p = scheduler_dispatch_startup_update_callback(exitAddr, thumbExitAddr);
-                if (p != UC_ERR_OK)
-                {
-                    printf("SCR_WaitUpdateCallback异常:%s\n", uc_strerror(p));
-                    assert(0);
-                }
-                if (screenStructChange == 1)
-                {
-                    g_screenRemovedWithoutNext = 0;
-                    break;
-                }
                 if ((g_schedulerTick % 30) == 0)
                 {
                     u8 waitUpdateState = 0;
@@ -3039,28 +2909,6 @@ void RunArmProgram(void *param)
                         break;
                     if (g_screenRemovedWithoutNext)
                         break;
-                    u8 deferStartupUpdateUntilAfterRender = 0;
-                    u8 pendingUpdateState = 0;
-                    uc_mem_read(MTK, Global_R9 + 0x4cb6, &pendingUpdateState, 1);
-                    if (screenRenderEntry == 0x01044aa9 && pendingUpdateState != 0)
-                    {
-                        deferStartupUpdateUntilAfterRender = 1;
-                        vm_net_trace("startup_update_defer_for_transition screen=%08x render=%08x state=%u tick=%u\n",
-                                     screenFuncPtr, screenRenderEntry, pendingUpdateState, g_schedulerTick);
-                    }
-                    if (!deferStartupUpdateUntilAfterRender)
-                    {
-                        p = scheduler_dispatch_startup_update_callback(exitAddr, thumbExitAddr);
-                        if (p != UC_ERR_OK)
-                        {
-                            printf("SCR_UpdateCallback异常:%s\n", uc_strerror(p));
-                            assert(0);
-                        }
-                        if (screenStructChange == 1)
-                            break;
-                        if (g_screenRemovedWithoutNext)
-                            break;
-                    }
                     if (screenStructNotifyLoadRes == 1)
                     {
                         screenStructNotifyLoadRes = 0;
@@ -3183,15 +3031,6 @@ void RunArmProgram(void *param)
                             dumpCpuInfo();
                             printf("SCR_Render异常:%s\n", uc_strerror(p));
                             assert(0);
-                        }
-                        if (deferStartupUpdateUntilAfterRender)
-                        {
-                            p = scheduler_dispatch_startup_update_callback(exitAddr, thumbExitAddr);
-                            if (p != UC_ERR_OK)
-                            {
-                                printf("SCR_PostRenderUpdateCallback异常:%s\n", uc_strerror(p));
-                                assert(0);
-                            }
                         }
                         if (screenStructChange == 1 || g_screenRemovedWithoutNext)
                             break;
@@ -8586,12 +8425,6 @@ static uc_err add_manager_code_hooks(uc_engine *uc)
     ADD_MANAGER_CODE_HOOK(VM_DL_RS_FUNC_LIST_ADDRESS, hook_vm_dl_rs_code_callback);
     ADD_MANAGER_CODE_HOOK(VM_DL_IMAGE_FUNC_LIST_ADDRESS, hook_vm_dl_image_code_callback);
     ADD_MANAGER_CODE_HOOK(VM_VIDEO_FUNC_LIST_ADDRESS, hook_vm_video_code_callback);
-    /* Narrow game startup install check hook.  LCD text tracing maps the visible
-     * "正在安装中/获取版本信息" states back to 0103b15a -> 0103b07c.
-     */
-    ADD_MANAGER_CODE_HOOK_RANGE(0x0103b07c, 0x0103b07d, hook_game_install_check_func_callback);
-    ADD_MANAGER_CODE_HOOK_RANGE(0x0103b15a, 0x0103b15b, hook_game_install_check_flag_callback);
-
 #undef ADD_MANAGER_CODE_HOOK
 #undef ADD_MANAGER_CODE_HOOK_RANGE
     return UC_ERR_OK;
