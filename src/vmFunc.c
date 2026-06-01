@@ -129,6 +129,7 @@ int vm_cbfs_vm_file_read(int buffer, int size, int handle);
 int vm_cbfs_vm_file_write(int bufferPtr, int size, int fileHandle);
 int vm_cbfs_vm_file_tell(int fileHandle);
 int vm_cbfs_vm_file_close(int fileHandle);
+int vm_cbfs_vm_file_rename(int disk, int oldNamePtr, int newNamePtr);
 void vm_initDFDataPackage(u32 a1, u32 a2);
 void vm_sprintf();
 void vm_DF_GetFormatString();
@@ -329,6 +330,60 @@ static int vm_file_mode_is_writeable(const char *mode)
     return strchr(mode, 'w') != NULL || strchr(mode, 'a') != NULL || strchr(mode, '+') != NULL;
 }
 
+static int vm_file_is_read_only_mode(const char *mode)
+{
+    if (mode == NULL)
+        return 1;
+    return strchr(mode, 'r') != NULL && !vm_file_mode_is_writeable(mode);
+}
+
+static int vm_file_has_extension(const char *path)
+{
+    const char *slash;
+    const char *backslash;
+    const char *dot;
+    if (path == NULL)
+        return 0;
+    slash = strrchr(path, '/');
+    backslash = strrchr(path, '\\');
+    if (backslash != NULL && (slash == NULL || backslash > slash))
+        slash = backslash;
+    dot = strrchr(path, '.');
+    return dot != NULL && (slash == NULL || dot > slash);
+}
+
+static int vm_file_try_resolve_map_path(const char *normalizedName, const char *mode, char *resolvedName, size_t resolvedSize)
+{
+    FILE *fp;
+    const char *baseName;
+    char sceneName[256];
+    if (normalizedName == NULL || resolvedName == NULL || resolvedSize == 0)
+        return 0;
+    if (!vm_file_is_read_only_mode(mode) || vm_file_has_extension(normalizedName))
+        return 0;
+    if (strncmp(normalizedName, "JHOnlineData/", 13) != 0)
+        return 0;
+    baseName = normalizedName + 13;
+    if ((baseName[0] == 'c' || baseName[0] == 'b') &&
+        snprintf(sceneName, sizeof(sceneName), "%s.sce", normalizedName) < (int)sizeof(sceneName))
+    {
+        fp = fopen(sceneName, "rb");
+        if (fp != NULL)
+        {
+            fclose(fp);
+            snprintf(resolvedName, resolvedSize, "%s", sceneName);
+            return 1;
+        }
+    }
+    if (snprintf(resolvedName, resolvedSize, "%s.map", normalizedName) >= (int)resolvedSize)
+        return 0;
+    fp = fopen(resolvedName, "rb");
+    if (fp == NULL)
+        return 0;
+    fclose(fp);
+    return 1;
+}
+
 static void vm_file_make_dir(const char *path)
 {
     char normalized[256];
@@ -410,10 +465,17 @@ int vm_get_file_handle(char *nameBuf, const char *mode)
     int handle = -1;
     char binaryMode[8];
     char normalizedName[256];
+    char resolvedName[256];
     const char *openMode = mode;
     vm_file_normalize_host_path(nameBuf, normalizedName, sizeof(normalizedName));
     if (normalizedName[0] == 0)
         snprintf(normalizedName, sizeof(normalizedName), "%s", nameBuf);
+    if (vm_file_try_resolve_map_path(normalizedName, openMode, resolvedName, sizeof(resolvedName)))
+    {
+        vm_fileio_trace("file_open_resolve_map_extension from=%s to=%s mode=%s last=%08x\n",
+                        normalizedName, resolvedName, openMode ? openMode : "<null>", lastAddress);
+        snprintf(normalizedName, sizeof(normalizedName), "%s", resolvedName);
+    }
     if (vm_file_ext_requires_binary(normalizedName) && mode && strchr(mode, 'b') == NULL)
     {
         snprintf(binaryMode, sizeof(binaryMode), "%sb", mode);
@@ -472,6 +534,9 @@ int vm_cbfs_vm_file_open(int openMode, int namePtr, int rwPtr)
     char nameBuff[256];
     char mode[8];
     u8 rawName[256];
+    u32 pc = 0, lr = 0;
+    uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
     uc_mem_read(MTK, namePtr, rawName, sizeof(rawName));
     vm_read_path_string(namePtr, nameBuff, sizeof(nameBuff));
     if (rwPtr)
@@ -479,8 +544,8 @@ int vm_cbfs_vm_file_open(int openMode, int namePtr, int rwPtr)
     rwBuff[sizeof(rwBuff) - 1] = 0;
     vm_file_select_mode(openMode, rwBuff, mode, sizeof(mode));
     int handle = vm_get_file_handle(nameBuff, mode);
-    vm_fileio_trace("file_open_request openMode=%x namePtr=%08x name=%s hint=%s selected=%s handle=%d last=%08x\n",
-                    openMode, namePtr, nameBuff, rwBuff, mode, handle, lastAddress);
+    vm_fileio_trace("file_open_request openMode=%x namePtr=%08x name=%s hint=%s selected=%s handle=%d pc=%08x lr=%08x last=%08x\n",
+                    openMode, namePtr, nameBuff, rwBuff, mode, handle, pc, lr, lastAddress);
     if (handle < 0)
     {
         u32 r[8] = {0};
@@ -539,17 +604,29 @@ int vm_cbfs_vm_file_read(int bufferPtr, int size, int handle)
 // ok
 int vm_cbfs_vm_file_write(int bufferPtr, int size, int fileHandle)
 {
+    u32 pc = 0, lr = 0;
+    uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
     if (fileHandle < 0 || fileHandle >= 16 || openFileList[fileHandle] == NULL || size <= 0)
+    {
+        vm_fileio_trace("file_write_invalid handle=%d buffer=%08x size=%d pc=%08x lr=%08x last=%08x\n",
+                        fileHandle, bufferPtr, size, pc, lr, lastAddress);
         return vm_set_call_result(-1);
+    }
     if (openFileList[fileHandle] == VM_PSEUDO_DIR_HANDLE)
+    {
+        vm_fileio_trace("file_write_pseudo handle=%d path=%s buffer=%08x size=%d pc=%08x lr=%08x last=%08x\n",
+                        fileHandle, openFileNames[fileHandle], bufferPtr, size, pc, lr, lastAddress);
         return vm_set_call_result(0);
+    }
     void *buffer = SDL_malloc(size);
     uc_mem_read(MTK, bufferPtr, buffer, size);
     int r = fwrite(buffer, 1, size, openFileList[fileHandle]);
     if (r > 0)
         vm_fileio_trace_bytes("file_write_data", fileHandle, openFileNames[fileHandle], buffer, r);
     SDL_free(buffer);
-    vm_fileio_trace("file_write handle=%d path=%s size=%d result=%d\n", fileHandle, openFileNames[fileHandle], size, r);
+    vm_fileio_trace("file_write handle=%d path=%s buffer=%08x size=%d result=%d pc=%08x lr=%08x last=%08x\n",
+                    fileHandle, openFileNames[fileHandle], bufferPtr, size, r, pc, lr, lastAddress);
     return vm_set_call_result(r);
 }
 // ok
@@ -615,6 +692,58 @@ int vm_cbfs_vm_file_delete(int disk, int namePtr)
         unlink(normalizedName);
     return vm_set_call_result(r);
 }
+
+int vm_cbfs_vm_file_rename(int disk, int oldNamePtr, int newNamePtr)
+{
+    char oldRaw[256];
+    char newRaw[256];
+    char oldName[256];
+    char newName[256];
+    char finalNewName[256];
+    int r;
+
+    vm_read_path_string(oldNamePtr, oldRaw, sizeof(oldRaw));
+    vm_read_path_string(newNamePtr, newRaw, sizeof(newRaw));
+    vm_file_normalize_host_path(oldRaw, oldName, sizeof(oldName));
+    vm_file_normalize_host_path(newRaw, newName, sizeof(newName));
+    snprintf(finalNewName, sizeof(finalNewName), "%s", newName);
+
+    if (newName[0] != 0 && strchr(newName, '/') == NULL && strchr(newName, '\\') == NULL)
+    {
+        char *slash = strrchr(oldName, '/');
+        if (slash != NULL)
+        {
+            size_t dirLen = (size_t)(slash - oldName) + 1;
+            if (dirLen + strlen(newName) < sizeof(finalNewName))
+            {
+                memcpy(finalNewName, oldName, dirLen);
+                snprintf(finalNewName + dirLen, sizeof(finalNewName) - dirLen, "%s", newName);
+            }
+        }
+    }
+
+    if (oldName[0] == 0 || finalNewName[0] == 0 ||
+        vm_is_pseudo_dir_path(oldName) || vm_is_pseudo_dir_path(finalNewName) ||
+        vm_is_cbm_resource_path(oldName) || vm_is_cbm_resource_path(finalNewName))
+    {
+        vm_fileio_trace("file_rename_skip disk=%d oldRaw=%s newRaw=%s old=%s new=%s finalNew=%s last=%08x\n",
+                        disk, oldRaw, newRaw, oldName, newName, finalNewName, lastAddress);
+        return vm_set_call_result(0);
+    }
+
+    vm_file_ensure_parent_dirs(finalNewName);
+    r = rename(oldName, finalNewName);
+    if (r != 0)
+    {
+        remove(finalNewName);
+        r = rename(oldName, finalNewName);
+    }
+
+    vm_fileio_trace("file_rename disk=%d oldRaw=%s newRaw=%s old=%s new=%s finalNew=%s result=%d success=%d last=%08x\n",
+                    disk, oldRaw, newRaw, oldName, newName, finalNewName, r, r == 0, lastAddress);
+    return vm_set_call_result(r == 0 ? 1 : 0);
+}
+
 int vm_cbfs_vm_file_getfilesize(int fileHandle)
 {
     if (fileHandle < 0 || fileHandle >= 16 || openFileList[fileHandle] == NULL)
@@ -823,7 +952,7 @@ u16 vm_DF_ReadShort(u32 bufPtr, u32 offsetPtr)
 
     uc_mem_read(MTK, bufPtr + offset, &ret, 2);
     if ((lastAddress >= 0x0100d780 && lastAddress <= 0x0100d8c0) ||
-        lastAddress == 0x0100dbdc)
+        (lastAddress >= 0x0100db80 && lastAddress <= 0x0100de90))
     {
         u8 raw[8] = {0};
         uc_mem_read(MTK, bufPtr + offset, raw, sizeof(raw));
@@ -2862,7 +2991,8 @@ int vm_DF_ReadString(u32 a1, u32 a2)
         u8 srcBytes[96] = {0};
         u32 outLen = len < sizeof(outName) - 1 ? len : (u32)sizeof(outName) - 1;
         uc_mem_read(uc, result, outName, outLen);
-        if (strstr(outName, "warrior") || strstr(outName, "rior") || strstr(outName, "jian") ||
+        if ((lastAddress >= 0x0100db80 && lastAddress <= 0x0100de90) ||
+            strstr(outName, "warrior") || strstr(outName, "rior") || strstr(outName, "jian") ||
             strstr(outName, "guang") || strstr(outName, "death") || strstr(outName, "ying"))
         {
             u32 srcLen = len + 1 < sizeof(srcBytes) ? len + 1 : (u32)sizeof(srcBytes);
@@ -3037,12 +3167,18 @@ u32 vm_GetStreamDataFormRes(u32 a1, u32 a2, u32 a3, u32 a4)
     uc_engine *uc = MTK;
     u8 resType = vm_get_var_byte(a1);
 
-    if (resType == 1)
+    /*
+     * The real firmware always treats normal resources as LZSS streams here.
+     * Network mock resources sometimes need to provide a tiny hand-authored DF
+     * descriptor, so use a private pseudo type instead of changing real type=1
+     * resource behavior.
+     */
+    if (resType == 0xf1)
     {
         u32 srcSize = vm_malloc_user_size(a1);
         if (srcSize <= 1)
         {
-            vm_fileio_trace("GetStreamDataFormRes type1 invalid src=%08x size=%u last=%08x\n",
+            vm_fileio_trace("GetStreamDataFormRes pseudo_raw invalid src=%08x size=%u last=%08x\n",
                             a1, srcSize, lastAddress);
             return vm_set_call_result(0);
         }
@@ -3054,7 +3190,7 @@ u32 vm_GetStreamDataFormRes(u32 a1, u32 a2, u32 a3, u32 a4)
             u8 byte = vm_get_var_byte(a1 + 1 + i);
             uc_mem_write(uc, dest + i, &byte, 1);
         }
-        vm_fileio_trace("GetStreamDataFormRes src=%08x type=%u raw=%u dest=%08x last=%08x\n",
+        vm_fileio_trace("GetStreamDataFormRes src=%08x type=%u pseudo_raw=%u dest=%08x last=%08x\n",
                         a1, resType, rawLen, dest, lastAddress);
         return vm_set_call_result(dest);
     }

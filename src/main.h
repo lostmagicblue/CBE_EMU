@@ -36,6 +36,7 @@ void handleEvent_EMU(uc_engine *uc, uint64_t address, uint32_t size, void *user_
 bool isIRQ_Disable(u32 cpsr);
 bool isIrqMode(u32 cpsr);
 void dumpCpuInfo();
+bool vm_trace_verbose_enabled(void);
 
 u32 last_gpt1_interrupt_time;
 u32 IRQ_MASK_SET_L_Data;
