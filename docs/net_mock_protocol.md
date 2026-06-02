@@ -1,5 +1,11 @@
 # 江湖OL.CBE 网络模拟响应记录
 
+说明：
+
+- 本文件保留为历史工作记录和原始协议笔记来源。
+- 当前规范化后的协议总结请优先查看 [docs/re/protocol.md](/E:/DevOs/CBE_EMU/docs/re/protocol.md)。
+- 如果这里新增了重要发现，后续应同步整理回 `docs/re/protocol.md`，并标注 `confirmed` 或 `hypothesis`。
+
 本文件记录已经验证过的模拟响应契约，避免后续会话重新绕回运行时猜包。
 
 ## 原则
