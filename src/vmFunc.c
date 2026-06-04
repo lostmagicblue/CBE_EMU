@@ -15,12 +15,55 @@ FILE *openFileList[16];
 static char openFileNames[16][256];
 
 static void vm_read_string_by_ptr_limited(u32 ptr, char *dst, size_t dstSize);
+static void vm_trace_ensure_log_dir(void);
+
+static const char *vm_storage_trace_path(void)
+{
+    vm_trace_ensure_log_dir();
+    return "logs/storage_trace.log";
+}
+
+static void vm_trace_ensure_log_dir(void)
+{
+    static int initDone = 0;
+    if (!initDone)
+    {
+#ifdef _WIN32
+        _mkdir("logs");
+#else
+        mkdir("logs", 0755);
+#endif
+        initDone = 1;
+    }
+}
+
+static void vm_trace_write_net_session_marker(FILE *fp)
+{
+    static int wroteMarker = 0;
+    if (fp != NULL && !wroteMarker)
+    {
+        fprintf(fp, "\n==== session_start channel=net ====\n");
+        wroteMarker = 1;
+    }
+}
+
+static void vm_trace_write_storage_session_marker(FILE *fp)
+{
+    static int wroteMarker = 0;
+    if (fp != NULL && !wroteMarker)
+    {
+        fprintf(fp, "\n==== session_start channel=storage ====\n");
+        wroteMarker = 1;
+    }
+}
 
 static void vm_fileio_trace(const char *fmt, ...)
 {
-    FILE *fp = fopen("storage_trace.log", "a");
+    vm_trace_ensure_log_dir();
+    FILE *fp = fopen(vm_storage_trace_path(), "ab");
     if (fp == NULL)
         return;
+    vm_trace_write_storage_session_marker(fp);
 
     va_list args;
     va_start(args, fmt);
@@ -31,9 +74,11 @@ static void vm_fileio_trace(const char *fmt, ...)
 
 static void vm_fileio_trace_bytes(const char *tag, int handle, const char *path, const void *data, int len)
 {
-    FILE *fp = fopen("storage_trace.log", "a");
+    vm_trace_ensure_log_dir();
+    FILE *fp = fopen(vm_storage_trace_path(), "ab");
     if (fp == NULL)
         return;
+    vm_trace_write_storage_session_marker(fp);
 
     const u8 *bytes = (const u8 *)data;
     int dumpLen = len < 48 ? len : 48;
@@ -52,9 +97,11 @@ static void vm_fileio_trace_bytes(const char *tag, int handle, const char *path,
 
 static void vm_lcd_image_trace(const char *fmt, ...)
 {
-    FILE *fp = fopen("net_trace.log", "a");
+    vm_trace_ensure_log_dir();
+    FILE *fp = fopen("logs/net_trace.log", "ab");
     if (fp == NULL)
         return;
+    vm_trace_write_net_session_marker(fp);
 
     va_list args;
     va_start(args, fmt);
@@ -309,9 +356,12 @@ static int vm_file_ext_requires_binary(const char *nameBuf)
     const char *ext = strrchr(nameBuf, '.');
     if (strstr(nameBuf, "cbm") != NULL || strstr(nameBuf, "CBM") != NULL)
         return 1;
+    if (strstr(nameBuf, "tempbin") != NULL || strstr(nameBuf, "Tempbin") != NULL || strstr(nameBuf, "TEMPBIN") != NULL)
+        return 1;
     if (ext == NULL)
         return 0;
     return _stricmp(ext, ".cbe") == 0 ||
+           _stricmp(ext, ".bin") == 0 ||
            _stricmp(ext, ".cbm") == 0 ||
            _stricmp(ext, ".gif") == 0 ||
            _stricmp(ext, ".png") == 0 ||
@@ -441,6 +491,8 @@ static void vm_file_select_mode(int openMode, const char *modeHint, char *mode, 
         }
         if (pos)
         {
+            if (strchr(hint, 'b') == NULL && pos + 1 < sizeof(hint))
+                hint[pos++] = 'b';
             snprintf(mode, modeSize, "%s", hint);
             return;
         }
@@ -1692,7 +1744,7 @@ void vm_sprintf()
     u8 spBuffer[1024];
     uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
     uc_mem_read(MTK, tmp1, charBuffer, 128);
-    printf("[vm_sprintf]");
+    printf("[vm_sprintf][%x]",lastAddress);
     tmp1 = 0;
     tmp2 = 0;
     tmp3 = 0;
@@ -2403,10 +2455,10 @@ void vM_DrawImageWithClipEx()
     if (w <= 0 || h <= 0)
         return;
 
-    if ((dstX <= 205 && dstX + w >= 190) || h > 120)
-        vm_lcd_image_trace("lcd_image api=vMDrawImageWithClipEx srcInfo=%08x srcPtr=%08x srcDim=%u,%u orig sx=%d sy=%d w=%d h=%d dx=%d dy=%d clipped sx=%d sy=%d w=%d h=%d dx=%d dy=%d last=%08x\n",
-                           srcInfo, srcPtr, src_w, src_h, origSrcX, origSrcY, origW, origH, origDstX, origDstY,
-                           srcX, srcY, w, h, dstX, dstY, lastAddress);
+    // if ((dstX <= 205 && dstX + w >= 190) || h > 120)
+    //     vm_lcd_image_trace("lcd_image api=vMDrawImageWithClipEx srcInfo=%08x srcPtr=%08x srcDim=%u,%u orig sx=%d sy=%d w=%d h=%d dx=%d dy=%d clipped sx=%d sy=%d w=%d h=%d dx=%d dy=%d last=%08x\n",
+    //                        srcInfo, srcPtr, src_w, src_h, origSrcX, origSrcY, origW, origH, origDstX, origDstY,
+    //                        srcX, srcY, w, h, dstX, dstY, lastAddress);
 
     int srcImgPitch = (((4 - src_w) & 3) + src_w) * 2; // 源图片的宽度按4像素对齐后再x2就是原图片一行像素占用的字节数
     int dstImgPicth = (((4 - dst_w) & 3) + dst_w) * 2;
@@ -2516,10 +2568,10 @@ void vm_vMDrawImageClipAndAlphaEx()
     if (w <= 0 || h <= 0)
         return;
 
-    if ((dstX <= 205 && dstX + w >= 190) || h > 120)
-        vm_lcd_image_trace("lcd_image api=vMDrawImageClipAndAlphaEx srcInfo=%08x srcPtr=%08x srcDim=%u,%u orig sx=%d sy=%d w=%d h=%d dx=%d dy=%d clipped sx=%d sy=%d w=%d h=%d dx=%d dy=%d last=%08x\n",
-                           srcInfo, srcPtr, src_w, src_h, origSrcX, origSrcY, origW, origH, origDstX, origDstY,
-                           srcX, srcY, w, h, dstX, dstY, lastAddress);
+    // if ((dstX <= 205 && dstX + w >= 190) || h > 120)
+    //     vm_lcd_image_trace("lcd_image api=vMDrawImageClipAndAlphaEx srcInfo=%08x srcPtr=%08x srcDim=%u,%u orig sx=%d sy=%d w=%d h=%d dx=%d dy=%d clipped sx=%d sy=%d w=%d h=%d dx=%d dy=%d last=%08x\n",
+    //                        srcInfo, srcPtr, src_w, src_h, origSrcX, origSrcY, origW, origH, origDstX, origDstY,
+    //                        srcX, srcY, w, h, dstX, dstY, lastAddress);
 
     int srcImgPitch = (((4 - src_w) & 3) + src_w) * 2; // 源图片的宽度按4像素对齐后再x2就是原图片一行像素占用的字节数
     int dstImgPicth = (((4 - dst_w) & 3) + dst_w) * 2;

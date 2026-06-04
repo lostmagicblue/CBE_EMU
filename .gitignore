@@ -19,3 +19,6 @@ firmware/raw/*
 !firmware/raw/.gitkeep
 samples/raw/*
 !samples/raw/.gitkeep
+.codex/
+.codex_tmp/
+samples/

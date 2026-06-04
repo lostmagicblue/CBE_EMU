@@ -60,7 +60,7 @@ int writeFile(const char *filename, void *buff, u32 size)
     u8 *tmp;
     u8 flag;
     // 打开文件 a.txt
-    file = fopen(filename, "w");
+    file = fopen(filename, "wb");
     if (file == NULL)
     {
         fclose(file);
