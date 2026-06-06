@@ -299,6 +299,54 @@ static void vm_file_normalize_host_path(const char *src, char *dst, size_t dstSi
     dst[pos] = 0;
 }
 
+static int vm_path_looks_like_ucs2_le(const u8 *raw, size_t rawSize, u32 *ucs2LenOut)
+{
+    if (ucs2LenOut)
+        *ucs2LenOut = 0;
+    if (raw == NULL || rawSize < 4)
+        return 0;
+
+    u32 pos = 0;
+    u32 units = 0;
+    int sawWideChar = 0;
+    while (pos + 1 < rawSize)
+    {
+        u16 ch = (u16)(raw[pos] | (raw[pos + 1] << 8));
+        if (ch == 0)
+        {
+            if (units == 0)
+                return 0;
+            if (ucs2LenOut)
+                *ucs2LenOut = pos;
+            return 1;
+        }
+
+        if (ch >= 0xD800 && ch <= 0xDFFF)
+            return 0;
+
+        if (ch <= 0x7F)
+        {
+            if (!(ch == '/' || ch == '\\' || ch == '.' || ch == '_' || ch == '-' ||
+                  (ch >= '0' && ch <= '9') ||
+                  (ch >= 'A' && ch <= 'Z') ||
+                  (ch >= 'a' && ch <= 'z')))
+                return 0;
+        }
+        else
+        {
+            /* Accept common CJK/unicode BMP path characters used by the game. */
+            if (!((ch >= 0x2E80 && ch <= 0x9FFF) || (ch >= 0xF900 && ch <= 0xFAFF)))
+                return 0;
+            sawWideChar = 1;
+        }
+
+        pos += 2;
+        ++units;
+    }
+
+    return sawWideChar;
+}
+
 static void vm_read_path_string(u32 namePtr, char *out, size_t outSize)
 {
     u8 rawName[256];
@@ -306,17 +354,16 @@ static void vm_read_path_string(u32 namePtr, char *out, size_t outSize)
     if (outSize == 0)
         return;
     uc_mem_read(MTK, namePtr, rawName, sizeof(rawName));
-    if (rawName[0] != 0 && rawName[1] == 0)
+    u32 ucs2Len = 0;
+    if (vm_path_looks_like_ucs2_le(rawName, sizeof(rawName), &ucs2Len))
     {
-        u32 ucs2Len = 0;
-        while (ucs2Len + 1 < sizeof(rawName) && (rawName[ucs2Len] != 0 || rawName[ucs2Len + 1] != 0))
-            ucs2Len += 2;
         ucs2_to_gbk(rawName, ucs2Len, out, outSize);
     }
     else
     {
         vm_read_string_by_ptr_limited(namePtr, out, outSize);
     }
+    out[outSize - 1] = 0;
 }
 
 static int vm_is_pseudo_dir_path(const char *nameBuf)
@@ -400,6 +447,60 @@ static int vm_file_has_extension(const char *path)
         slash = backslash;
     dot = strrchr(path, '.');
     return dot != NULL && (slash == NULL || dot > slash);
+}
+
+static int vm_path_has_high_byte(const char *path)
+{
+    if (path == NULL)
+        return 0;
+    while (*path)
+    {
+        if ((u8)*path >= 0x80)
+            return 1;
+        ++path;
+    }
+    return 0;
+}
+
+static int vm_file_is_invalid_named_resource_cache(const char *normalizedName, const char *mode)
+{
+    FILE *fp;
+    long fileSize = 0;
+    u8 header[4] = {0};
+    u32 declaredLen = 0;
+
+    if (normalizedName == NULL || normalizedName[0] == 0)
+        return 0;
+    if (!vm_file_is_read_only_mode(mode))
+        return 0;
+    if (strncmp(normalizedName, "JHOnlineData/", 13) != 0)
+        return 0;
+    if (vm_file_has_extension(normalizedName))
+        return 0;
+    if (!vm_path_has_high_byte(normalizedName + 13))
+        return 0;
+
+    fp = fopen(normalizedName, "rb");
+    if (fp == NULL)
+        return 0;
+    if (fseek(fp, 0, SEEK_END) == 0)
+        fileSize = ftell(fp);
+    if (fileSize >= 4)
+    {
+        fseek(fp, 0, SEEK_SET);
+        if (fread(header, 1, sizeof(header), fp) != sizeof(header))
+            fileSize = -1;
+    }
+    fclose(fp);
+
+    if (fileSize < 4)
+        return 1;
+
+    declaredLen = (u32)header[0] |
+                  ((u32)header[1] << 8) |
+                  ((u32)header[2] << 16) |
+                  ((u32)header[3] << 24);
+    return declaredLen == 0 || declaredLen > (u32)(fileSize - 4);
 }
 
 static int vm_file_try_resolve_map_path(const char *normalizedName, const char *mode, char *resolvedName, size_t resolvedSize)
@@ -532,6 +633,12 @@ int vm_get_file_handle(char *nameBuf, const char *mode)
     {
         snprintf(binaryMode, sizeof(binaryMode), "%sb", mode);
         openMode = binaryMode;
+    }
+    if (vm_file_is_invalid_named_resource_cache(normalizedName, openMode))
+    {
+        vm_fileio_trace("file_open_reject_invalid_named_cache path=%s mode=%s last=%08x\n",
+                        normalizedName, openMode ? openMode : "<null>", lastAddress);
+        return -1;
     }
     for (int i = 0; i < 16; i++)
     {

@@ -127,11 +127,6 @@ static int g_vmInputOverlayX = 12;
 static int g_vmInputOverlayY = 348;
 static int g_vmInputOverlayW = 216;
 static int g_vmInputOverlayH = 22;
-static int g_autoTouchConfigured = 0;
-static int g_autoTouchFired = 0;
-static u32 g_autoTouchTick = 0;
-static int g_autoTouchX = 0;
-static int g_autoTouchY = 0;
 u32 screenStructChange = 0;
 u32 screenStructNotifyLoadRes = 0;
 u32 vmAddedScreen = 0;
@@ -229,8 +224,14 @@ static void vm_net_trace(const char *fmt, ...);
 static void vm_net_packet_trace(const char *fmt, ...);
 static bool vm_host_file_exists(const char *path);
 static void vm_net_trace_title_login_state(const char *label);
+static void vm_net_trace_title_child_manager_call(const char *label, u32 pc);
+static void vm_net_trace_title_login_dispatch(const char *label, u32 pc);
+static void vm_net_trace_title_role_path(const char *label, u32 pc);
+static void vm_net_trace_title_rolelist_reader_methods(const char *label, u32 pc);
+static void vm_net_trace_title_role_select_action(const char *label, u32 pc);
 void vm_net_trace_title_login_write(uint64_t address, uint32_t size, int64_t value);
 void vm_net_trace_shared_event_owner_write(uint64_t address, uint32_t size, int64_t value);
+void vm_net_trace_current_net_object_write(uint64_t address, uint32_t size, int64_t value);
 static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
 static uc_err scheduler_dispatch_net_tasks(void);
 static uc_err scheduler_flush_post_vm_business_send_ready(const char *reason);
@@ -1952,7 +1953,7 @@ static bool vm_net_mock_put_bytes(u8 *out, u32 outCap, u32 *pos, const void *dat
 static bool vm_net_mock_put_u8(u8 *out, u32 outCap, u32 *pos, u8 value);
 static u8 vm_net_mock_env_u8(const char *name, u8 fallback);
 static const char *vm_net_mock_env_str(const char *name, const char *fallback);
-static const char *vm_net_mock_actor_motion_resource_name(u8 actorJob, u8 actorSex);
+static const char *vm_net_mock_actor_preview_image_name(u8 actorJob, u8 actorSex);
 
 static const char *vm_net_mock_actor_ui_motion_name(u8 actorJob, u8 actorSex)
 {
@@ -2060,10 +2061,120 @@ static u32 vm_net_mock_build_minimal_actor_image_resource(u8 *out, u32 outCap)
     return fileLen;
 }
 
-static u32 vm_net_mock_load_resource_update_payload(const u8 *request, u32 requestLen, u8 *out, u32 outCap, const char **payloadName)
+static u32 vm_net_mock_build_len_prefixed_resource_blob(
+    const u8 *payload, u32 payloadLen, u8 *out, u32 outCap)
 {
+    if (payload == NULL || payloadLen == 0 || out == NULL)
+        return 0;
+    if (payloadLen + 4 > outCap)
+        return 0;
+
+    out[0] = (u8)payloadLen;
+    out[1] = (u8)(payloadLen >> 8);
+    out[2] = (u8)(payloadLen >> 16);
+    out[3] = (u8)(payloadLen >> 24);
+    memcpy(out + 4, payload, payloadLen);
+    return payloadLen + 4;
+}
+
+static bool vm_net_mock_string_has_non_ascii(const char *text)
+{
+    if (text == NULL)
+        return false;
+    while (*text)
+    {
+        if ((u8)*text >= 0x80)
+            return true;
+        ++text;
+    }
+    return false;
+}
+
+static bool vm_net_mock_named_payload_looks_like_resource_stream(
+    const char *payloadName, u8 requestType, const u8 *payload, u32 payloadLen)
+{
+    u32 declaredLen = 0;
+
+    if (payload == NULL || payloadLen == 0)
+        return false;
+    if (requestType != 1)
+        return true;
+    if (payloadName == NULL || payloadName[0] == 0)
+        return true;
+    if (strchr(payloadName, '.') != NULL)
+        return true;
+    if (!vm_net_mock_string_has_non_ascii(payloadName))
+        return true;
+    if (payloadLen < 4)
+        return false;
+
+    declaredLen = (u32)payload[0] |
+                  ((u32)payload[1] << 8) |
+                  ((u32)payload[2] << 16) |
+                  ((u32)payload[3] << 24);
+    return declaredLen > 0 && declaredLen <= payloadLen - 4;
+}
+
+static u32 vm_net_mock_load_named_update_payload(const char *payloadName, u8 *out, u32 outCap)
+{
+    if (payloadName == NULL || payloadName[0] == 0 || out == NULL || outCap == 0)
+        return 0;
+
+    char path[384];
+    snprintf(path, sizeof(path), "JHOnlineData/%s", payloadName);
+    return vm_net_mock_load_response_file(path, out, outCap);
+}
+
+static u32 vm_net_mock_load_resource_update_payload(
+    const u8 *request, u32 requestLen, const char *requestedName, u8 *out, u32 outCap, const char **payloadName)
+{
+    u8 requestType = 0;
+    bool haveRequestType = vm_net_mock_get_object_u8_field(request, requestLen, "type", &requestType);
+
     if (payloadName)
-        *payloadName = "MMORPGTempcbm";
+        *payloadName = (requestedName && requestedName[0]) ? requestedName : "MMORPGTempcbm";
+
+    if (requestedName && requestedName[0])
+    {
+        if (strcmp(requestedName, "c_mock_missing_motion.actor") == 0 ||
+            strcmp(requestedName, "mock_missing_motion.actor") == 0)
+            return vm_net_mock_build_minimal_actor_motion_resource(out, outCap);
+
+        if (strcmp(requestedName, "mock_actor_image.gif") == 0)
+            return vm_net_mock_build_minimal_actor_image_resource(out, outCap);
+
+        u32 namedLen = vm_net_mock_load_named_update_payload(requestedName, out, outCap);
+        if (namedLen > 0)
+        {
+            if (vm_net_mock_named_payload_looks_like_resource_stream(requestedName,
+                                                                     haveRequestType ? requestType : 0,
+                                                                     out,
+                                                                     namedLen))
+                return namedLen;
+            vm_net_trace("mock_update_named_resource_reject_invalid_cache name=%s reqType=%u payloadLen=%u\n",
+                         requestedName,
+                         haveRequestType ? requestType : 0,
+                         namedLen);
+        }
+
+        if ((!haveRequestType || requestType == 1) && outCap > 4)
+        {
+            u32 fallbackLen = vm_net_mock_load_update_payload(out + 4, outCap - 4);
+            if (fallbackLen > 0)
+            {
+                u32 wrappedLen = vm_net_mock_build_len_prefixed_resource_blob(out + 4, fallbackLen, out, outCap);
+                if (wrappedLen > 0)
+                {
+                    vm_net_trace("mock_update_named_resource_wrapper name=%s reqType=%u payloadLen=%u fileLen=%u\n",
+                                 requestedName,
+                                 haveRequestType ? requestType : 0,
+                                 fallbackLen,
+                                 wrappedLen);
+                    return wrappedLen;
+                }
+            }
+        }
+    }
 
     if (vm_net_mock_request_contains(request, requestLen, "c_mock_missing_motion.actor") ||
         vm_net_mock_request_contains(request, requestLen, "mock_missing_motion.actor"))
@@ -2359,6 +2470,54 @@ static void vm_net_read_guest_ascii_label(u32 ptr, char *out, size_t outCap)
     snprintf(out, outCap, "<nonascii:%08x>", ptr);
 }
 
+static void vm_net_read_guest_gbk_label(u32 ptr, char *out, size_t outCap)
+{
+    u8 raw[64];
+    size_t i = 0;
+
+    if (out == NULL || outCap == 0)
+        return;
+    out[0] = 0;
+    if (ptr == 0)
+    {
+        snprintf(out, outCap, "<null>");
+        return;
+    }
+    memset(raw, 0, sizeof(raw));
+    if (uc_mem_read(MTK, ptr, raw, sizeof(raw) - 1) != UC_ERR_OK)
+    {
+        snprintf(out, outCap, "<bad:%08x>", ptr);
+        return;
+    }
+    while (i < sizeof(raw) - 1 && raw[i] != 0)
+        i++;
+    raw[i] = 0;
+    if (i == 0)
+    {
+        snprintf(out, outCap, "<empty>");
+        return;
+    }
+    gbk_to_utf8(raw, out, outCap);
+}
+
+static void vm_net_read_guest_best_effort_label(u32 ptr, char *out, size_t outCap)
+{
+    char asciiBuf[96];
+
+    if (out == NULL || outCap == 0)
+        return;
+    out[0] = 0;
+
+    vm_net_read_guest_ascii_label(ptr, asciiBuf, sizeof(asciiBuf));
+    if (strncmp(asciiBuf, "<nonascii:", 10) == 0)
+    {
+        vm_net_read_guest_gbk_label(ptr, out, outCap);
+        if (out[0] != 0)
+            return;
+    }
+    snprintf(out, outCap, "%s", asciiBuf);
+}
+
 static void vm_net_read_active_ui_name(char *out, size_t outCap)
 {
     u32 uiObj = 0;
@@ -2378,6 +2537,25 @@ static void vm_net_read_active_ui_name(char *out, size_t outCap)
     vm_net_read_guest_ascii_label(uiObj + 1141, out, outCap);
 }
 
+static void vm_net_read_active_ui_name_best_effort(char *out, size_t outCap)
+{
+    u32 uiObj = 0;
+    if (out == NULL || outCap == 0)
+        return;
+    out[0] = 0;
+    if (!Global_R9)
+    {
+        snprintf(out, outCap, "<no-r9>");
+        return;
+    }
+    if (uc_mem_read(MTK, Global_R9 + 21676, &uiObj, 4) != UC_ERR_OK || uiObj == 0)
+    {
+        snprintf(out, outCap, "<no-ui>");
+        return;
+    }
+    vm_net_read_guest_best_effort_label(uiObj + 1141, out, outCap);
+}
+
 static void vm_net_trace_resource_name_flow(const char *tag, u32 pc, u32 lr, u32 namePtr)
 {
     char nameBuf[96];
@@ -2388,6 +2566,41 @@ static void vm_net_trace_resource_name_flow(const char *tag, u32 pc, u32 lr, u32
                  tag, pc, lr, lastAddress, g_schedulerTick, namePtr, nameBuf, uiName);
 }
 
+static void vm_net_trace_resource_request_enqueue(const char *tag,
+                                                  u32 pc,
+                                                  u32 lr,
+                                                  u32 requestType,
+                                                  u32 namePtr,
+                                                  u32 argA4,
+                                                  u32 argA5,
+                                                  u32 argA6,
+                                                  u32 argA7,
+                                                  u32 argA8)
+{
+    char nameBuf[96];
+    char uiName[96];
+
+    vm_net_read_guest_best_effort_label(namePtr, nameBuf, sizeof(nameBuf));
+    vm_net_read_active_ui_name_best_effort(uiName, sizeof(uiName));
+    vm_net_trace("%s pc=%08x lr=%08x last=%08x tick=%u reqType=%u namePtr=%08x name=%s a4=%08x a5=%08x a6=%08x a7=%08x a8=%08x uiName=%s activeScreen=%08x currentThis=%08x\n",
+                 tag,
+                 pc,
+                 lr,
+                 lastAddress,
+                 g_schedulerTick,
+                 requestType,
+                 namePtr,
+                 nameBuf,
+                 argA4,
+                 argA5,
+                 argA6,
+                 argA7,
+                 argA8,
+                 uiName,
+                 vmAddedScreen,
+                 g_currentScreenThis);
+}
+
 static void vm_net_trace_update_request_prepare(u32 pc, u32 lr, u32 requestType)
 {
     u32 pendingEntry = 0;
@@ -2395,7 +2608,9 @@ static void vm_net_trace_update_request_prepare(u32 pc, u32 lr, u32 requestType)
     u32 version = 0;
     u16 resourceType = 0;
     char nameBuf[96];
-    vm_net_read_guest_ascii_label(0, nameBuf, sizeof(nameBuf));
+    char uiName[96];
+    vm_net_read_guest_best_effort_label(0, nameBuf, sizeof(nameBuf));
+    vm_net_read_active_ui_name_best_effort(uiName, sizeof(uiName));
     if (Global_R9)
     {
         uc_mem_read(MTK, Global_R9 + 38284, &pendingEntry, 4);
@@ -2405,10 +2620,10 @@ static void vm_net_trace_update_request_prepare(u32 pc, u32 lr, u32 requestType)
     {
         uc_mem_read(MTK, pendingEntry, &resourceType, 2);
         uc_mem_read(MTK, pendingEntry + 52, &start, 4);
-        vm_net_read_guest_ascii_label(pendingEntry + 2, nameBuf, sizeof(nameBuf));
+        vm_net_read_guest_best_effort_label(pendingEntry + 2, nameBuf, sizeof(nameBuf));
     }
-    vm_net_trace("trace_update_request_prepare pc=%08x lr=%08x last=%08x tick=%u reqType=%u pending=%08x name=%s type=%u start=%u version=%u\n",
-                 pc, lr, lastAddress, g_schedulerTick, requestType, pendingEntry, nameBuf, (u32)resourceType, start, version);
+    vm_net_trace("trace_update_request_prepare pc=%08x lr=%08x last=%08x tick=%u reqType=%u pending=%08x name=%s type=%u start=%u version=%u uiName=%s activeScreen=%08x currentThis=%08x\n",
+                 pc, lr, lastAddress, g_schedulerTick, requestType, pendingEntry, nameBuf, (u32)resourceType, start, version, uiName, vmAddedScreen, g_currentScreenThis);
 }
 
 static void vm_net_trace_parse_actor_motion_entry(u32 pc, u32 lr, u32 arg0, u32 arg4, u32 arg8, u32 argC)
@@ -2573,10 +2788,24 @@ static void vm_net_trace_title_login_state(const char *label)
     u16 mode = 0;
     u16 sel0 = 0;
     u16 sel1 = 0;
+    u32 modeObjPtr = 0;
+    u32 modeObjCb0 = 0;
+    u32 modeObjCb4 = 0;
+    u32 modeObjCb8 = 0;
+    u32 modeObjCb10 = 0;
+    u32 modeObjCb14 = 0;
+    u32 choiceObj1 = 0;
+    u32 choiceObj2 = 0;
     u32 target48 = 0;
     u32 target4c = 0;
     u32 target50 = 0;
     u32 target54 = 0;
+    u32 choiceObj1Cb14 = 0;
+    u32 choiceObj2Cb14 = 0;
+    u32 target48Cb14 = 0;
+    u32 target4cCb14 = 0;
+    u32 target50Cb14 = 0;
+    u32 target54Cb14 = 0;
     u32 listPtr = 0;
     u8 listCount = 0;
     u32 roleFamily = 0;
@@ -2587,17 +2816,43 @@ static void vm_net_trace_title_login_state(const char *label)
     (void)uc_mem_read(MTK, base + 10748, &mode, 2);
     (void)uc_mem_read(MTK, base + 10750, &sel0, 2);
     (void)uc_mem_read(MTK, base + 10752, &sel1, 2);
+    (void)uc_mem_read(MTK, base + 10444, &modeObjPtr, 4);
+    (void)uc_mem_read(MTK, base + 10792, &choiceObj1, 4);
+    (void)uc_mem_read(MTK, base + 10796, &choiceObj2, 4);
     (void)uc_mem_read(MTK, base + 10800, &target48, 4);
     (void)uc_mem_read(MTK, base + 10804, &target4c, 4);
     (void)uc_mem_read(MTK, base + 10808, &target50, 4);
     (void)uc_mem_read(MTK, base + 10812, &target54, 4);
     (void)uc_mem_read(MTK, base + 10788, &listPtr, 4);
     (void)uc_mem_read(MTK, base + 11108, &roleFamily, 4);
+    if (modeObjPtr)
+    {
+        (void)uc_mem_read(MTK, modeObjPtr + 0x00, &modeObjCb0, 4);
+        (void)uc_mem_read(MTK, modeObjPtr + 0x04, &modeObjCb4, 4);
+        (void)uc_mem_read(MTK, modeObjPtr + 0x08, &modeObjCb8, 4);
+        (void)uc_mem_read(MTK, modeObjPtr + 0x10, &modeObjCb10, 4);
+        (void)uc_mem_read(MTK, modeObjPtr + 0x14, &modeObjCb14, 4);
+    }
+    if (choiceObj1)
+        (void)uc_mem_read(MTK, choiceObj1 + 0x14, &choiceObj1Cb14, 4);
+    if (choiceObj2)
+        (void)uc_mem_read(MTK, choiceObj2 + 0x14, &choiceObj2Cb14, 4);
+    if (target48)
+        (void)uc_mem_read(MTK, target48 + 0x14, &target48Cb14, 4);
+    if (target4c)
+        (void)uc_mem_read(MTK, target4c + 0x14, &target4cCb14, 4);
+    if (target50)
+        (void)uc_mem_read(MTK, target50 + 0x14, &target50Cb14, 4);
+    if (target54)
+        (void)uc_mem_read(MTK, target54 + 0x14, &target54Cb14, 4);
     if (listPtr)
         (void)uc_mem_read(MTK, listPtr, &listCount, 1);
 
     vm_net_trace("trace_title_login_state label=%s base=%08x state0=%u focus=%u saveDefault=%u mode=%u sel=%u,%u"
+                 " modeObj=%08x cb0=%08x cb4=%08x cb8=%08x cb10=%08x cb14=%08x"
+                 " choice1=%08x cb14=%08x choice2=%08x cb14=%08x"
                  " target48=%08x target4c=%08x target50=%08x target54=%08x"
+                 " targetCb14=%08x,%08x,%08x,%08x"
                  " listPtr=%08x listCount=%u roleFamily=%u"
                  " activeScreen=%08x currentThis=%08x tick=%u last=%08x\n",
                  label ? label : "?",
@@ -2608,10 +2863,24 @@ static void vm_net_trace_title_login_state(const char *label)
                  (u32)mode,
                  (u32)sel0,
                  (u32)sel1,
+                 modeObjPtr,
+                 modeObjCb0,
+                 modeObjCb4,
+                 modeObjCb8,
+                 modeObjCb10,
+                 modeObjCb14,
+                 choiceObj1,
+                 choiceObj1Cb14,
+                 choiceObj2,
+                 choiceObj2Cb14,
                  target48,
                  target4c,
                  target50,
                  target54,
+                 target48Cb14,
+                 target4cCb14,
+                 target50Cb14,
+                 target54Cb14,
                  listPtr,
                  (u32)listCount,
                  roleFamily,
@@ -2689,15 +2958,24 @@ void vm_net_trace_title_login_write(uint64_t address, uint32_t size, int64_t val
         {10728, 1, "state0"},
         {10730, 1, "focus"},
         {10735, 1, "saveDefault"},
+        {10737, 1, "slotLimit"},
         {10748, 2, "mode"},
         {10750, 2, "sel0"},
         {10752, 2, "sel1"},
+        {10754, 1, "initDone"},
+        {10756, 2, "ui56"},
+        {10758, 2, "ui58"},
+        {10760, 2, "ui60"},
+        {10762, 2, "ui62"},
+        {10764, 2, "ui64"},
         {10788, 4, "listPtr"},
         {10800, 4, "target48"},
         {10804, 4, "target4c"},
         {10808, 4, "target50"},
         {10812, 4, "target54"},
+        {11046, 1, "roleReady"},
         {11108, 4, "roleFamily"},
+        {11124, 4, "activeRoleIndex"},
     };
 
     u32 base = g_currentScreenModuleBase;
@@ -2740,6 +3018,96 @@ void vm_net_trace_title_login_write(uint64_t address, uint32_t size, int64_t val
     }
 }
 
+void vm_net_trace_title_role_workspace_write(uint64_t address, uint32_t size, int64_t value)
+{
+    typedef struct
+    {
+        u32 offset;
+        u32 width;
+        const char *label;
+    } workspace_watch;
+
+    static const workspace_watch watches[] = {
+        {0x00, 1, "roleCount"},
+        {0x68, 4, "role0.id"},
+        {0xB0, 4, "role0.level"},
+        {0x144, 1, "role0.sex"},
+        {0x145, 1, "role0.job"},
+        {0x7FC, 4, "selectedRoleIdShadow"},
+    };
+
+    u32 base = g_currentScreenModuleBase;
+    u32 listPtr = 0;
+    u32 writeStart = (u32)address;
+    u32 writeEnd = writeStart + size;
+    char roleName[96];
+
+    if (!base && vmAddedScreen)
+        base = vm_screen_stack_lookup_module_base(vmAddedScreen);
+    if (!base && g_currentScreenThis)
+        base = vm_screen_stack_lookup_module_base(g_currentScreenThis + 0x18);
+    if (!base || size == 0)
+        return;
+
+    (void)uc_mem_read(MTK, base + 10788, &listPtr, 4);
+    if (!listPtr)
+        return;
+
+    memset(roleName, 0, sizeof(roleName));
+
+    for (u32 i = 0; i < mySizeOf(watches); ++i)
+    {
+        u32 fieldAddr = listPtr + watches[i].offset;
+        u32 fieldEnd = fieldAddr + watches[i].width;
+        if (writeEnd <= fieldAddr || writeStart >= fieldEnd)
+            continue;
+
+        u32 oldValue = 0;
+        u32 lowBits = watches[i].width * 8;
+        u32 fieldMask = lowBits >= 32 ? 0xFFFFFFFFu : ((1u << lowBits) - 1u);
+        u32 newValue = (u32)value & fieldMask;
+        (void)uc_mem_read(MTK, fieldAddr, &oldValue, watches[i].width);
+        vm_net_read_guest_gbk_label(listPtr + 0x48, roleName, sizeof(roleName));
+
+        vm_net_trace("trace_title_role_workspace_write label=%s addr=%08x size=%u old=%08x new=%08x"
+                     " writeAddr=%08x writeSize=%u raw=%08x listPtr=%08x roleName=%s"
+                     " activeScreen=%08x currentThis=%08x tick=%u last=%08x\n",
+                     watches[i].label,
+                     fieldAddr,
+                     watches[i].width,
+                     oldValue & fieldMask,
+                     newValue,
+                     writeStart,
+                     size,
+                     (u32)value,
+                     listPtr,
+                     roleName[0] ? roleName : "<none>",
+                     vmAddedScreen,
+                     g_currentScreenThis,
+                     g_schedulerTick,
+                     lastAddress);
+    }
+
+    if (!(writeEnd <= listPtr + 0x48 || writeStart >= listPtr + 0x68))
+    {
+        vm_net_read_guest_gbk_label(listPtr + 0x48, roleName, sizeof(roleName));
+        vm_net_trace("trace_title_role_workspace_write label=role0.name addr=%08x size=%u"
+                     " writeAddr=%08x writeSize=%u raw=%08x listPtr=%08x roleName=%s"
+                     " activeScreen=%08x currentThis=%08x tick=%u last=%08x\n",
+                     listPtr + 0x48,
+                     0x20u,
+                     writeStart,
+                     size,
+                     (u32)value,
+                     listPtr,
+                     roleName[0] ? roleName : "<none>",
+                     vmAddedScreen,
+                     g_currentScreenThis,
+                     g_schedulerTick,
+                     lastAddress);
+    }
+}
+
 void vm_net_trace_shared_event_owner_write(uint64_t address, uint32_t size, int64_t value)
 {
     u32 ownerSlot = 0;
@@ -2762,6 +3130,394 @@ void vm_net_trace_shared_event_owner_write(uint64_t address, uint32_t size, int6
                  ownerSlot,
                  oldValue,
                  newValue,
+                 writeStart,
+                 size,
+                 (u32)value,
+                 vmAddedScreen,
+                 g_currentScreenThis,
+                 g_schedulerTick,
+                 lastAddress);
+}
+
+static void vm_net_trace_title_child_manager_call(const char *label, u32 pc)
+{
+    u32 r0 = 0;
+    u32 r1 = 0;
+    u32 lr = 0;
+    u32 childPtr = 0;
+    u32 cb4 = 0;
+    u32 cb8 = 0;
+    u32 cbC = 0;
+    u32 cb10 = 0;
+    u32 kind = 0;
+    u32 subtype = 0;
+
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    if (r0)
+    {
+        (void)uc_mem_read(MTK, r0, &childPtr, 4);
+    }
+    if (childPtr)
+    {
+        (void)uc_mem_read(MTK, childPtr + 0x04, &cb4, 4);
+        (void)uc_mem_read(MTK, childPtr + 0x08, &cb8, 4);
+        (void)uc_mem_read(MTK, childPtr + 0x0C, &cbC, 4);
+        (void)uc_mem_read(MTK, childPtr + 0x10, &cb10, 4);
+    }
+    if (r1)
+    {
+        (void)uc_mem_read(MTK, r1 + 4, &kind, 4);
+        (void)uc_mem_read(MTK, r1 + 8, &subtype, 4);
+    }
+
+    vm_net_trace("trace_title_child_manager_call label=%s pc=%08x lr=%08x last=%08x tick=%u"
+                 " mgr=%08x arg=%08x child=%08x cb4=%08x cb8=%08x cbC=%08x cb10=%08x"
+                 " packetKind=%u packetSubtype=%u activeScreen=%08x currentThis=%08x\n",
+                 label ? label : "?",
+                 pc,
+                 lr,
+                 lastAddress,
+                 g_schedulerTick,
+                 r0,
+                 r1,
+                 childPtr,
+                 cb4,
+                 cb8,
+                 cbC,
+                 cb10,
+                 kind,
+                 subtype,
+                 vmAddedScreen,
+                 g_currentScreenThis);
+}
+
+static void vm_net_trace_title_login_dispatch(const char *label, u32 pc)
+{
+    u32 base = g_currentScreenModuleBase;
+    u32 r0 = 0;
+    u32 lr = 0;
+    u32 kind = 0;
+    u32 subtype = 0;
+    u32 loginStatePtr = 0;
+    u8 resultByte = 0;
+    u32 target48 = 0;
+    u32 target4c = 0;
+    u32 target50 = 0;
+
+    if (!base && vmAddedScreen)
+        base = vm_screen_stack_lookup_module_base(vmAddedScreen);
+    if (!base && g_currentScreenThis)
+        base = vm_screen_stack_lookup_module_base(g_currentScreenThis + 0x18);
+
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    if (r0)
+    {
+        (void)uc_mem_read(MTK, r0 + 4, &kind, 4);
+        (void)uc_mem_read(MTK, r0 + 8, &subtype, 4);
+    }
+    if (base)
+    {
+        (void)uc_mem_read(MTK, base + 10780, &loginStatePtr, 4);
+        (void)uc_mem_read(MTK, base + 10800, &target48, 4);
+        (void)uc_mem_read(MTK, base + 10804, &target4c, 4);
+        (void)uc_mem_read(MTK, base + 10808, &target50, 4);
+    }
+    if (loginStatePtr)
+        (void)uc_mem_read(MTK, loginStatePtr + 1, &resultByte, 1);
+
+    vm_net_trace("trace_title_login_dispatch label=%s pc=%08x lr=%08x last=%08x tick=%u"
+                 " packet=%08x kind=%u subtype=%u loginState=%08x resultByte=%u"
+                 " target48=%08x target4c=%08x target50=%08x activeScreen=%08x currentThis=%08x\n",
+                 label ? label : "?",
+                 pc,
+                 lr,
+                 lastAddress,
+                 g_schedulerTick,
+                 r0,
+                 kind,
+                 subtype,
+                 loginStatePtr,
+                 (u32)resultByte,
+                 target48,
+                 target4c,
+                 target50,
+                 vmAddedScreen,
+                 g_currentScreenThis);
+}
+
+static void vm_net_trace_title_role_path(const char *label, u32 pc)
+{
+    u32 base = g_currentScreenModuleBase;
+    u32 lr = 0;
+    u32 r0 = 0;
+    u32 modeObj = 0;
+    u32 modeObjCb4 = 0;
+    u32 modeObjCb8 = 0;
+    u32 modeObjCb10 = 0;
+    u32 selectedRoleIdShadow = 0;
+    u32 firstRoleId = 0;
+    u32 firstRoleLevel = 0;
+    u8 firstRoleSex = 0;
+    u8 firstRoleJob = 0;
+    char firstRoleName[96];
+    u32 listPtr = 0;
+    u32 activeRoleIndex = 0;
+    u32 roleFamily = 0;
+    u8 state0 = 0;
+    u8 ready = 0;
+    u8 slotLimit = 0;
+    u8 initDone = 0;
+    u8 roleCount = 0;
+    u8 tag1 = 0;
+    u8 tag2 = 0;
+    u16 mode = 0;
+    u16 sel0 = 0;
+    u16 sel1 = 0;
+    u16 ui56 = 0;
+    u16 ui58 = 0;
+    u16 ui60 = 0;
+    u16 ui62 = 0;
+    u16 ui64 = 0;
+
+    memset(firstRoleName, 0, sizeof(firstRoleName));
+
+    if (!base && vmAddedScreen)
+        base = vm_screen_stack_lookup_module_base(vmAddedScreen);
+    if (!base && g_currentScreenThis)
+        base = vm_screen_stack_lookup_module_base(g_currentScreenThis + 0x18);
+
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+
+    if (base)
+    {
+        (void)uc_mem_read(MTK, base + 10728, &state0, 1);
+        (void)uc_mem_read(MTK, base + 10737, &slotLimit, 1);
+        (void)uc_mem_read(MTK, base + 10748, &mode, 2);
+        (void)uc_mem_read(MTK, base + 10750, &sel0, 2);
+        (void)uc_mem_read(MTK, base + 10752, &sel1, 2);
+        (void)uc_mem_read(MTK, base + 10754, &initDone, 1);
+        (void)uc_mem_read(MTK, base + 10756, &ui56, 2);
+        (void)uc_mem_read(MTK, base + 10758, &ui58, 2);
+        (void)uc_mem_read(MTK, base + 10760, &ui60, 2);
+        (void)uc_mem_read(MTK, base + 10762, &ui62, 2);
+        (void)uc_mem_read(MTK, base + 10764, &ui64, 2);
+        (void)uc_mem_read(MTK, base + 10788, &listPtr, 4);
+        (void)uc_mem_read(MTK, base + 11046, &ready, 1);
+        (void)uc_mem_read(MTK, base + 11108, &roleFamily, 4);
+        (void)uc_mem_read(MTK, base + 11124, &activeRoleIndex, 4);
+        (void)uc_mem_read(MTK, base + 10444, &modeObj, 4);
+    }
+    if (modeObj)
+    {
+        (void)uc_mem_read(MTK, modeObj + 0x04, &modeObjCb4, 4);
+        (void)uc_mem_read(MTK, modeObj + 0x08, &modeObjCb8, 4);
+        (void)uc_mem_read(MTK, modeObj + 0x10, &modeObjCb10, 4);
+    }
+    if (listPtr)
+    {
+        (void)uc_mem_read(MTK, listPtr, &roleCount, 1);
+        (void)uc_mem_read(MTK, listPtr + 1, &tag1, 1);
+        (void)uc_mem_read(MTK, listPtr + 2, &tag2, 1);
+        (void)uc_mem_read(MTK, listPtr + 2044, &selectedRoleIdShadow, 4);
+        if (roleCount > 0)
+        {
+            (void)uc_mem_read(MTK, listPtr + 104, &firstRoleId, 4);
+            (void)uc_mem_read(MTK, listPtr + 176, &firstRoleLevel, 4);
+            (void)uc_mem_read(MTK, listPtr + 324, &firstRoleSex, 1);
+            (void)uc_mem_read(MTK, listPtr + 325, &firstRoleJob, 1);
+            vm_net_read_guest_gbk_label(listPtr + 72, firstRoleName, sizeof(firstRoleName));
+        }
+    }
+
+    vm_net_trace("trace_title_role_path label=%s pc=%08x lr=%08x last=%08x tick=%u"
+                 " r0=%08x state0=%u ready=%u mode=%u sel=%u,%u"
+                 " slotLimit=%u initDone=%u ui56=%u ui58=%u ui60=%u ui62=%u ui64=%u"
+                 " listPtr=%08x roleCount=%u tag=%u,%u activeRoleIndex=%u roleFamily=%u"
+                 " role0={id:%u lvl:%u sex:%u job:%u name:%s} selectedRoleIdShadow=%u"
+                 " modeObj=%08x cb4=%08x cb8=%08x cb10=%08x activeScreen=%08x currentThis=%08x\n",
+                 label ? label : "?",
+                 pc,
+                 lr,
+                 lastAddress,
+                 g_schedulerTick,
+                 r0,
+                 (u32)state0,
+                 (u32)ready,
+                 (u32)mode,
+                 (u32)sel0,
+                 (u32)sel1,
+                 (u32)slotLimit,
+                 (u32)initDone,
+                 (u32)ui56,
+                 (u32)ui58,
+                 (u32)ui60,
+                 (u32)ui62,
+                 (u32)ui64,
+                 listPtr,
+                 (u32)roleCount,
+                 (u32)tag1,
+                 (u32)tag2,
+                 activeRoleIndex,
+                 roleFamily,
+                 firstRoleId,
+                 firstRoleLevel,
+                 (u32)firstRoleSex,
+                 (u32)firstRoleJob,
+                 firstRoleName[0] ? firstRoleName : "<none>",
+                 selectedRoleIdShadow,
+                 modeObj,
+                 modeObjCb4,
+                 modeObjCb8,
+                 modeObjCb10,
+                 vmAddedScreen,
+                 g_currentScreenThis);
+}
+
+static void vm_net_trace_title_rolelist_reader_methods(const char *label, u32 pc)
+{
+    u32 lr = 0;
+    u32 sp = 0;
+    u32 readerBuf = 0;
+    u32 fnV20 = 0;
+    u32 fnV21 = 0;
+    u32 fnV22 = 0;
+    u32 fnV23 = 0;
+    u32 fnV24 = 0;
+
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+
+    readerBuf = sp + 0x08;
+    (void)uc_mem_read(MTK, sp + 0x424, &fnV20, 4);
+    (void)uc_mem_read(MTK, sp + 0x428, &fnV21, 4);
+    (void)uc_mem_read(MTK, sp + 0x42C, &fnV22, 4);
+    (void)uc_mem_read(MTK, sp + 0x430, &fnV23, 4);
+    (void)uc_mem_read(MTK, sp + 0x434, &fnV24, 4);
+
+    vm_net_trace("trace_title_rolelist_reader_methods label=%s pc=%08x lr=%08x last=%08x tick=%u"
+                 " sp=%08x readerBuf=%08x v20=%08x v21=%08x v22=%08x v23=%08x v24=%08x"
+                 " activeScreen=%08x currentThis=%08x\n",
+                 label ? label : "?",
+                 pc,
+                 lr,
+                 lastAddress,
+                 g_schedulerTick,
+                 sp,
+                 readerBuf,
+                 fnV20,
+                 fnV21,
+                 fnV22,
+                 fnV23,
+                 fnV24,
+                 vmAddedScreen,
+                 g_currentScreenThis);
+}
+
+static void vm_net_trace_title_role_select_action(const char *label, u32 pc)
+{
+    u32 base = g_currentScreenModuleBase;
+    u32 lr = 0;
+    u32 r0 = 0;
+    u32 listPtr = 0;
+    u32 selectedRoleIdShadow = 0;
+    u32 firstRoleId = 0;
+    u32 roleFamily = 0;
+    u32 activeRoleIndex = 0;
+    u8 roleCount = 0;
+    u16 mode = 0;
+    u16 sel0 = 0;
+    u16 sel1 = 0;
+    char firstRoleName[96];
+
+    memset(firstRoleName, 0, sizeof(firstRoleName));
+
+    if (!base && vmAddedScreen)
+        base = vm_screen_stack_lookup_module_base(vmAddedScreen);
+    if (!base && g_currentScreenThis)
+        base = vm_screen_stack_lookup_module_base(g_currentScreenThis + 0x18);
+
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+
+    if (base)
+    {
+        (void)uc_mem_read(MTK, base + 10748, &mode, 2);
+        (void)uc_mem_read(MTK, base + 10750, &sel0, 2);
+        (void)uc_mem_read(MTK, base + 10752, &sel1, 2);
+        (void)uc_mem_read(MTK, base + 10788, &listPtr, 4);
+        (void)uc_mem_read(MTK, base + 11108, &roleFamily, 4);
+        (void)uc_mem_read(MTK, base + 11124, &activeRoleIndex, 4);
+    }
+    if (listPtr)
+    {
+        (void)uc_mem_read(MTK, listPtr, &roleCount, 1);
+        (void)uc_mem_read(MTK, listPtr + 2044, &selectedRoleIdShadow, 4);
+        if (roleCount > 0)
+        {
+            (void)uc_mem_read(MTK, listPtr + 104, &firstRoleId, 4);
+            vm_net_read_guest_gbk_label(listPtr + 72, firstRoleName, sizeof(firstRoleName));
+        }
+    }
+
+    vm_net_trace("trace_title_role_select_action label=%s pc=%08x lr=%08x last=%08x tick=%u"
+                 " r0=%08x mode=%u sel=%u,%u roleFamily=%u activeRoleIndex=%u"
+                 " listPtr=%08x roleCount=%u selectedRoleIdShadow=%u role0.id=%u role0.name=%s"
+                 " activeScreen=%08x currentThis=%08x\n",
+                 label ? label : "?",
+                 pc,
+                 lr,
+                 lastAddress,
+                 g_schedulerTick,
+                 r0,
+                 (u32)mode,
+                 (u32)sel0,
+                 (u32)sel1,
+                 roleFamily,
+                 activeRoleIndex,
+                 listPtr,
+                 (u32)roleCount,
+                 selectedRoleIdShadow,
+                 firstRoleId,
+                 firstRoleName[0] ? firstRoleName : "<none>",
+                 vmAddedScreen,
+                 g_currentScreenThis);
+}
+
+void vm_net_trace_current_net_object_write(uint64_t address, uint32_t size, int64_t value)
+{
+    u32 writeStart = (u32)address;
+    u32 writeEnd = writeStart + size;
+    u32 callbackSlot = 0;
+    u32 oldValue = 0;
+    u32 newValue = 0;
+    u32 callback0c = 0;
+    u32 callback10 = 0;
+
+    if (!g_netCurrentObject || size == 0)
+        return;
+
+    callbackSlot = g_netCurrentObject + 0x14;
+    if (writeEnd <= callbackSlot || writeStart >= callbackSlot + 4)
+        return;
+
+    (void)uc_mem_read(MTK, callbackSlot - 8, &callback0c, 4);
+    (void)uc_mem_read(MTK, callbackSlot - 4, &callback10, 4);
+    (void)uc_mem_read(MTK, callbackSlot, &oldValue, 4);
+    newValue = (u32)value;
+
+    vm_net_trace("trace_current_net_object_write label=callback obj=%08x slot=%08x old=%08x new=%08x"
+                 " peer0c=%08x peer10=%08x writeAddr=%08x writeSize=%u raw=%08x"
+                 " activeScreen=%08x currentThis=%08x tick=%u last=%08x\n",
+                 g_netCurrentObject,
+                 callbackSlot,
+                 oldValue,
+                 newValue,
+                 callback0c,
+                 callback10,
                  writeStart,
                  size,
                  (u32)value,
@@ -3102,6 +3858,66 @@ static void vm_net_trace_status_meter_rebuild_site(u32 pc)
                  meterSecondaryDisplayMax,
                  pendingPrimaryDisplayMax,
                  pendingSecondaryDisplayMax,
+                 vmAddedScreen,
+                 g_currentScreenThis);
+}
+
+static void vm_scene_seed_status_meter_displaymax_fallback(u32 pc)
+{
+    u32 hudState = 0;
+    u32 currentSceneNode = 0;
+    u32 statusMeterNode = 0;
+    u32 n2 = 0;
+    u32 sourceHead = 0;
+    u32 currentPrimaryBaseMax = 0;
+    u32 currentSecondaryBaseMax = 0;
+    u32 currentPrimaryDisplayMax = 0;
+    u32 currentSecondaryDisplayMax = 0;
+    u32 meterPrimaryDisplayMax = 0;
+    u32 meterSecondaryDisplayMax = 0;
+
+    if (pc != 0x100FF26 || !Global_R9)
+        return;
+
+    uc_reg_read(MTK, UC_ARM_REG_R6, &n2);
+    if (n2 != 1)
+        return;
+
+    hudState = Global_R9 + 0x5C64;
+    uc_mem_read(MTK, hudState + 0x40, &currentSceneNode, 4);
+    uc_mem_read(MTK, hudState + 0x48, &statusMeterNode, 4);
+    uc_mem_read(MTK, Global_R9 + 0x6048, &sourceHead, 4);
+
+    if (!currentSceneNode || !statusMeterNode || sourceHead != 0)
+        return;
+
+    uc_mem_read(MTK, currentSceneNode + 0xBC, &currentPrimaryBaseMax, 4);
+    uc_mem_read(MTK, currentSceneNode + 0xC0, &currentSecondaryBaseMax, 4);
+    uc_mem_read(MTK, currentSceneNode + 0xC4, &currentPrimaryDisplayMax, 4);
+    uc_mem_read(MTK, currentSceneNode + 0xC8, &currentSecondaryDisplayMax, 4);
+    uc_mem_read(MTK, statusMeterNode + 0xC4, &meterPrimaryDisplayMax, 4);
+    uc_mem_read(MTK, statusMeterNode + 0xC8, &meterSecondaryDisplayMax, 4);
+
+    if (meterPrimaryDisplayMax != 0 || meterSecondaryDisplayMax != 0)
+        return;
+    if (currentPrimaryBaseMax == 0 && currentSecondaryBaseMax == 0)
+        return;
+
+    uc_mem_write(MTK, statusMeterNode + 0xC4, &currentPrimaryBaseMax, 4);
+    uc_mem_write(MTK, statusMeterNode + 0xC8, &currentSecondaryBaseMax, 4);
+    uc_mem_write(MTK, currentSceneNode + 0xC4, &currentPrimaryBaseMax, 4);
+    uc_mem_write(MTK, currentSceneNode + 0xC8, &currentSecondaryBaseMax, 4);
+
+    vm_net_trace("trace_status_meter_seed_fallback pc=%08x last=%08x tick=%u n2=%u sourceHead=%08x currentNode=%08x meterNode=%08x seedDisplay=%u/%u activeScreen=%08x currentThis=%08x\n",
+                 pc,
+                 lastAddress,
+                 g_schedulerTick,
+                 n2,
+                 sourceHead,
+                 currentSceneNode,
+                 statusMeterNode,
+                 currentPrimaryBaseMax,
+                 currentSecondaryBaseMax,
                  vmAddedScreen,
                  g_currentScreenThis);
 }
@@ -3617,6 +4433,11 @@ static bool vm_net_mock_put_object_u8(u8 *out, u32 outCap, u32 *pos, const char 
     return vm_net_mock_put_object_entry(out, outCap, pos, name, encoded, sizeof(encoded));
 }
 
+static bool vm_net_mock_put_object_ascii_digit(u8 *out, u32 outCap, u32 *pos, const char *name, u8 digit)
+{
+    return vm_net_mock_put_object_u8(out, outCap, pos, name, (u8)('0' + digit));
+}
+
 static bool vm_net_mock_put_object_u32(u8 *out, u32 outCap, u32 *pos, const char *name, u32 value)
 {
     u8 encoded[] = {0x00, 0x04, (u8)(value >> 24), (u8)(value >> 16), (u8)(value >> 8), (u8)value};
@@ -3760,8 +4581,19 @@ static u32 vm_net_mock_build_update_chunk_response(const u8 *request, u32 reques
         return 0;
 
     static u8 updateData[131072];
+    char requestName[256];
+    requestName[0] = 0;
+    bool haveRequestName = vm_net_mock_get_object_string_field(request, requestLen, "name", requestName, sizeof(requestName)) &&
+                           requestName[0] != 0;
+    u8 requestType = 0;
+    bool haveRequestType = vm_net_mock_get_object_u8_field(request, requestLen, "type", &requestType);
     const char *payloadName = NULL;
-    u32 updateLen = vm_net_mock_load_resource_update_payload(request, requestLen, updateData, sizeof(updateData), &payloadName);
+    u32 updateLen = vm_net_mock_load_resource_update_payload(request,
+                                                             requestLen,
+                                                             haveRequestName ? requestName : NULL,
+                                                             updateData,
+                                                             sizeof(updateData),
+                                                             &payloadName);
     if (updateLen == 0)
         return 0;
 
@@ -3783,7 +4615,7 @@ static u32 vm_net_mock_build_update_chunk_response(const u8 *request, u32 reques
         return 0;
     if (!vm_net_mock_put_object_entry(out, outCap, &pos, "version", (const u8 *)"\x00\x01", 2))
         return 0;
-    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "type", 0))
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "type", haveRequestType ? requestType : 0))
         return 0;
     if (!vm_net_mock_put_object_string(out, outCap, &pos, "name", payloadName ? payloadName : "MMORPGTempcbm"))
         return 0;
@@ -3796,8 +4628,15 @@ static u32 vm_net_mock_build_update_chunk_response(const u8 *request, u32 reques
     out[7] = 7;
     out[8] = 0;
     vm_net_mock_finish_wt_object(out, 5, pos);
-    vm_net_trace("mock_update_chunk_response name=%s start=%u chunk=%u totalsize=%u crc=%u\n",
-                 payloadName ? payloadName : "MMORPGTempcbm", start, chunkLen, updateLen, crc);
+    vm_net_trace("mock_update_chunk_response reqName=%s reqType=%u name=%s type=%u start=%u chunk=%u totalsize=%u crc=%u\n",
+                 haveRequestName ? requestName : "<empty>",
+                 haveRequestType ? requestType : 0,
+                 payloadName ? payloadName : "MMORPGTempcbm",
+                 haveRequestType ? requestType : 0,
+                 start,
+                 chunkLen,
+                 updateLen,
+                 crc);
     return pos;
 }
 
@@ -4293,6 +5132,151 @@ static u32 vm_net_mock_build_scene_default_event_response(u8 *out, u32 outCap)
     return pos;
 }
 
+static bool vm_net_mock_is_scene_resource_followup_request(const u8 *request, u32 requestLen)
+{
+    u8 typeValue = 0;
+    if (request == NULL || requestLen != 49)
+        return false;
+    if (!vm_net_mock_request_contains_object(request, requestLen, 1, 0x0c, 1) ||
+        !vm_net_mock_request_contains_object(request, requestLen, 1, 7, 42) ||
+        !vm_net_mock_request_contains_object(request, requestLen, 1, 6, 1) ||
+        !vm_net_mock_request_contains_object(request, requestLen, 1, 6, 13) ||
+        !vm_net_mock_request_contains_object(request, requestLen, 1, 6, 14) ||
+        !vm_net_mock_request_contains_object(request, requestLen, 1, 2, 10) ||
+        !vm_net_mock_request_contains_object(request, requestLen, 1, 0x19, 5))
+        return false;
+    if (!vm_net_mock_get_object_u8_field(request, requestLen, "Type", &typeValue))
+        return false;
+    return typeValue == 101;
+}
+
+static bool vm_net_mock_append_taskinfo_empty1_object(u8 *out, u32 outCap, u32 *pos)
+{
+    u32 objectStart = 0;
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 6, 1, &objectStart))
+        return false;
+    if (!vm_net_mock_put_object_blob(out, outCap, pos, "taskinfo", NULL, 0))
+        return false;
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
+static bool vm_net_mock_append_tasktypes_empty13_object(u8 *out, u32 outCap, u32 *pos)
+{
+    u32 objectStart = 0;
+    u32 blobPos = 0;
+    u8 blob[64];
+
+    memset(blob, 0, sizeof(blob));
+    for (u32 i = 0; i < 6; ++i)
+    {
+        if (!vm_net_mock_seq_put_i16(blob, sizeof(blob), &blobPos, 0))
+            return false;
+        if (!vm_net_mock_seq_put_string(blob, sizeof(blob), &blobPos, ""))
+            return false;
+    }
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 6, 13, &objectStart))
+        return false;
+    if (!vm_net_mock_put_object_blob(out, outCap, pos, "tasktypes", blob, (u16)blobPos))
+        return false;
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
+static bool vm_net_mock_append_taskaction_empty14_object(u8 *out, u32 outCap, u32 *pos)
+{
+    u32 objectStart = 0;
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 6, 14, &objectStart))
+        return false;
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "action", 0))
+        return false;
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "tasknum", 0))
+        return false;
+    if (!vm_net_mock_put_object_blob(out, outCap, pos, "taskinfo", NULL, 0))
+        return false;
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
+static bool vm_net_mock_append_actor_other_empty10_object(u8 *out, u32 outCap, u32 *pos)
+{
+    u32 objectStart = 0;
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 2, 10, &objectStart))
+        return false;
+    if (!vm_net_mock_put_object_u32(out, outCap, pos, "othernum", 0))
+        return false;
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
+static bool vm_net_mock_append_info_banner_clear12_object(u8 *out, u32 outCap, u32 *pos)
+{
+    u32 objectStart = 0;
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 0x19, 12, &objectStart))
+        return false;
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", 4))
+        return false;
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
+static bool vm_net_mock_append_info_banner_result5_object(u8 *out, u32 outCap, u32 *pos)
+{
+    u32 objectStart = 0;
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 0x19, 5, &objectStart))
+        return false;
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", 4))
+        return false;
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
+static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request, u32 requestLen,
+                                                              u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u8 objectCount = 0;
+    if (outCap < pos || !vm_net_mock_is_scene_resource_followup_request(request, requestLen))
+        return 0;
+
+    if (!vm_net_mock_append_login_tail_skill_objects(out, outCap, &pos))
+        return 0;
+    objectCount += 2;
+
+    if (!vm_net_mock_append_taskinfo_empty1_object(out, outCap, &pos))
+        return 0;
+    objectCount += 1;
+
+    /*
+     * net_handle_task_response_dispatch() case 13 walks a fixed six-entry
+     * `(i16 + short string)` table from `tasktypes`, and case 14 has a safe
+     * zero-item branch when `action=0`, `tasknum=0`, and `taskinfo` is empty.
+     * Reply with the narrowest all-empty forms that still satisfy the
+     * confirmed per-case parser structure.
+     */
+    if (!vm_net_mock_append_tasktypes_empty13_object(out, outCap, &pos))
+        return 0;
+    objectCount += 1;
+
+    if (!vm_net_mock_append_taskaction_empty14_object(out, outCap, &pos))
+        return 0;
+    objectCount += 1;
+
+    if (!vm_net_mock_append_actor_other_empty10_object(out, outCap, &pos))
+        return 0;
+    objectCount += 1;
+
+    if (!vm_net_mock_append_info_banner_result5_object(out, outCap, &pos))
+        return 0;
+    objectCount += 1;
+
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    vm_net_trace("mock_scene_resource_followup_response objects=%u taskinfo=empty tasktypes=6xempty task14=zero othernum=0 result25_5=4 len=%u\n",
+                 objectCount, pos);
+    return pos;
+}
+
 static u32 vm_net_mock_build_short_wt_control_echo_response(const u8 *request, u32 requestLen,
                                                             u8 kind, u8 subtype,
                                                             u8 *out, u32 outCap)
@@ -4373,12 +5357,23 @@ static const char *vm_net_mock_actor_resource_name(u8 actorJob, u8 actorSex)
     return actorNames[tableIndex];
 }
 
-static const char *vm_net_mock_actor_motion_resource_name(u8 actorJob, u8 actorSex)
+static const char *vm_net_mock_actor_preview_image_name(u8 actorJob, u8 actorSex)
 {
-    const char *overrideName = vm_net_mock_env_str("CBE_ACTOR_MOTION_RESOURCE", "");
+    static const char *imageNames[6] = {
+        "h_warriorwalk1.gif",
+        "hW_warriorwalk1.gif",
+        "h_assassinwalk1.gif",
+        "hW_assassinwalk1.gif",
+        "h_magewalk1.gif",
+        "hW_mage1.gif",
+    };
+    const char *overrideName = vm_net_mock_env_str("CBE_ACTOR_PREVIEW_IMAGE", "");
+    u32 tableIndex = vm_net_mock_actor_resource_index(actorJob, actorSex);
     if (overrideName != NULL && overrideName[0] != 0)
         return overrideName;
-    return vm_net_mock_actor_resource_name(actorJob, actorSex);
+    if (tableIndex >= sizeof(imageNames) / sizeof(imageNames[0]))
+        tableIndex = 0;
+    return imageNames[tableIndex];
 }
 
 static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
@@ -4457,7 +5452,14 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
         return 0;
     if (!vm_net_mock_seq_put_string(out, outCap, &pos, "10001"))
         return 0;
-    if (!vm_net_mock_seq_put_string(out, outCap, &pos, roleName))
+    /*
+     * Static+runtime now pin this 20-byte mid-body string to actor+0x10A.
+     * scene_draw_actor_pass later feeds that exact field into the direct image
+     * loader path (`sub_100D3EE -> a1+28`), so it must be a concrete image
+     * resource name rather than a role display name or `.actor` container name.
+     */
+    if (!vm_net_mock_seq_put_string(out, outCap, &pos,
+                                    vm_net_mock_actor_preview_image_name(actorJob, actorSex)))
         return 0;
 
     const u32 detailFields2[] = {
@@ -4527,7 +5529,7 @@ static u32 vm_net_mock_build_title_role_list_actorinfo(u8 *out, u32 outCap)
     u32 pos = 0;
     const char roleName[] = "\xcf\xc0\xbd\xa3\xbd\xad\xba\xfe"; /* GBK: xia jian jiang hu */
     u32 roleId = 10001;
-    u32 roleLevel = vm_net_mock_env_u8("CBE_ROLE_LEVEL", 1);
+    u16 roleLevel = (u16)vm_net_mock_env_u8("CBE_ROLE_LEVEL", 1);
     u8 actorJob = vm_net_mock_env_u8("CBE_ACTOR_JOB", 1);
     u8 actorSex = vm_net_mock_env_u8("CBE_ACTOR_SEX", 0);
 
@@ -4535,12 +5537,18 @@ static u32 vm_net_mock_build_title_role_list_actorinfo(u8 *out, u32 outCap)
         roleLevel = 1;
     if (actorJob == 0 || actorJob > 3)
         actorJob = 1;
-    if (actorSex > 1)
-        actorSex = 0;
+    /*
+     * title target50_render() derives a role portrait table index from the
+     * compact role-list record as `job * 2 + (sex - 1)`, so the title-side
+     * role-list contract expects `sex` to be 1-based here. A zero value wraps
+     * into 0xFF and drives the render path into an invalid callback slot.
+     */
+    if (actorSex < 1 || actorSex > 2)
+        actorSex = 1;
 
     /*
      * mmTitleMstarWqvga.cbm sub_3544() parses its actorinfo field as:
-     *   count, then repeated (u32, u8, u8, string, u32).
+     *   count, then repeated (tagged u32, tagged u8, tagged u8, len16+cstr, tagged i16).
      * The field name collides with later in-scene actorinfo, but the title-side
      * payload is a compact role-list entry table instead of the large player blob.
      */
@@ -4554,7 +5562,7 @@ static u32 vm_net_mock_build_title_role_list_actorinfo(u8 *out, u32 outCap)
         return 0;
     if (!vm_net_mock_seq_put_string(out, outCap, &pos, roleName))
         return 0;
-    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, roleLevel))
+    if (!vm_net_mock_seq_put_i16(out, outCap, &pos, roleLevel))
         return 0;
 
     return pos;
@@ -4674,7 +5682,7 @@ static u32 vm_net_mock_build_login_primary_validation_response(u8 *out, u32 outC
 
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 1, 1, &objectStart))
         return 0;
-    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
+    if (!vm_net_mock_put_object_ascii_digit(out, outCap, &pos, "result", 1))
         return 0;
     if (!vm_net_mock_put_object_entry(out, outCap, &pos, "serverinfo", serverInfo, (u16)serverInfoLen))
         return 0;
@@ -4700,7 +5708,7 @@ static u32 vm_net_mock_build_login_failure_response(u8 requestSubtype, const cha
 
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 1, responseSubtype, &objectStart))
         return 0;
-    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 2))
+    if (!vm_net_mock_put_object_ascii_digit(out, outCap, &pos, "result", 2))
         return 0;
     if (!vm_net_mock_put_object_string(out, outCap, &pos, "information", message))
         return 0;
@@ -4750,7 +5758,7 @@ static bool vm_net_mock_append_title_mode15_result_object(u8 *out, u32 outCap, u
      */
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 1, 15, &objectStart))
         return false;
-    if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", 1))
+    if (!vm_net_mock_put_object_ascii_digit(out, outCap, pos, "result", 1))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
     return true;
@@ -4780,6 +5788,72 @@ static u32 vm_net_mock_build_title_mode15_response(u8 *out, u32 outCap)
     return pos;
 }
 
+static u32 vm_net_mock_build_title_rolelist_stage_response(u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u8 actorinfo[128];
+    u32 actorinfoLen = 0;
+
+    if (outCap < pos)
+        return 0;
+
+    actorinfoLen = vm_net_mock_build_title_role_list_actorinfo(actorinfo, sizeof(actorinfo));
+    if (actorinfoLen == 0)
+        return 0;
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 1, 16, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 1, 4, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_entry(out, outCap, &pos, "actorinfo", actorinfo, (u16)actorinfoLen))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+
+    vm_net_mock_finish_wt_packet(out, pos, 2);
+    vm_net_trace("mock_title_rolelist_stage_response top=1,1,16+1,1,4 actorinfo_len=%u len=%u\n",
+                 actorinfoLen, pos);
+    return pos;
+}
+
+static u32 vm_net_mock_build_title_role_select_response(const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u32 actorId = 10001;
+    u32 actorInfoLen = 0;
+
+    if (outCap < pos)
+        return 0;
+
+    (void)vm_net_mock_get_object_u32_field(request, requestLen, "actorID", &actorId);
+
+    /* A minimal {result, actorID} subtype-6 ack is accepted by
+     * role_manage_screen_handle_network(case 6), but as soon as subtype-15
+     * pushes the client into the next bootstrap path the main scene-side logic
+     * also sees this subtype-6 object. Static scene_runtime_init_and_sync()
+     * treats subtype 6 as a full scene-enter family packet and reads fields
+     * such as revivetype/type/practiseflag/pcimg/.../actorinfo from it. Reuse
+     * the existing full subtype-6 success shell here so the follow-up subtype-15
+     * experiment is not blocked by a missing scene-enter payload contract.
+     */
+    if (!vm_net_mock_append_login_success_object(out, outCap, &pos, 6, true, &actorInfoLen))
+        return 0;
+
+    if (!vm_net_mock_append_title_mode15_result_object(out, outCap, &pos))
+        return 0;
+
+    vm_net_mock_finish_wt_packet(out, pos, 2);
+    vm_net_trace("mock_title_role_select_response top=1,1,6(full)+1,1,15 actorID=%u actorinfo_len=%u len=%u\n",
+                 actorId,
+                 actorInfoLen,
+                 pos);
+    return pos;
+}
+
 static u32 vm_net_mock_build_login_alt12_success_response(u8 *out, u32 outCap)
 {
     u32 pos = 5;
@@ -4795,7 +5869,7 @@ static u32 vm_net_mock_build_login_alt12_success_response(u8 *out, u32 outCap)
      */
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 1, 12, &objectStart))
         return 0;
-    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
+    if (!vm_net_mock_put_object_ascii_digit(out, outCap, &pos, "result", 1))
         return 0;
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);
@@ -4819,11 +5893,12 @@ static u32 vm_net_mock_build_login_actor_response(u8 requestSubtype, u8 *out, u3
     vm_net_mock_finish_wt_packet(out, pos, 1);
     u8 logJob = vm_net_mock_env_u8("CBE_ACTOR_JOB", 1);
     u8 logSex = vm_net_mock_env_u8("CBE_ACTOR_SEX", 0);
-    vm_net_trace("mock_login_actor_response actorinfo_len=%u top=1,1,%u job=%u sex=%u actor=%s len=%u\n",
+    vm_net_trace("mock_login_actor_response actorinfo_len=%u top=1,1,%u job=%u sex=%u preview=%s actor=%s len=%u\n",
                  actorInfoLen,
                  actorSubtype,
                  logJob,
                  logSex,
+                 vm_net_mock_actor_preview_image_name(logJob, logSex),
                  vm_net_mock_actor_resource_name(logJob, logSex),
                  pos);
     return pos;
@@ -5134,6 +6209,14 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         }
     }
 
+    hookedLen = vm_net_mock_build_scene_resource_followup_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_trace("mock_default source=builtin-scene-resource-followup len=%u\n", hookedLen);
+        vm_net_log_handled_packet("builtin-scene-resource-followup", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
     if (vm_net_mock_is_login_tail_skill_request(request, requestLen))
     {
         hookedLen = vm_net_mock_build_login_tail_skill_response(out, outCap);
@@ -5149,6 +6232,26 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     u8 requestSubtype = 0;
     if (vm_net_mock_get_wt_header_kind_subtype(request, requestLen, &requestKind, &requestSubtype))
     {
+        if (requestKind == 1 && requestSubtype == 6)
+        {
+            hookedLen = vm_net_mock_build_title_role_select_response(request, requestLen, out, outCap);
+            if (hookedLen)
+            {
+                vm_net_trace("mock_default source=builtin-title-role-select len=%u\n", hookedLen);
+                vm_net_log_handled_packet("builtin-title-role-select", request, requestLen, hookedLen);
+                return hookedLen;
+            }
+        }
+        if (requestKind == 1 && requestSubtype == 16)
+        {
+            hookedLen = vm_net_mock_build_title_rolelist_stage_response(out, outCap);
+            if (hookedLen)
+            {
+                vm_net_trace("mock_default source=builtin-title-rolelist-stage len=%u\n", hookedLen);
+                vm_net_log_handled_packet("builtin-title-rolelist-stage", request, requestLen, hookedLen);
+                return hookedLen;
+            }
+        }
         if (requestKind == 0x0a && requestSubtype == 0x20)
         {
             hookedLen = vm_net_mock_build_role_list_response(out, outCap);
@@ -5281,6 +6384,7 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
         return;
 
     if (vm_net_mock_login_mode_queues_title_mode15() &&
+        requestKind == 1 && requestSubtype == 12 &&
         vm_net_mock_request_contains(request, readLen, "coreVer") &&
         vm_net_mock_request_contains(request, readLen, "appVer") &&
         (vm_net_mock_request_contains(request, readLen, "username") ||
@@ -5824,35 +6928,6 @@ void mouseEvent(int type, int x, int y)
     EnqueueVMEvent(VM_EVENT_TOUCHSCREEN, type, (y << 16) | x);
 }
 
-static void scheduler_configure_auto_touch(void)
-{
-    if (g_autoTouchConfigured)
-        return;
-    g_autoTouchConfigured = 1;
-
-    const char *spec = getenv("CBE_AUTO_TOUCH");
-    if (spec == NULL || spec[0] == 0)
-        return;
-
-    unsigned tick = 300;
-    int x = LCD_WIDTH / 2;
-    int y = LCD_HEIGHT - 45;
-    sscanf(spec, "%u,%d,%d", &tick, &x, &y);
-    g_autoTouchTick = tick;
-    g_autoTouchX = x;
-    g_autoTouchY = y;
-}
-
-static void scheduler_fire_auto_touch(void)
-{
-    scheduler_configure_auto_touch();
-    if (g_autoTouchTick == 0 || g_autoTouchFired || g_schedulerTick < g_autoTouchTick)
-        return;
-    g_autoTouchFired = 1;
-    vm_net_trace("auto_touch tick=%u x=%d y=%d\n", g_schedulerTick, g_autoTouchX, g_autoTouchY);
-    EnqueueVMEvent(VM_EVENT_TOUCHSCREEN, MR_MOUSE_DOWN, (g_autoTouchY << 16) | (g_autoTouchX & 0xffff));
-    EnqueueVMEvent(VM_EVENT_TOUCHSCREEN, MR_MOUSE_UP, (g_autoTouchY << 16) | (g_autoTouchX & 0xffff));
-}
 
 void loop()
 {
@@ -6239,7 +7314,6 @@ void RunArmProgram(void *param)
                 p = scheduler_tick();
                 if (p != UC_ERR_OK)
                     break;
-                scheduler_fire_auto_touch();
                 if (tScreenInitedPtr != vmAddedScreen)
                 {
                     uc_mem_read(MTK, vmAddedScreen, &tScreenInitEntry, 4);
@@ -6407,7 +7481,6 @@ void RunArmProgram(void *param)
                     p = scheduler_tick();
                     if (p != UC_ERR_OK)
                         break;
-                    scheduler_fire_auto_touch();
                     if (screenStructChange == 1)
                         break;
                     if (g_screenRemovedWithoutNext)
@@ -12278,6 +13351,59 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         const char *label = address == 0x1003856 ? "scene_system_bootstrap" : "shared_event_owner_init";
         vm_net_trace_scene_owner_site(label, (u32)address);
     }
+    if (address == 0x1048FCA || address == 0x1048FB4)
+    {
+        const char *label = address == 0x1048FCA ? "manager_call_cb10" : "manager_call_cb8";
+        vm_net_trace_title_child_manager_call(label, (u32)address);
+    }
+    if (address == 0x05019950 || address == 0x05018F90 || address == 0x05018FA4 || address == 0x05018FB8 || address == 0x05018FC2)
+    {
+        const char *label = "title_login_dispatch_unknown";
+        if (address == 0x05019950)
+            label = "login_primary_dispatch_entry";
+        else if (address == 0x05018F90)
+            label = "login_result_dispatch_entry";
+        else if (address == 0x05018FA4)
+            label = "login_result_dispatch_success";
+        else if (address == 0x05018FB8)
+            label = "login_result_dispatch_fail2";
+        else if (address == 0x05018FC2)
+            label = "login_result_dispatch_fail6";
+        vm_net_trace_title_login_dispatch(label, (u32)address);
+    }
+    if (address == 0x0501A114 || address == 0x0501A6A2 || address == 0x0501AE60 || address == 0x0501AE88 || address == 0x0501B2C4 || address == 0x0501BFBC)
+    {
+        const char *label = "title_role_path_unknown";
+        if (address == 0x0501A114)
+            label = "target4c_handle_network";
+        else if (address == 0x0501A6A2)
+            label = "target50_init";
+        else if (address == 0x0501AE60)
+            label = "target50_dispatch_mode_input";
+        else if (address == 0x0501AE88)
+            label = "target50_handle_input";
+        else if (address == 0x0501B2C4)
+            label = "target50_render";
+        else if (address == 0x0501BFBC)
+            label = "target50_handle_network";
+        vm_net_trace_title_role_path(label, (u32)address);
+    }
+    if (address == 0x0501A20E || address == 0x0501A22A)
+    {
+        const char *label = (address == 0x0501A20E) ? "rolelist_reader_methods_ready" : "rolelist_reader_first_record";
+        vm_net_trace_title_rolelist_reader_methods(label, (u32)address);
+    }
+    if (address == 0x0501A574 || address == 0x0501A5CC || address == 0x0501AA36)
+    {
+        const char *label = "role_select_unknown";
+        if (address == 0x0501A574)
+            label = "role_manage_enter_action_menu";
+        else if (address == 0x0501A5CC)
+            label = "role_manage_select_role_slot";
+        else if (address == 0x0501AA36)
+            label = "role_manage_submit_selected_role";
+        vm_net_trace_title_role_select_action(label, (u32)address);
+    }
     if (address == 0x10124AA)
     {
         vm_net_trace_sub_1010228_callsite("net_handle_group_info", (u32)address);
@@ -12335,6 +13461,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     }
     if (address == 0x100FF26 || address == 0x10100D2 || address == 0x10101E8)
     {
+        vm_scene_seed_status_meter_displaymax_fallback((u32)address);
         vm_net_trace_status_meter_rebuild_site((u32)address);
     }
     if (address == 0x1039180)
@@ -12405,8 +13532,53 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         u32 r0 = 0, lr = 0;
         uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
         uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
-        if (r0 == 4)
+        if (r0 == 1 || r0 == 2 || r0 == 4)
             vm_net_trace_update_request_prepare((u32)address, lr, r0);
+    }
+    if (address == 0x10365F0)
+    {
+        u32 r0 = 0, r1 = 0, r2 = 0, r3 = 0, lr = 0, sp = 0;
+        u32 stack0 = 0, stack4 = 0, stack8 = 0, stack12 = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+        uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+        if (sp)
+        {
+            (void)uc_mem_read(MTK, sp, &stack0, 4);
+            (void)uc_mem_read(MTK, sp + 4, &stack4, 4);
+            (void)uc_mem_read(MTK, sp + 8, &stack8, 4);
+            (void)uc_mem_read(MTK, sp + 12, &stack12, 4);
+        }
+        vm_net_trace_resource_request_enqueue("trace_resource_request_enqueue",
+                                              (u32)address,
+                                              lr,
+                                              r0,
+                                              r2,
+                                              r3,
+                                              stack0,
+                                              stack4,
+                                              stack8,
+                                              stack12);
+    }
+    if (address == 0x10366AC)
+    {
+        u32 r0 = 0, r1 = 0, lr = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+        vm_net_trace_resource_request_enqueue("trace_resource_request_mark",
+                                              (u32)address,
+                                              lr,
+                                              r0,
+                                              r1,
+                                              0,
+                                              0,
+                                              0,
+                                              0,
+                                              3);
     }
     if (address == 0x101A97C || address == 0x101AED2 || address == 0x101D2D6 || address == 0x101D4B4 || address == 0x101EC62)
     {

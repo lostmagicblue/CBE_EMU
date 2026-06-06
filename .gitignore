@@ -22,3 +22,5 @@ samples/raw/*
 .codex/
 .codex_tmp/
 samples/
+tmp/
+tools/

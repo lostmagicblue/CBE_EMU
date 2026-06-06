@@ -64,6 +64,7 @@ Preferred sequence for new features:
 - For network mock behavior, prefer helper builders in `src/main.c` over handwritten packet assembly.
 - Keep diagnostic logging scoped and easy to remove after verification.
 - Avoid broad refactors while chasing an unverified reverse-engineering hypothesis.
+- For runtime/UI repro steps, do not add or use automatic clicking/input by default. The user drives manual interaction, and Codex should prefer inspecting the resulting logs and traces unless the user explicitly asks for input automation.
 
 ## Validation
 

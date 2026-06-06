@@ -48,7 +48,9 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
     if (type == UC_MEM_WRITE)
     {
         vm_net_trace_title_login_write(address, size, value);
+        vm_net_trace_title_role_workspace_write(address, size, value);
         vm_net_trace_shared_event_owner_write(address, size, value);
+        vm_net_trace_current_net_object_write(address, size, value);
     }
 }
 bool hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data)

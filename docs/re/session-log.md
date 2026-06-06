@@ -12,6 +12,204 @@ Suggested entry format:
 - next:
 ```
 
+## 2026-06-06
+- changed: added a new narrow built-in mock for the first post-HUD resource-miss composite request in `src/main.c`. It matches only the current `WT len=49` packet carrying `1/12/1, 1/7/42, 1/6/1, 1/6/13, 1/6/14, 1/2/10, 1/25/5` plus `Type=101`, and replies with the currently safest statically-supported subset: `12/1(learnednum=0, learnedskill=\"\")`, `7/42(booknum=0, booksinfo=\"\")`, `6/1(taskinfo empty blob)`, `2/10(othernum=0)`, and `25/12(result=4)` via the existing info-banner clear shell. `make` passes on this build.
+- changed: kept `6/13` and `6/14` deliberately absent from that new reply for now. Static dispatch now shows `6/13` consumes a fixed six-entry `tasktypes` blob and `6/14` first branches on field `action`, so fabricating empty objects there is more likely to trip a deeper parser than to unblock scene safely.
+- evidence: `src/main.c` `vm_net_mock_is_scene_resource_followup_request()` and `vm_net_mock_build_scene_resource_followup_response()`; static IDA on `net_handle_task_response_dispatch()` (`0x0104726C`), `net_handle_actor_move_info()` case `10` (`0x01012DD6 -> sub_1012958()` reading `othernum/otherinfo`), and `net_handle_info_banner_state()` (`0x01010C7E`, only confirmed clear path is subtype `12 result=4`).
+- next: rerun once on the rebuilt binary and check whether `logs/net_packets.log` now shows `source=builtin-scene-resource-followup` instead of `assert(0)`, then use `logs/net_trace.log` to see whether the client accepts this partial follow-up shell or immediately exposes the next exact missing object family.
+
+## 2026-06-06
+- changed: added two narrow read-only resource traces in `src/main.c`: `trace_resource_request_enqueue` / `trace_resource_request_mark` on the net-manager missing-resource queue path (`0x010365F0` / `0x010366AC`), and widened `trace_update_request_prepare` so `send_update_chunk_request()` now logs `reqType=1/2/4` with best-effort GBK names. `make` passes on this build.
+- verified: the first-scene HUD divide-by-zero is no longer the active blocker on the newest clean session. `net_trace.log` now shows `trace_status_meter_seed_fallback` once at `tick=198` on the confirmed empty-head path (`n2=1 sourceHead=00000000`), and the later divide-site watcher reaches both bars with nonzero denominators: `primary ... displayMax=120` and `secondary ... displayMax=100`.
+- verified: the next live blocker is later and different. After `scene_runtime_tick label=actor_pass` at `tick=200`, the client immediately hits a local resource-open miss for GBK name `侠剑江湖`, then sends a new unhandled `WT len=49` composite request with object sequence `1/12/1, 1/7/42, 1/6/1, 1/6/13, 1/6/14, 1/2/10, 1/25/5`. This is the first post-HUD blocker on the current branch.
+- evidence: `bin/logs/net_trace.log` lines `2933` (`trace_status_meter_seed_fallback`), `3204..3208` (`draw_pass -> status_panels -> actor_pass`), `3210` (`trace_resource_open_helper ... namePtr=0540010a`), and `3214..3215` (`unhandled_packet WT len=49 ...`); `bin/logs/net_packets.log` tail for the same `len=49` dump; `bin/logs/storage_trace.log` `file_open_fail path=JHOnlineData/��������` with `file_open_fail_mem_r5_0540010a` bytes `cf c0 bd a3 bd ad ba fe`, which decode to `侠剑江湖`; newest `bin/logs/stdout_trace.log` session starts but does not append a new `Arithmetic exception: Divide By Zero`.
+- next: rerun once on the rebuilt binary and inspect the new queue traces around the same `tick~200` window. The immediate split is whether this `len=49` packet is the net-manager's missing-resource request for `侠剑江湖`, or whether a different scene/bootstrap path is constructing it after the local-open miss.
+
+## 2026-06-04
+- verified: the new `ownerObj.asyncCounter/asyncPending` watcher rules out the “pending never clears” theory. Before the first `99/1`, `sub_564_popup_tick` increments `ownerObj.asyncCounter` once per tick (`0 -> 31`), then at `tick=110` it resets the counter back to `0`, reaches `sub_564_before_cb24_dispatch`, and `sub_564_after_cb24_dispatch` shows a successful `cb24`/`open_channel` cycle (`R0=1`) that immediately writes `ownerObj.asyncPending = 1`.
+- verified: that pending state is only temporary. After the `99/1` reply is consumed and the stale `&unk_C20` queue item is committed (`queueText=050177f0`, `queueActive=1`), runtime later clears `ownerObj.asyncPending` back to `0` at `tick=124` (`last=05017612`), so the bridge is not blocked by a permanently nonzero pending field.
+- verified: the real stop happens one step earlier. Once the stale queue is live, later title-loop windows no longer show `sub_564_popup_tick`, `sub_564_before_cb24_dispatch`, or `sub_564_after_cb24_dispatch` at all; they only show `sub_59E_popup_dispatch` plus `shared_popup_bridge_cb30_guard`. Correspondingly, `ownerObj.asyncCounter` stays pinned at `0` for the rest of the delayed run while `queueActive=1` remains set.
+- implication: the current missing contract is no longer “clear `ownerObj.asyncPending`” and no longer “rearm `eventObj+16` directly”. More narrowly, the stale `&unk_C20` queue state prevents the title loop from re-entering `sub_564()` itself, so the `cb24/open_channel/event=5 -> alloc_outgoing_game_event()` chain never restarts.
+- evidence: `bin/logs/net_trace.log` `tick=80..110` for `ownerObj.asyncCounter` growth and `tick=110` `sub_564_before/after_cb24_dispatch`, `tick=118` `sub_1032_queue_commit`, `tick=124` `ownerObj.asyncPending -> 0`, and later `tick~763+` windows where `sub_59E_popup_dispatch` continues with `queueActive=1` but `asyncCounter=0` and only `cb30_guard` remains.
+- next: stop prioritizing bridge-pending semantics. The next narrow static/runtime target is `sub_59E` itself: identify the local gate that makes `queueActive=1 / queueText=&unk_C20` stop calling `sub_564`, because that is now the most direct reason no further `event=5` producer cycle can occur.
+
+## 2026-06-04
+- verified: the active title popup driver `mmTitleMstarWqvga.cbm::sub_564()` is now statically matched to main-CBE `startup_maybe_start_async_net_task()` (`0x0103A77C`). Both functions gate on a local `+0x24` pending field and `+0x20` counter, call shared-bridge `cb28`, then call the same scene-object method at `*(R9+21676)+0x15C`, and finally feed the return value into shared-bridge `cb24`.
+- verified: that shared scene-object method is `sub_1018DC6()`, not an event producer itself. Static `scene_object_vtable_init()` sets object slot `+0x15C` to `sub_1018DC6`, and `sub_1018DC6()` just returns the host string from `mmorpg_config` or the fallback `jhol.51coolbar.com:20888`.
+- implication: the real title-to-main bridge is now narrower than “some code should call `alloc_outgoing_game_event()`”. The periodic chain is `sub_564/sub_103A77C -> sub_1018DC6(host lookup) -> cb24/open_channel -> event=5 callback -> alloc_outgoing_game_event()`. So the next runtime question is whether `99/1` leaves `ownerObj+0x24` nonzero or otherwise stops the next `cb28/cb24/open_channel` cycle before it can queue another `event=5`.
+- changed: extended the read-only title popup watcher to log `ownerObj+0x20/+0x24` (`asyncCounter/asyncPending`) and added internal `sub_564` trace points at relocated `0x05017154/0x05017168/0x0501716A` so the next rerun can show host lookup, `cb24_dispatch`, and its return state directly on the stuck title path.
+- evidence: static decompile of `mmTitleMstarWqvga.cbm::sub_564()` and `0x0103A77C`, plus main-CBE `scene_object_vtable_init()` slot recovery showing `a1+0x15C = sub_1018DC6`; latest `bin/logs/net_trace.log` `tick=100..107` already shows the runtime half of the same chain (`cb28_poll -> cb24_dispatch -> open_channel connect=2 -> event=5 -> event_packet_add_field`).
+- next: rerun once on the rebuilt binary and compare `sub_564_before_cb24_dispatch` / `sub_564_after_cb24_dispatch` before and after the stale `&unk_C20` queue commit. The narrow split is now: did `ownerObj.asyncPending` stay nonzero, or did the bridge stop reaching `cb24_dispatch` entirely after `99/1`.
+
+## 2026-06-04
+- verified: on the active stuck title path, the observed rearm caller is `alloc_outgoing_game_event()` (`0x0100E2E4`), not any of the title-local queue helpers. The new `trace_event_packet_builder` shows both live `event_packet_add_field()` hits using the same LR `0100E2F9`, which IDA resolves to `alloc_outgoing_game_event`.
+- verified: this caller does not run automatically after the stale `&unk_C20` queue commit. In the latest run, the first rearm is the original pre-queue cycle at `tick=107`, then the queue commits `queueText=050177f0` at `tick=108`, and no second `event_packet_add_field()` appears until `tick=331`, when a fresh local touch/submit path runs. Between those points, `sub_59E_popup_dispatch` and `cb30_guard` keep looping with `queueActive=1`, but `eventField10` stays `0`.
+- verified: the first obvious static candidate family `sub_100E342()` is not a title-local popup helper but a main-CBE scene/event state machine. Its callers are `sub_100E976()` and large scene-side controller `sub_1016D2E()`, and both eventually lead into scene/runtime state around `R9+24884` rather than the current title module locals. So it is useful as an `alloc_outgoing_game_event()` example, but not yet evidence that the stuck title queue was supposed to pass through `sub_100E342()` itself.
+- implication: the missing contract has narrowed again. The question is no longer "who calls `event_packet_add_field()` in general" but "what path was supposed to call `alloc_outgoing_game_event()` again after `&unk_C20` became active". Current evidence says the popup queue/bridge path itself never does.
+- evidence: `bin/logs/net_trace.log` lines with `trace_event_packet_builder label=event_packet_add_field ... lr=0100e2f9` at `tick=107` and again at `tick=331`, the intervening `sub_1032_queue_commit` at `tick=108`, and the long `cb30_guard`-only span with `eventField10=0`.
+- next: stop over-focusing on `sub_100E342()` as the direct missing title callback. The better next target is whichever title-to-main bridge is supposed to enter an `alloc_outgoing_game_event()`-producing main-CBE path after `&unk_C20` queue activation, because the current stale queue loop never reaches any such caller.
+
+## 2026-06-04
+- verified: the shared child event object behind `objC+32` is an outbound WT builder, not an inbound parser. Static `sub_103478E()` calls `eventObj+40` (`event_packet_calc_size`) and `eventObj+32` (`event_packet_build_WT`) before sending bytes through the net-manager bridge, then resets the same object with `event_packet_init(..., 0, n10, n19)`. So the earlier `eventObj+16` rearm question is specifically “who adds the next outbound packet object”, not “who reparses the next inbound WT”.
+- verified: current title-local queue helpers do not answer that question directly. `sub_10C6()` is only `sub_1032(..., a3=0)`, and `title_activate_popup_screen_if_idle()` only activates `v2+10700`, optionally runs `queueCallback`, and clears `queueActive`; neither helper touches the shared child event object or its `event_packet_*` method table.
+- changed: added read-only caller tracing for `event_packet_add_field()` (`0x010345D4`) and `event_packet_init()` (`0x010346E0`), plus direct write tracing for the active shared event-builder fields `+5/+16/+20/+24/+28/+32/+36/+40`. Build validation is pending the next `make`.
+- evidence: static decompile/disassembly of `sub_103478E()`, `event_packet_build_WT()`, `event_packet_calc_size()`, `sub_10C6()`, and `title_activate_popup_screen_if_idle()`; instrumentation now lives in `src/main.c`, `src/hookRam.c`, and `src/main.h` under `trace_event_packet_builder` / `trace_event_packet_write`.
+- next: rerun once on the rebuilt binary and capture the first `trace_event_packet_builder label=event_packet_add_field` after the stale `&unk_C20` queue commit. The narrow target is now the direct LR/caller that repopulates, or fails to repopulate, the outbound builder after the first pump/reset cycle.
+
+## 2026-06-04
+- verified: the delayed-main-login experiment is a partial positive result. The delayed `1/1/x` success packet is definitely still pending late into the run (`delay_login_success_event ... delayTicks=360`, then `net_task_slots ... slot0[e=7 d=151 r1=00000168 ...]` at `tick=495`), so the later title-local behavior is not being driven by accepted login success yet.
+- verified: under that delay, the earlier "stuck forever at `25`" model is no longer true. Right after `99/1`, the usual generic cleanup still happens and `obj8_stateA` remains pinned at `25` for a while with `obj8.flag10=0`; but later in the same delayed run the local title flow re-enables the widget on its own, and `obj8_stateA` climbs again until at least `209` by `tick=494` while `byte2` is still `0` and the delayed login-success `event=7` is still waiting in the scheduler.
+- implication: this strongly supports the `sub_5B0` timeout-path hypothesis. The `99/1` generic cleanup does not permanently kill the role-manage timer; it only interrupts it temporarily. The active experiment simply ended before the local counter crossed the built-in `>300` threshold, so we still have not observed whether `title_activate_role_manage_screen` will fire first when enough ticks are allowed to pass.
+- evidence: `bin/logs/net_trace.log` `delay_login_success_event ... account=123 delayTicks=360`, `queue_data_event_delayed ... label=login-success-main`, tail `net_task_slots label=dispatch_end tick=495 slot0[e=7 d=150 r1=00000168 ...]`, and `trace_title_flow_action label=sub_5B0_check_byte2 ... obj8_stateA=209 ... byte2=0` at `tick=494`.
+- next: rerun the same delayed binary again but leave it on the active `010534b4` title screen longer, until either `obj8_stateA` crosses `300` and `title_activate_role_manage_screen` appears, or the delayed success event finally fires first. No code change is needed for that narrower verification.
+
+## 2026-06-04
+- changed: built a minimal timeout-validation binary for the `99/1 -> role-manage` hypothesis. The scheduler now supports per-event delay, and the default build delays only the non-`1234` main login-success `event=7` (`request=1/1/1`) by `360` ticks. The `99/1` exchange, the `1234 -> result=2` failure mock, and all later scene/game packet families remain unchanged. Build validation succeeded (`make` passed).
+- evidence: `src/main.c` now logs `delay_login_success_event ... experiment=title-role-manage-timeout` plus `queue_data_event_delayed ... label=login-success-main delayTicks=360` for the delayed main login-success object.
+- next: rerun once on this rebuilt binary and inspect whether the active `010534b4` path now keeps ticking long enough for `obj8_stateA` to grow past the `>300` threshold in `sub_5B0`, or whether it still freezes at `25` immediately after the `99/1` generic cleanup even with later login success held back.
+
+## 2026-06-04
+- verified: `sub_722()` is the local disarm/reset path that the current `99/1` flow never reaches. Static decompile shows it clears `*(R9+10312)+16 = 1`, resets `10332/10336/10340/10344` to `0`, and zeroes the same child widget counter field at `*(_WORD *)(*(_DWORD *)(R9+10308) + 10)`. Its named callers are `sub_74A()`, `role_list_screen_handle_action()`, and `role_manage_screen_handle_role_list_nav()`, so this is the existing role-list / role-manage-side return path rather than a generic scene-enter path.
+- verified: the current stuck title screen already contains a timeout path toward role-manage, but the `99/1` generic cleanup appears to stall it too early. In `sub_5B0`, when `obj2C == 1`, the branch at `0x700..0x71C` checks `*(_WORD *)(*(_DWORD *)(v0 + 8) + 10) > 300`; if true, it clears local child flags and queues `title_activate_role_manage_screen` via `sub_10C6(&unk_82C, title_activate_role_manage_screen)`. That same `+10` field is the traced `obj8_stateA` counter.
+- implication: the current `99/1` fallback-to-generic-cleanup now has a plausible concrete failure mode. Because runtime `0501760c` clears `titleLoadingGate`, `loading_gif_widget_draw()` drops `obj8.flag10` to `0`, and `obj8_stateA` freezes at `25` instead of continuing toward the `>300` threshold that would queue `title_activate_role_manage_screen`. Later login success then arrives first and sets `byte2=3`, so `sub_5B0` takes the direct `sub_EC(3)` teardown path instead of the dormant role-manage timeout path.
+- evidence: static decompile of `sub_722()`, `title_activate_role_manage_screen()`, `sub_5B0()`, `sub_74A()`, and `role_manage_screen_handle_role_list_nav()`; paired runtime evidence where `obj8_stateA` stops at `25` immediately after the `0501760c` gate clear and never approaches the `>300` threshold before login success lands.
+- next: the most useful next experiment is no longer “who clears the gate”. The narrower question is whether the real `99/1` contract is supposed to keep that counter running long enough to reach the built-in `>300 -> title_activate_role_manage_screen` branch, or whether some other packet/local callback is supposed to call `sub_722()` / `title_activate_role_manage_screen()` directly before account-login success is accepted.
+
+## 2026-06-04
+- verified: runtime `0501760c` is not an external helper; it is the tail of `mmTitleMstarWqvga.cbm::sub_938(event=7)` itself (`sub_938+0x104`, static offset `0xA3C`). Static decompile shows that after the packet scan finishes, case `7` unconditionally executes:
+  - `*(_DWORD *)(*(_DWORD *)(R9+10312) + 12) = 0`
+  - `*(_BYTE  *)(*(_DWORD *)(R9+10312) + 16) = 0`
+  This exactly matches the runtime `objC.flag10` / `titleLoadingGate` clear at `01056100`.
+- verified: the earlier login-success clear at runtime `050175cc` is the same field family, but from the accepted-object branch inside `sub_938`. Static offset `0x9FC` clears `*(_BYTE *)(v12 + 16) = 0` immediately after `sub_938` accepts `type=1/subtype=2|3|6` and before it checks the router gate. So both the ignored `99/1` path and the accepted login-success path clear the same local gate byte; the difference is that only the accepted branch also sets `R9+10302` (`ownerObj.byte2`) to `3` or `4`.
+- implication: the current `99/1` echo does not have its own special consumer in `sub_938(event=7)`. Because case `7` only recognizes packet objects with `type=1` and `subtype=2|3|6`, a pure `99/1` data event simply falls through the scan loop and reaches the generic tail cleanup at `0xA36..0xA3C`. That explains the exact observed behavior: `titleLoadingGate` is cleared, the loading GIF stops, but `obj2C/local10344` remain armed and `byte2` stays `0`.
+- evidence: IDA decompile/disassembly of `sub_938` (`0x938..0xA4E`), especially the accepted-branch writes at `0x9FA/0x9FC` and the generic case-7 tail at `0xA36/0xA3C`; paired runtime writes in `bin/logs/net_trace.log` at `tick=108 last=0501760c`, `tick=157 last=050175cc`, and `tick=157 last=050175b8`.
+- next: the next useful static target is no longer “which helper is `0501760c`”, because that is resolved. The narrower remaining question is what packet or local path is supposed to keep `sub_938(event=7)` out of that generic tail cleanup after `99/1`, or alternatively what other consumer outside `sub_938` is expected to handle the `99/1` semantic and clear `obj2C/local10344` before later login success sets `byte2=3`.
+
+## 2026-06-04
+- verified: the corrected owner/gate watcher run finally pins the meaningful `99/1` side effect to the title loading gate, not to `obj8_stateA`. On the active `010534b4` path, `trace_title_child_state_write` shows `ownerObj=0105340c` remaining armed (`obj28=1 obj2c=1 local10340=1 local10344=1`) after `sub_938_case5_arm_mode1`, while the later `99/1` `event=7` callback clears `objC.flag10` at `01056100` with `last=0501760c`; the paired global watcher shows the same byte is `titleLoadingGate` (`R9+21808`).
+- verified: that gate clear immediately explains the observed GIF freeze. Right after the `0501760c` clear, `loading_gif_widget_draw()` drops `obj8.flag10` from `1` to `0` at `last=010461c8`, and the local frame counter (`obj8_stateA`) stays pinned at `25`. This confirms `obj8_stateA=25` is only a loading-widget frame value and that the real `99/1` semantic effect in the current build is "disable the loading gate/widget", not "advance a business stage".
+- verified: the same run also confirms what `99/1` does **not** do. Even with the gate cleared and the extra queued `event=9` close already firing, the owner object never disarms before login success arrives: `obj28=1 obj2c=1 local10340=1 local10344=1 byte2=0` remain stable through the whole `tick~107..114` window. Later login success still sets `ownerObj.byte2=3` at `last=050175b8`, after which `sub_5B0` removes `010534b4` and routes into `sub_EC(3)`.
+- evidence: `bin/logs/net_trace.log` around `tick=107..108` and `tick=156..157`, especially `trace_title_child_state_write label=ownerObj.obj2C ... new=1`, `trace_title_child_state_write label=objC.flag10 ... new=0 ... last=0501760c`, `trace_business_callback_write label=titleLoadingGate ... new=0 ... last=0501760c`, `trace_title_child_state_write label=obj8.flag10 ... new=0 ... last=010461c8`, and the later `trace_title_child_state_write label=ownerObj.byte2 ... new=3 ... last=050175b8`.
+- next: stop using `obj8_stateA=25` as the semantic target. The narrowest remaining question is what static helper contains runtime `0501760c`, why it clears `titleLoadingGate` on the current `99/1` path, and what additional condition or packet should also clear `obj2c/local10344` before login success is allowed to set `byte2=3`.
+
+## 2026-06-04
+- changed: corrected the child-state watcher anchor from `base+10308` to the real `sub_5B0` owner object at `base+10300` (`0105340c` on the active run). The same rebuild also adds `R9+21808` to the global callback/gate write watcher as `titleLoadingGate`, so the next rerun can identify who actually clears the GIF-widget enable gate around the `99/1` window. Build validation succeeded (`make` passed).
+- next: rerun once on the rebuilt binary and inspect `trace_title_child_state_write label=ownerObj.*` plus `trace_business_callback_write label=titleLoadingGate` around `tick~107..114`. The immediate question is whether `99/1` or some later local/business callback writes `R9+21808` to `0`, and whether the real owner `byte2/obj2C` fields also change in that same window before login success arrives.
+
+## 2026-06-04
+- verified: the new child-state run resolves `obj8_stateA`. `obj8_cb1c=010461a9` maps to `loading_gif_widget_draw()`, and its callee `01046048 loading_gif_widget_draw_frame()` increments `a1[5]` (`obj8+0x0A`, the traced `stateA`) by `1` on every draw tick while `obj8.flag10` is enabled. So the observed `obj8_stateA=0..25` sequence is a local loading/animation frame counter, not a login business stage value.
+- verified: the same static/runtime pair also explains why `stateA` freezes at `25` after the current `99/1` exchange. `loading_gif_widget_draw()` only resets `obj8.stateA` to `0` when it sees the controlling global byte at `R9+21808` transition into the enabled state; when that gate is cleared, it just drops `obj8.flag10` back to `0`. In the latest rerun, `obj8_stateA` climbs from `20` to `24` before `sub_938_case5_arm_mode1`, reaches `25` at the `tick=107` `sub_5B0_check_byte2` sample, then remains pinned while `obj8.flag10` falls to `0` after the `99/1` data-event window.
+- corrected: the first `trace_title_child_state_write` implementation is watching `base+10308`, which is the child widget pointer (`obj8=01056cc4`) rather than the `sub_5B0` owner object at `0105340c`. That is why the repeated `label=localObj.byte2` lines are actually overlapping writes inside the GIF widget (`last=0104609e` from `loading_gif_widget_draw_frame()`), not real writes to the screen-local `byte2`.
+- evidence: `bin/logs/net_trace.log` around `tick=93..108`, especially `obj8_cb1c=010461a9`, `obj8_stateA=20..25`, the `last=0104609e` write traces, and the post-`99/1` `obj8_flag10 -> 0` freeze with no `stateA` reset; plus static decompile of `010461A8/01046048`.
+- next: stop treating `obj8_stateA=25` as the missing semantic itself. The narrower remaining question is which code clears the controlling gate behind `loading_gif_widget_draw()` during or after `99/1`, and whether the real title-side contract should instead re-enable a different local mode before login success sets `byte2=3`. If another run is needed, fix `trace_title_child_state_write` to anchor on the live `sub_5B0` owner (`R4`) rather than `base+10308`.
+
+## 2026-06-04
+- changed: added a narrower child-state watcher for the active `010534b4` title flow. `src/main.c` now logs `trace_title_child_state_write` for writes touching the current local object (`byte2/obj28/obj2C/obj30`), `obj4.state8/flagD`, `obj8.stateA/flag10`, `objC.flag10`, and module locals `10340/10344`. `trace_title_flow_action` now also dumps the live method slots for `obj4`, `obj8`, and `objC`, so the next rerun can map child-state changes back to concrete code owners instead of only observing their post-tick values. Build validation succeeded (`make` passed).
+- next: rerun once on the rebuilt binary and inspect the `99/1` window for `trace_title_child_state_write` around `tick~107..114`. The immediate question is whether `obj8.stateA=25` is written by the `99/1` data-event path itself, by the local `obj8` update method that `sub_5B0` calls every tick, or by a later shared-owner callback that only becomes visible after the packet is drained.
+
+## 2026-06-04
+- verified: the default-on `0x63/1 -> event=9` transport experiment is a confirmed negative result. In the latest rerun, `short_63_close_event_enabled request=0x63/1 closeAfterData=1` is followed by the expected queued close (`queue_close_event connect=2 ... event=9`), and that close really fires later at `tick=114`. But the local title object never disarms: after the `99/1` data event, `obj28=1 obj2c=1 local10340=1 local10344=1` remain set, `obj8_stateA` stays pinned at `25`, `byte2` remains `0`, and repeated `sub_5B0_mode1_branch / sub_5B0_check_byte2` traces continue unchanged until later login success sets `byte2=3`.
+- verified: this means the missing `99/1/0` contract is not explained by transport close sequence alone. Adding `event=9` after the current `builtin-short-63-1-echo` does not reproduce any visible `sub_722()`-style disarm/reset or any other local title-state transition before account-login success arrives.
+- evidence: `bin/logs/net_trace.log` around `tick=107..114`, especially `short_63_close_event_enabled`, `queue_close_event connect=2 ... event=9`, `fire_event slot=1 event=9`, and the unchanged `trace_title_flow_action` snapshots showing persistent `obj2c=1 local10344=1 byte2=0 obj8_stateA=25`; later `tick=510` still reaches `sub_EC(3)` only after login success makes `byte2=3`.
+- next: stop treating missing close/event ordering as the leading explanation for `99/1`. The next narrow target should shift back to the response semantics around the armed mode-1 local object itself: either a different `0x63/1` payload shape, or an additional business packet/state change that specifically moves `obj8_stateA` off `25` or clears `obj2c/local10344` before login success.
+
+## 2026-06-04
+- changed: rebased the `0x63/1 -> event=9` transport-side control into the default build. The current `bin/main.exe` now enables the short-control close event by default after the existing `builtin-short-63-1-echo` payload, while still allowing `CBE_SHORT_63_CLOSE_EVENT=0` to disable it for regression comparison. Build validation succeeded (`make` passed).
+- next: rerun once on the default binary and compare the `sub_938_case5_arm_mode1` window against the prior no-close baseline. The immediate question is whether the added `event=9` is enough to disarm or advance the mode-1 `sub_5B0` object before later login success sets `byte2=3`.
+
+## 2026-06-04
+- changed: added a transport-side control for the narrowed `0x63/1` question. `src/main.c` now supports `CBE_SHORT_63_CLOSE_EVENT=1`, which leaves the existing `builtin-short-63-1-echo` payload unchanged but appends the normal queued `event=9` close after the `event=7` data callback for this one short-control exchange. Default behavior remains unchanged when the env var is unset. Build validation succeeded (`make` passed).
+- next: rerun the current title path once with `CBE_SHORT_63_CLOSE_EVENT=1` and compare the same `sub_938_case5_arm_mode1` window. The concrete question is whether an added `event=9` close is enough to disarm or advance the mode-1 `sub_5B0` object, or whether the real missing contract still has to be in some other packet/transport side effect.
+
+## 2026-06-04
+- verified: the new `sub_938_case5_arm_mode1` trace confirms the full early title pre-arm sequence on a clean rerun. Before `tick=109`, repeated `trace_title_flow_action label=sub_5B0_load_mode` lines still show `obj28=0 obj2c=0 local10340=0 local10344=0`. At `fire_event ... event=5`, `sub_938_case5_arm_mode1` fires immediately, and in the very next `sub_5B0_load_mode` sample the same object flips to `obj28=1 obj2c=1 local10340=1 local10344=1`.
+- verified: the current built-in `99/1` reply is now a stronger negative control. After `send_call connect=2 len=9`, the emulator returns `mock_short_wt_control_echo kind=99 subtype=1 len=9` / `source=builtin-short-63-1-echo`, but the following `event=7` callback leaves all visible title state unchanged (`trace_title_login_state` pre/post identical) and does not disarm the local title object. `sub_5B0` remains in mode-1 with `byte2=0` and continues to loop there until later login success sets `byte2=3`.
+- evidence: `bin/logs/net_trace.log` around `tick=104..112` and `tick=343..344`, especially `trace_title_router_gate label=sub_938_case5_arm_mode1`, the immediate `obj28=1 obj2c=1` transition, the `mock_short_wt_control_echo` / `builtin-short-63-1-echo` block, and the unchanged `trace_title_login_state` plus persistent `trace_title_flow_action label=sub_5B0_mode1_branch` / `sub_5B0_check_byte2 byte2=0` lines.
+- next: treat the current `99/1` echo as insufficient rather than merely “unrelated”. The next narrow experiment should focus on recovering the real semantic contract for this title-side `99/1/0` exchange, because the current stub demonstrably leaves the direct-enter preconditions armed in place.
+
+## 2026-06-04
+- verified: the upstream arming write is now pinned to `sub_938(event=5)` itself. Static `mmTitleMstarWqvga.cbm::sub_938()` case `5` writes `*(R9+0x283C+0x28)=1` and `*(R9+0x283C+0x2C)=1`, which are the same live `obj28=1` / `obj2C=1` values later seen in `trace_title_flow_action`. The same case immediately sends `net_build_login_request(99, 1, 0)`.
+- verified: the latest runtime log matches that contract. On `activeScreen=010534b4`, a second `open_channel connect=2` at `tick=110` queues `event=5`; when it fires at `tick=117`, the client sends a `len=9` `99/1` request and the emulator answers it with `source=builtin-short-63-1-echo`. The later `event=7` data callback for that `99/1` response leaves the visible title state unchanged, but by the time normal login success arrives the local `sub_5B0` object is already in the armed `obj28=1 / obj2C=1` mode-1 state.
+- evidence: `mmTitleMstarWqvga.cbm` disassembly/decompile for `sub_938()` case `5` (`0x0958..0x0962`), plus `bin/logs/net_trace.log` around `tick=110..118` (`open_channel connect=2`, `queue_event ... event=5`, `fire_event ... event=5`, `send_call connect=2 len=9`, `mock_short_wt_control_echo kind=99 subtype=1 len=9`) and `bin/logs/net_packets.log` `tick=109 source=builtin-short-63-1-echo`.
+- next: the next narrow contract question is no longer "who armed `obj2C`", but what real server/business meaning `99/1/0` carries on this title screen and whether its response is supposed to keep mode `1`, clear it, or route into a different local state before account login success sets `byte2=3`.
+
+## 2026-06-04
+- verified: the new `trace_title_flow_action` identifies the immediate title-side teardown condition. On the latest isolated `1/1/3` success, the local `sub_5B0` object at `0105340c` enters `obj2C=1` / mode-1 state long before the login reply completes. Right after `sub_938` accepts the `1/1/3` object, the same local object flips `byte2` from `0` to `3`, and `sub_5B0` immediately takes the `n2==1` branch: `sub_5B0_check_byte2` sees `byte2=3`, `sub_5B0_remove_current_screen` fires at `050172c6`, then `sub_5B0_call_sub_EC` calls `sub_EC(3)`, after which `01053450` is created.
+- verified: this means the current direct-enter path is no longer best explained by a missing network-side title follow-up after `sub_938`. The decisive branch is already armed in local title state before the reply lands: `obj28=1`, `obj2C=1`, `local10340=1`, and `local10344=1`. The login success then only supplies the final trigger by setting `byte2=3`, which the existing local `sub_5B0` mode-1 logic interprets as “remove current screen and route by `sub_EC(3)`”.
+- evidence: `bin/logs/net_trace.log` around ticks `153..162`, especially `trace_title_flow_action label=sub_5B0_load_mode ... obj28=1 obj2c=1`, `trace_title_flow_action label=sub_5B0_check_byte2 ... byte2=3`, `trace_title_flow_action label=sub_5B0_remove_current_screen pc=050172c6`, and `trace_title_flow_action label=sub_5B0_call_sub_EC ... r0=00000003`; paired `trace_title_router_gate` lines still show `routerFlag17=1 routerFlag18=1` and no `sub_938_call_router_callback`.
+- next: the narrow remaining question is now upstream of the final login success object: what earlier local title path or startup-mode contract pre-arms `obj2C=1` / `local10344=1` on `0105340c`, and should that path instead leave `obj2C=0` (or a different `byte2`) until a real role/manage workflow has been entered.
+
+## 2026-06-04
+- verified: the first successful `trace_title_router_gate` run disproves the earlier “router gate byte missing” suspicion. On the latest isolated `1/1/3` success, `sub_938_set_login_state` / `sub_938_check_router_flags` show `local10340=1`, `local10344=1`, `routerFlag17=1`, and `routerFlag18=1` before `010534b4` is torn down. There is no `sub_938_call_router_callback` trace in that same window, so the direct-enter path is **not** being triggered by `router+44`; the router gate is already in the suppress-callback state.
+- verified: the actual screen teardown happens later in the local title mini-flow, after `post_data_event` and just before `screen_manager idx=6 remove r0=010534b4`, with `last=050172c6` inside `sub_5B0`. This narrows the remaining branch further: the decisive title-stage condition now appears to live in the local `sub_5B0` object state (`v0+2`, `v0+0x2C`, related child flags), not in the earlier `sub_938` router gate.
+- changed: added a second read-only watcher `trace_title_flow_action` for the `sub_5B0` local mini-flow. `src/main.c` now logs the object pointer at `R4`, `byte2`, `obj+0x28/+0x2C/+0x30`, child object flags, and the `sub_EC()` parameter path around `sub_5B0_load_mode`, `sub_5B0_mode1_branch`, `sub_5B0_check_byte2`, `sub_5B0_remove_current_screen`, `sub_5B0_load_sub_EC_arg`, `sub_5B0_call_sub_EC`, and `sub_5B0_clear_byte2`. Build validation succeeded (`make` passed).
+- next: rerun once and inspect `trace_title_flow_action` in the same `1/1/3` or `1/1/2` success window. The concrete target now is to identify which local object state (`byte2`, `obj2C`, or child flags) is already primed when `sub_5B0` reaches `050172c6`, because that is the condition currently collapsing the expected title-stage flow into immediate screen removal.
+
+## 2026-06-04
+- changed: added a new read-only `trace_title_router_gate` watcher around the narrowest remaining split point in `mmTitleMstarWqvga.cbm`. `src/main.c` now traces `sub_938` at the points where it writes local login-state byte `+10302`, checks the router gate byte at `router[17/18]`, and calls the router callback at `router+44`; it also traces the local title mini-state transitions at `sub_5B0_set_local_mode2` and `sub_5B0_queue_activate_role_manage`. Build validation succeeded (`make` passed).
+- verified: the latest static pass makes the remaining branch shape much clearer. `sub_938(event=7)` does not itself decide “title flow vs scene flow” by subtype alone once it has accepted `2/3/6`. After parsing an accepted object, it fetches a router object from `sub_19C()`, sets module-local byte `*(R9+10302)=3/4`, checks gate byte `router[14 + state]` (i.e. `router[17]` or `router[18]`), and if that byte is not `1` it calls `router+44(a1, a3)`. Separately, `sub_A50()` initializes local state `+10340/+10344` to zero, while `sub_840()` only enters the title-local post-login mini-flow when `+10344` later becomes `1` or `2`.
+- implication: the remaining mismatch is likely no longer “wrong success subtype” but “wrong router/gate state before the router callback fires”. If the expected pre-map title workflow is still missing, the absent condition is most plausibly one of:
+  - the router gate byte `router[17]` / `router[18]` should already be `1`, suppressing the direct callback
+  - or some earlier title-local path should have moved `+10344` into the `1/2` mini-state machine before scene-owned routing takes over
+- next: rerun once with the new trace and inspect `trace_title_router_gate` around the first `1/1/2` or `1/1/3` success. The concrete next question is whether the direct-enter callback at `router+44` is firing because the gate byte is `0`, or because the title-local `+10344` flow never becomes active at all.
+
+## 2026-06-04
+- verified: the final sibling test closes the loop: isolated `1/1/3` also converges on the same direct-enter path. In the latest session window (`account=321` at `tick=231`), the login reply is `route=actor-subtype-3`, the raw packet begins `575401680101010300...`, queued `1/1/15` remains disabled, yet `010534b4` is still removed at `tick=232`, `01053450` is created at `tick=234`, and `businessDispatch` again switches from `05017509` to `01012e4d`.
+- verified: subtype `3` uses the same narrower business field set as subtype `2`: `result, revivetype, ruffianflag, type, lastexp, curexp, persentexp, actorinfo`, with the same `len=360` payload size. In the current emulator path it does not produce a distinct title-stage behavior from subtype `2`; it still resumes the same `01053450` scene/bootstrap sequence and later lands in `sceneState=7` with `loadFlags=1,0,0`.
+- evidence: `bin/logs/net_trace.log` lines around `mock_login_response_experiment requestSubtype=1 route=actor-subtype-3`, `mock_login_actor_response_fields top=1,1,3`, `skip_login_followup_event ... queueMode15=0`, `screen_manager idx=6 remove r0=010534b4`, `screen_manager idx=4 add r0=01053450`, and `trace_business_callback_write ... new=01012e4d`; `bin/logs/net_packets.log` raw login success dump beginning `575401680101010300...`.
+- next: stop treating subtype choice among `2/3/6` as the deciding factor for staying in title flow. All three `sub_938`-accepted success subtypes currently converge on the same `010534b4 -> 01053450 -> sceneState=7` route, so the remaining protocol gap is more likely an additional title-stage gate, companion packet, or earlier mode/owner contract that is still absent from the emulator path.
+
+## 2026-06-04
+- changed: temporarily rebased the experiment binary again so the built-in fallback login subtype is now `3` instead of `2`. `vm_net_mock_resolve_login_experiment_subtype()` still honors explicit `CBE_LOGIN_TOP_TYPE`, but when no environment override is present the rebuilt `bin/main.exe` now defaults to `1/1/3`. Build validation succeeded (`make` passed).
+- next: rerun once without extra env overrides for the clean subtype-3 baseline, then compare whether `route=actor-subtype-3` converges on the same `010534b4 -> 01053450 -> sceneState=7` path already confirmed for subtypes `6` and `2`.
+
+## 2026-06-04
+- verified: the rebuilt default-`2` binary confirms that `1/1/2` behaves the same way as isolated `1/1/6` on the current stuck title path. In the later session window (`account=123`), the login reply is `route=actor-subtype-2`, the raw packet begins `575401680101010200...`, queued `1/1/15` is still disabled (`skip_login_followup_event ... queueMode15=0`), yet `010534b4` is still removed at `tick=167`, `01053450` is created at `tick=169`, and `businessDispatch` again switches from `05017509` to `01012e4d`.
+- verified: the subtype-2 business payload is narrower than subtype-6 exactly as expected from the new field trace. This run logs `fields=result,revivetype,ruffianflag,type,lastexp,curexp,persentexp,actorinfo`, and the packet shrinks from the earlier subtype-6 `len=432` to `len=360` because the subtype-6-only `practiseflag/pcimg/expcard/expbook/practiseinfo` entries are absent.
+- verified: despite that payload difference, the post-jump business sequence is unchanged in the current emulator path. After `1/1/2`, the client still proceeds into the same `01053450` scene bootstrap and reaches `sceneState=7`, `loadFlags=1,0,0`, with the same later built-in replies (`1/5/10 + 1/7/7(type=1)`, then `1/7/7(type=2)` and `type=3`).
+- evidence: `bin/logs/net_trace.log` lines around `mock_login_response_experiment requestSubtype=1 route=actor-subtype-2`, `mock_login_actor_response_fields top=1,1,2`, `skip_login_followup_event ... queueMode15=0`, `screen_manager idx=6 remove r0=010534b4`, `screen_manager idx=4 add r0=01053450`, and `trace_business_callback_write ... new=01012e4d`; `bin/logs/net_packets.log` raw login success dump beginning `575401680101010200...`.
+- next: `1/1/3` is now the remaining sibling subtype to compare. If it also tears down `010534b4` and enters the same `01053450` bootstrap, then all three `sub_938`-accepted success subtypes (`2/3/6`) likely converge on the same current direct-enter route in this emulator path, and the real remaining question becomes which additional title-side gate or companion packet is missing to keep the client in the expected pre-map workflow.
+
+## 2026-06-04
+- changed: temporarily rebased the experiment binary so the built-in fallback login subtype is now `2` instead of `6`. `vm_net_mock_resolve_login_experiment_subtype()` still honors explicit `CBE_LOGIN_TOP_TYPE`, but when no environment override is present the rebuilt `bin/main.exe` now defaults to `1/1/2`. Build validation succeeded (`make` passed).
+- next: rerun without additional env overrides if we want a clean subtype-2 baseline from this binary, then compare `route=actor-subtype-2` against the already confirmed pure-`1/1/6` behavior.
+
+## 2026-06-04
+- verified: queued `1/1/15` is **not** required for the current `1/1/6 -> 01053450` jump. With the new isolated control (`skip_login_followup_event request=1/1/1 label=title-mode15 queueMode15=0`), the first clean `CBE_LOGIN_TOP_TYPE=6` rerun still removed `010534b4` at `tick=177`, installed `01053450` by `tick=179`, and switched `businessDispatch` from `05017509` to `01012e4d`. The later scene-bootstrap sequence was unchanged: the client immediately sent bundled `1/5/10 + 1/7/7(type=1)`, then standalone `1/7/7(type=2)` and `1/7/7(type=3)`, and runtime again reached `sceneState=7` with `loadFlags=1,0,0`.
+- verified: the isolated `1/1/6` business payload on this run contains the richer subtype-6-only fields, matching the new trace output: `result, revivetype, ruffianflag, type, practiseflag, pcimg, expcard, expbook, practiseinfo, lastexp, curexp, persentexp, actorinfo`.
+- evidence: `bin/logs/net_trace.log` lines around the single `mock_login_response_experiment requestSubtype=1 route=actor-subtype-6 ...`, `skip_login_followup_event ... queueMode15=0`, `screen_manager idx=6 remove r0=010534b4`, `screen_manager idx=4 add r0=01053450`, and the later `send_payload len=35` / `len=19` scene bootstrap requests; `bin/logs/net_packets.log` raw login success dump beginning `575401b001010106...`.
+- next: the intended `1/1/2` and `1/1/3` comparisons are still pending; the latest logs only contain the subtype-6 run. Next reruns should set `CBE_LOGIN_TOP_TYPE=2` and `3` separately and then compare whether either subtype avoids the immediate `01053450` scene/bootstrap transition or changes the later request family.
+
+## 2026-06-04
+- changed: split the current login-subtype experiment into explicit controls so `1/1/6`, `1/1/2`, and `1/1/3` can be compared without editing code each time. For non-`1234` `requestSubtype==1` success replies, the mock now chooses subtype from `CBE_LOGIN_TOP_TYPE` (allowed experiment values `2/3/6`, fallback `6`) and logs both the chosen route and the exact business fields via `mock_login_response_experiment ... fields=...` plus `mock_login_actor_response_fields ...`.
+- changed: isolated the “only send the main login success object” case for the current `1/1/1` title experiment. For `requestKind==1 && requestSubtype==1`, queued `1/1/15` is now disabled by default; the log prints `skip_login_followup_event request=1/1/1 label=title-mode15 queueMode15=0`. If a later comparison needs the old behavior back, it can be re-enabled with `CBE_LOGIN_QUEUE_MODE15=1`. Build validation succeeded (`make` passed).
+- next: run three clean comparisons on the same login path: `CBE_LOGIN_TOP_TYPE=6`, `2`, and `3`, with `CBE_LOGIN_QUEUE_MODE15` left unset or `0`, and compare whether each case still replaces `010534b4`, what new `businessDispatch` gets installed, and whether the follow-on scene/group packets differ.
+
+## 2026-06-04
+- verified: the narrowed `1/1/6` experiment finally moved the stuck title screen. On the latest non-`1234` login (`account=4321`), the mock emitted `mock_login_response_experiment requestSubtype=1 route=actor-subtype-6` followed by `mock_login_actor_response ... top=1,1,6 ... len=432`, and the runtime immediately stopped treating `010534b4/sub_938` as the terminal state. At `tick=183`, after the queued `title-mode15` follow-up and the `1/1/6` data event, the host removed `010534b4`, unwound `0105a814`, and then created a new module screen `01053450` whose callback owner is `businessDispatch=01012e4d`.
+- verified: this is the first confirmed local transition caused by the post-submit success family. Even though the old `trace_title_login_state` snapshot fields on base `01050bd0` stayed unchanged during the `010534b4` data-event window, the success criterion has now been met at the screen-manager level: `1/1/6` caused a real active-screen replacement and scene progression (`sceneState=7`, `loadFlags=1,0,0`) that never happened under the earlier `1/1/1` replies.
+- evidence: `bin/logs/net_trace.log` around `tick=182..186`, especially `mock_login_response_experiment`, `mock_login_actor_response actorinfo_len=232 top=1,1,6`, `screen_manager idx=6 remove r0=010534b4`, `screen_manager idx=4 add r0=01053450`, and `trace_business_callback_write ... new=01012e4d`; `bin/logs/net_packets.log` raw response dump beginning `575401b001010106...`, which confirms the object header really is `1/1/6` even though the current packet-summary line still prints `objs=1/1/1`.
+- next: stop questioning the `010534b4 -> subtype 6` contract. The next narrow target is the new `01053450` screen and its `businessDispatch=01012e4d` owner: identify what this screen expects next and whether the follow-on `builtin-group-type1` request/response pair is sufficient to keep scene initialization moving.
+
+## 2026-06-04
+- changed: narrowed the next live experiment to the `sub_938`-accepted family. For non-`1234` accounts, the default successful `requestSubtype==1` mock path now returns the existing actor-style `1/1/6` success object instead of the older `1/1/1 serverinfo/servernum/newVer` validation packet. The legacy `1/1/1` control path is still available with `CBE_LOGIN_RESPONSE=primary-validate` for side-by-side regression runs. Build validation succeeded (`make` passed).
+- evidence: `src/main.c` updated `vm_net_mock_build_login_response()` branch selection plus the new `mock_login_response_experiment requestSubtype=1 route=actor-subtype-6` trace marker.
+- next: rerun once and compare `bin/logs/net_packets.log` / `bin/logs/net_trace.log` for the first non-`1234` confirm. The narrow success criterion is no longer “did the wire packet arrive”, but whether `1/1/6` finally causes any local title writes or `trace_title_screen_callback` activity while `businessDispatch` remains `05017509`.
+
+## 2026-06-04
+- verified: the local confirm button path does not perform the hoped-for owner swap. Static `mmTitleMstarWqvga.cbm` analysis now ties the visible confirm action to `login_form_handle_action(4096) -> login_form_submit()`, and that submit path only copies the current buffers into `mmorpg_LoginRecord`, writes stage byte `*(R9+0x2054 + 357) = 5`, and sends `net_build_login_request(1, 1, 6)` which appears on the wire as top-level `1/1/1`. It does **not** write `businessDispatch`, and the new runtime watcher confirms there are no further `trace_business_callback_write label=businessDispatch` lines after the initial `sub_A50()` install at `tick=78`.
+- verified: this means the current question has shifted again. The stuck path is not “confirm should have switched to `login_primary_response_dispatch()` but didn't”; on this screen, confirm appears to intentionally leave `businessDispatch = sub_938 + 1` in place. The more plausible contract is now that `sub_938(event=7)` is itself the intended owner after submit, and that the server reply subtype should match one of its accepted `type=1/subtype=2|3|6` objects rather than the direct `1/1/1` primary-wrapper path.
+- evidence: `mmTitleMstarWqvga.cbm` IDA for `login_form_handle_action()` (`0x2B1E`), `login_form_submit()` (`0x1E40`), `sub_A50()` (`0x0A50`), and `sub_938()` (`0x0938`); latest `bin/logs/net_trace.log` lines for confirm taps at `x=38..47 y=373..380`, repeated `send_call connect=2 len=95`, and the absence of any post-submit `trace_business_callback_write label=businessDispatch` after the earlier `tick=78 last=050176c2` install.
+- next: stop searching for a missing local callback swap on this specific confirm path. The next narrow experiment should compare `sub_938`'s accepted subtype family against older `1/1/6` behavior and verify whether the correct post-submit reply contract for `010534b4` is actually `type=1/subtype=6` (or sibling `2/3`) rather than `1/1/1`.
+
+## 2026-06-04
+- changed: added one more read-only runtime watcher for the shared business callback slots. `src/main.c` now logs `trace_business_callback_write` whenever guest code writes `Global_R9 + 21804` (`businessCtx`) or `Global_R9 + 21812` (`businessDispatch`), so the next rerun can show exactly which guest PC installs the active title-business callback without relying only on later snapshots. Build validation succeeded (`make` passed).
+- verified: the current stuck login owner is no longer ambiguous. The active screen `010534b4` is the `mmTitleMstarWqvga.cbm::sub_C82()` transition screen, with runtime function table entries matching `sub_A50/sub_8E0/sub_840/sub_59E/sub_4A4/sub_454` under relocation base `0x05016BD0`. Its live `dispatch=05017509` snapshot is `sub_A50()`'s installed callback `sub_938 + 1`, not `login_primary_response_dispatch()` or `login_alt_response_dispatch_wrapper()`.
+- verified: `sub_938(event=7)` only scans `type=1` packet objects whose `subtype` is `2`, `3`, or `6`. It never checks `subtype == 1`, so the current `1/1/1 {result=2, information}` reply is being delivered to an owner that ignores it by construction. This explains the unchanged `trace_title_login_state` snapshots and the continued absence of `trace_title_screen_callback`.
+- verified: the primary fixed failure prompt does not need an additional stage packet. Static `net_handle_login_response(packet, 1)` already feeds `login_response_result_dispatch('2')` from the parsed `result` byte alone; the `information` copy helper only runs on the alternate `a2 == 0` path. So the blocker is still owner selection / callback installation timing, not a missing companion object after `1/1/1 result=2`.
+- evidence: `mmTitleMstarWqvga.cbm` IDA for `sub_C82()` (`0x0C82`), `sub_C54()` (`0x0C54`), `sub_A50()` (`0x0A50`), `sub_938()` (`0x0938`), `net_handle_login_response()` (`0x16DC`), `login_primary_response_dispatch()` (`0x2D80`), and `login_response_result_dispatch()` (`0x23C0`); latest `bin/logs/net_trace.log` `screen_func_table screen=010534b4 ... init=05017621 destroy=050174b1 logic=05017411 render=0501716f pause=05017075 resume=05017025` plus repeated `runtime_state ... dispatch=05017509`.
+- next: rerun once and capture the new `trace_business_callback_write` lines around the `01056204 -> 0105A814 -> 010534B4` transition and the confirm-tap path. The remaining narrow question is not "what should `1/1/1 result=2` contain", but "which earlier local mode/owner switch is supposed to replace `sub_938` with the real login-result wrapper before the account request is sent".
+
 ## 2026-06-03
 - verified: the new `trace_title_screen_callback` settled the “点确认后没有任何反应” split. On the latest `1/1/1` primary-validation runs, the login request really leaves (`send_call connect=2 len=94 ...`), the host really returns the `1/1/1 result/serverinfo/servernum/newVer` packet (`mock_login_primary_validation_response ... len=93`), and the queued follow-up `title-role-stage4` packet also fires, but **none** of the four title-side local transition BLX sites (`0x23D4`, `0x248A`, `0x1984`, `0x1994`) are reached at all: there is no `trace_title_screen_callback` line in the session. In the same window there is also no host-side `screen_manager idx=2/4/6` transition after the login response; `activeScreen` stays `010534b4`, and repeated confirm taps simply generate repeated `1/1/1` login requests.
 - evidence: latest `bin/logs/net_trace.log` lines around the `tick=242/243` and `tick=295/296` login exchanges; absence of any `trace_title_screen_callback` lines despite the newly compiled hook; persistent `runtime_state ... activeScreen=010534b4 currentThis=0105349c`; latest `bin/logs/net_packets.log` showing repeated `1/1/1` request -> `1/1/1` validation response blocks.
@@ -973,3 +1171,770 @@ Suggested entry format:
 - changed: backed out the startup/WPay gate experiments so the emulator can return to the earlier stable title/login startup path while login-result work continues. `hook_vm_manager_billing_func()` idx `1` no longer forces `(1002,1)` / `(1002,3)` success, `hook_vm_dl_pay_func()` no longer overrides the same probe family to return `1`, `CDownGetFileNameByAppID` no longer virtualizes a missing `Wpay9990Ker42WqvgaV100.CBM` into a fake installed app, and `CDownIsWPay` is back to its original unimplemented/asserting state.
 - preserved: the login mock split remains active. `builtin-login` still parses request field `userName` / `username` and now returns `result=2` with `information="password error"` for account `1234`, while other accounts keep the existing success payload.
 - purpose: stop the black-screen/WPay-update regression introduced by the startup experiments, and isolate the current debugging target back to `net_handle_login_response()` and its primary/alternate result-dispatch behavior.
+
+## 2026-06-04
+- verified: the new account-gated failure reply for `1234` is emitted exactly as intended on the wire. Latest `bin/logs/net_packets.log` shows repeated `1/1/1` login requests with `userName=1234`, and the emulator responds each time with a one-object WT packet `1/1/1` carrying `result=2` plus `information="password error"`.
+- verified: despite the correct mock-side emission, the active title screen still shows no visible error reaction and no local state transition. `bin/logs/net_trace.log` shows `mock_login_account_gate account=1234 requestSubtype=1 result=2`, followed by normal `fire_event slot=0/1 event=7`, but `trace_title_login_state` remains unchanged across `pre_data_event_05017509` / `post_data_event_05017509` (`mode=0`, `listPtr=0`, `roleFamily=0`, unchanged targets), and there is still no `trace_title_screen_callback`.
+- conclusion: the current `1/1/1 {result=2, information}` packet is reaching the transport layer, but it is still not entering the title-local login result owner that should display the fixed failure prompt for result `'2'`. The blocker is therefore upstream of the actual prompt text branch: current live event routing/owner selection is still wrong or incomplete for login responses.
+
+## 2026-06-04
+- verified: the delayed-login-success experiment now proves the local mode-1 timeout branch is real on the active `010534b4` title screen. In the latest rerun, the delayed main login-success `event=7` was still pending (`slot0[e=7 d=59]` at `tick=541`, still `d=34` at `tick=566`), so the following title-local behavior happened before any accepted `1/1/x` success object was delivered.
+- verified: `obj8_stateA` really crosses the built-in `>300` threshold. At `tick=541`, `trace_title_flow_action label=sub_5B0_check_byte2` reports `obj8_stateA=301`, immediately followed by `trace_title_router_gate label=sub_5B0_queue_activate_role_manage`. This confirms the already recovered `sub_5B0` branch is not hypothetical: the current local flow does queue the role-manage activator once the counter exceeds `300`.
+- verified: the same threshold hit also performs a local reset/disarm of the child widgets, but not of the owner mode. In the same `tick=541` window, `obj8.stateA` is reset `301 -> 0`, `obj8.flag10` clears `1 -> 0`, `objC.flag10` / `titleLoadingGate` clears `1 -> 0`, while `ownerObj.byte2` remains `0` and `obj28=1 obj2c=1 local10340=1 local10344=1` stay unchanged on subsequent `tick=542..566` samples.
+- verified: no visible screen handoff or later `byte2=3` write occurs before the run ends. The log contains `sub_5B0_queue_activate_role_manage`, but there is still no `screen_manager idx=6 remove r0=010534b4`, no `screen_manager idx=4 add r0=01053450`, and no `ownerObj.byte2 ... new=00000003` in the same delayed-success session.
+- evidence: `bin/logs/net_trace.log` around `tick=541..566`, especially the lines with `obj8_stateA=301`, `sub_5B0_queue_activate_role_manage`, the child-state resets at `last=050172de/e0/e6`, and the still-pending delayed slot counters.
+- next: stop debating whether the `>300` branch exists; it is now runtime-confirmed. The next narrow target is the callback path scheduled by `sub_10C6(&unk_82C, title_activate_role_manage_screen)`: trace whether that queued role-manage activator is ever executed, delayed behind another local queue, or canceled before it can switch screens.
+
+## 2026-06-04
+- changed: pushed the next read-only layer one hop deeper into the mode-1 callback indirection. `src/main.c` now also watches:
+  - `ownerObj.modeObjPtr` (`ownerObj+0x90`, i.e. the pointer slot passed as `a1` into `01048F8C/01048FB4`)
+  - the pointed object's `+4/+8/+0xC` methods in `trace_title_mode_callback` as `modeObjCb4/modeObjCb8/modeObjCbC`
+- purpose: distinguish whether the repeatedly exercised `sub_840_mode1_call_cbA` is landing on a benign helper object, a popup object, or the actual role-transition object that should eventually clear `obj2C/local10344`.
+- validation: rebuilt successfully with `make`; still read-only instrumentation only.
+
+## 2026-06-04
+- verified: the new mode-callback watcher resolves the next split on the active `010534b4` title path. The two mode-1 callback slots are populated once during early screen setup, before mode-1 is armed:
+  - `ownerObj.mode1CbA = 01048F8D`
+  - `ownerObj.mode1CbB = 01048FB3`
+  Both writes happen at `tick=68`, long before `sub_938(event=5)` later sets `obj2C/local10344 = 1`.
+- verified: once `obj2C == 1` and `obj8.flag10` drops to `0`, runtime does not sit idle waiting for a missing callback target. `sub_840_mode1_call_cbA` actually fires repeatedly on the current path (`tick=114`, `116`, `121`, `146`, `172`, ...), while `sub_840_mode1_call_cbB` never appears in the same run. There is also still no `sub_840_mode2_call_sub_74A` or `sub_840_mode2_call_role_manage`, because the owner never transitions from `obj2C == 1` to `obj2C == 2`.
+- verified: those callbacks do not disarm the title owner. Across the same window, `obj28=1 obj2C=1 local10340=1 local10344=1` stay unchanged, and the path remains stuck in the `sub_5B0_mode1_branch` loop until accepted login success later sets `byte2=3`.
+- static correlation: `01048F8C` (`mode1CbA`) is a small main-CBE adapter that checks an object pointer plus `sub_1015F40(n2)` and then calls the pointed object's `+4` method when allowed; `01048FB2/01048FB4` (`mode1CbB`) is a sibling adapter that would call the same object's `+8` method with two arguments. So the current blocker is not "uninitialized mode-1 callback slots"; it is that the currently exercised mode-1 callback family does not lead into any `sub_74A()` / `sub_722()`-style reset on this path.
+- evidence: `bin/logs/net_trace.log` lines with `ownerObj.mode1CbA/mode1CbB` at `tick=68`, repeated `trace_title_mode_callback label=sub_840_mode1_call_cbA` at `tick=114/116/121/146/172`, the absence of `sub_840_mode1_call_cbB` / `sub_840_mode2_call_*`, and paired static recovery of `0x01048F8C`, `0x01048FB2`, and `0x01048FB4` in `江湖OL.CBE`.
+- next: the most useful next target is now upstream of these adapters: identify the concrete object stored behind the mode-1 callback indirection and the real `+4` / `+8` methods it dispatches into. That should answer whether current mode-1 input is reaching a benign popup/helper object instead of the title-role transition object that would eventually clear `obj2C/local10344`.
+
+## 2026-06-04
+- changed: added one narrower read-only watcher layer around the mode-1 local callback slots and `sub_840()`'s indirect call sites. `src/main.c` now:
+  - watches owner-local writes to `ownerObj+0x98/+0x9C` as `ownerObj.mode1CbA/mode1CbB` (these are the two `R9+10452/+10456` callback slots used when `obj2C == 1`)
+  - traces runtime `sub_840()` call sites at relocated `0x0501748E/0x05017496` (`sub_840_mode1_call_cbA/cbB`) and `0x0501745E/0x050174AA` (`sub_840_mode2_call_sub_74A` / `sub_840_mode2_call_role_manage`)
+- purpose: settle the next narrow split without changing behavior: whether the current armed mode-1 path ever receives concrete callback targets in `R9+10452/+10456`, and whether runtime ever actually reaches the local input-side exits that can lead into `sub_74A()` / `sub_722()`.
+- validation: rebuilt successfully with `make`; no behavior changes intended beyond extra trace output.
+
+## 2026-06-04
+- corrected: the latest `sub_59E/sub_5B0` static pass disproves the previous shorthand that "the stale `&unk_C20` queue makes `sub_59E` stop calling `sub_564()`". `sub_59E()` has only one local gate (`R9+10303` / `popupSkip`); otherwise it always tail-calls `sub_5B0()`.
+- verified: the real switch sits inside `sub_5B0()`. Static recovery shows there are only two `BL sub_564` callsites in the whole title module (`0x5D2` and `0x68C`), both inside `sub_5B0()`:
+  - `0x5D2`: the `obj4.state8 > 0` branch (`*(_WORD *)(obj4+8) > 0`)
+  - `0x68C`: the idle branch with `obj4.state8 <= 0` and `obj2C == 0`
+- verified: the current long delayed-success loop is not taking either of those branches. Runtime at `tick~781+` shows repeated `sub_59E_popup_dispatch -> sub_5B0_load_mode -> sub_5B0_mode1_branch -> shared_popup_bridge_cb30_guard -> sub_5B0_check_byte2`, with stable `obj28=1 obj2c=1 local10340=1 local10344=1 byte2=0`. That matches the static `n2 == 1` branch at `0x6CA`, which never calls `sub_564()` at all.
+- verified: the local input dispatcher `sub_840()` is now statically matched to the same mode byte. When `obj4.state8 <= 0`:
+  - `local10344 == 1` (`obj2C == 1`) waits for `obj8.flag10 == 0`, then routes mode-1 local input through callback slots `R9+10452` / `R9+10456`
+  - `local10344 == 2` (`obj2C == 2`) uses a different local path: `n3 == 3` calls `sub_74A()`, and `n3 == 0 && *a3 == 0x2000` calls `title_activate_role_manage_screen()`
+- verified: `sub_74A()` contains the only currently confirmed mode-local reset transition out of this family. It hit-tests two local regions:
+  - `(10, 359)` -> `sub_722()` full reset/disarm
+  - `(181, 359)` -> `title_activate_role_manage_screen() -> sub_EC(9)`
+- implication: the missing `event=5 -> cb24/open_channel -> alloc_outgoing_game_event()` restart is not directly caused by the stale queue item. The earlier `sub_938(event=5)` mode-1 arm (`obj2C/local10344 = 1`) is what diverts `sub_5B0()` away from both `sub_564()` callsites; the stale queue is a parallel blocker for the later role-manage callback, not the reason `sub_564` disappears.
+- verified: the only currently confirmed full disarm helper is `sub_722()`. Static decompile shows it clears `R9+10336/+10340/+10332/+10344` (owner `+0x24/+0x28/+0x20/+0x2C`), resets the child counter, and re-enables `objC.flag10`. Its current callers are `sub_74A()`, `role_list_screen_handle_action()`, and `role_manage_screen_handle_role_list_nav()`, i.e. role-list / role-manage local paths rather than the current `99/1` branch.
+- evidence: static decompile/disassembly of `sub_59E()` / `sub_5B0()` / `sub_722()`, `xrefs_to sub_564` and `xrefs_to sub_722` in `mmTitleMstarWqvga.cbm`, plus `bin/logs/net_trace.log` `tick~781..788` showing the persistent `sub_5B0_mode1_branch` loop with `obj2c=1`.
+- next: shift the narrow question again. The active contract gap is now "what real title/local event is supposed to clear `obj2C/local10344` or invoke the `sub_722()`-style reset after `sub_938(event=5)` arms mode-1", not "why stale queue suppresses `sub_564()`".
+
+## 2026-06-04
+- changed: added the next read-only watcher set for the confirmed `>300` branch. `src/main.c` now logs `trace_title_callback_queue` at runtime `sub_1032` entry/commit (`0x05017C02`, `0x05017C86`) and at `title_activate_role_manage_screen()` entry (`0x0501711A`).
+- purpose: separate three still-ambiguous outcomes on the delayed-success title path without changing behavior: queue never armed, queue armed but never consumed, or queue consumed and then blocked by a later local screen/state gate.
+
+## 2026-06-04
+- verified: the new callback-queue watcher resolves the remaining ambiguity on the delayed-success title path. When the first `99/1` exchange happens, `sub_1032_queue_enter` and `sub_1032_queue_commit` both fire at `tick=110`, committing a queue entry with `queueText=050177f0` and `queueCallback=00000000`.
+- verified: when the later local timeout branch hits `obj8_stateA=301`, `sub_5B0_queue_activate_role_manage` does call into `sub_1032`, but only `sub_1032_queue_enter` fires (`tick=486`) and there is no matching `sub_1032_queue_commit`. The entry-side snapshot already shows `queueActive=1`, `queueText=050177f0`, and `queueCallback=00000000`, so the queue is still occupied by the older no-callback item before the role-manage request arrives.
+- verified: because the second enqueue is rejected at the existing-active check, `title_activate_role_manage_screen()` itself never executes in the same run. No such trace appears before the delayed login-success packet finally lands, sets `ownerObj.byte2=3`, and the usual `010534b4 -> 01053450` teardown resumes.
+- evidence: `bin/logs/net_trace.log` lines for `sub_1032_queue_enter/sub_1032_queue_commit` at `tick=110`, `sub_5B0_queue_activate_role_manage` + `sub_1032_queue_enter` at `tick=486`, the absence of a second `sub_1032_queue_commit` or `title_activate_role_manage_screen`, and the later `ownerObj.byte2 ... new=00000003` / `screen_manager idx=6 remove r0=010534b4`.
+- next: the blocker is no longer “timeout branch missing” or “queued callback not consumed”. The next narrow target is why the earlier queue entry (`queueText=050177f0`, `queueCallback=0`) remains active for hundreds of ticks without a clear/reset, and what local callback or state transition is supposed to release that queue before the role-manage timeout path tries to use it.
+
+## 2026-06-04
+- changed: widened the read-only queue tracing around the stale title-local popup item. `src/main.c` now logs direct writes to `queueStyle/queueFlag1/queueActive/queueText/queueCallback`, and also traces the most likely consumer/reset functions: `sub_F50`, `title_activate_popup_screen_if_idle`, `sub_FF0`, `role_manage_screen_enter_action_menu`, `role_manage_screen_handle_network`, `sub_5922`, and `sub_5A74`.
+- purpose: distinguish whether the long-lived `queueText=050177f0` item is never revisited, revisited but blocked by input-gate logic, or explicitly cleared by a later local release function before the role-manage timeout path tries to enqueue its own callback.
+
+## 2026-06-04
+- verified: the stale queue item is now pinned to the `99/1` generic-cleanup branch in `sub_938(event=7)`. Runtime `queueText=050177f0` maps back to relocated static data `&unk_C20`, and static `sub_938` shows that exact data object is enqueued only on the early `if (packet_check(..., 10, 19)) sub_10C6(&unk_C20, 0)` branch before the normal `type=1/subtype=2|3|6` scan.
+- verified: on the newest rerun, the queue item is created once and then never touched again before login success lands. After `tick=110` there are no further `trace_title_queue_write` lines for `queueText/queueCallback/queueActive`, and none of the suspected consumer/reset entry traces (`title_activate_popup_screen_if_idle`, `sub_F50`, `sub_FF0`, `sub_5922`, `sub_5A74`, `role_manage_screen_enter_action_menu`, `role_manage_screen_handle_network`) appear at all in the same delayed-success session.
+- implication: the current blocker is no longer “clear function runs but gate fails”. The old `&unk_C20` popup/queue item simply is not being revisited on the active emulator path before the later `>300` role-manage timeout wants the same queue.
+- evidence: `bin/logs/net_trace.log` `tick=110` queue writes (`queueText=050177f0`, `queueActive=1`), the total absence of later queue writes or consumer traces, plus static `sub_938` branch at `0xA2E..0xA32`.
+- next: the next narrow target is upstream of the queue clearers. Either the emulator is missing the local callback/timer that normally re-enters `title_activate_popup_screen_if_idle()` after `sub_938` enqueues `&unk_C20`, or the `packet_check(...,10,19)` path itself is only supposed to happen under a different pre-login contract and should not be taken on this screen at all.
+
+## 2026-06-04
+- changed: added one more read-only watcher layer above the stale `&unk_C20` queue item. `src/main.c` now traces the post-call result site of `sub_938`'s `packet_check(...,10,19)` branch and the four local popup-driver functions that govern the `base+10300/10301/10303` counters (`sub_4A4`, `sub_454`, `sub_564`, `sub_59E`).
+- purpose: distinguish whether the current mismatch is caused by the wrong early packet-check branch being taken at all, or by the popup-driver/timer state machine simply never advancing far enough to revisit the queued `&unk_C20` item after it is created.
+
+## 2026-06-04
+- verified: the popup/timer layer is not missing on the delayed-success title path. After the first `99/1` exchange commits `queueText=050177f0` / `queueActive=1` at `tick=110`, `sub_59E_popup_dispatch` keeps re-entering on the active `010534b4` screen with the same live queue snapshot (`queueActive=1`, `queueText=050177f0`, `queueCallback=0`, `popupTarget=0`, `popupCount=0`).
+- verified: the later accepted login-success delivery is not recreating that stale queue item. At the delayed success window (`tick=536`), `trace_title_router_gate label=sub_938_packetcheck_10_19_result` reports `r0=0`, matching the static `CMP R0,#0 ; BNE loc_A2E` gate and proving `packet_check(...,10,19) -> sub_10C6(&unk_C20, 0)` did not fire on that accepted-object path.
+- implication: the blocker has moved one layer deeper than the popup timer. The queue is being revisited by the local driver, but it never advances into a visible popup consumer/reset path before accepted login success sets `ownerObj.byte2=3` and `sub_5B0` tears down `010534b4`.
+- evidence: `bin/logs/net_trace.log` around `tick=110` (first queue commit), the repeated `sub_59E_popup_dispatch` samples through roughly `tick=478..536`, the late `sub_938_packetcheck_10_19_result r0=0`, and the immediate `ownerObj.byte2 ... new=00000003` / `screen_manager idx=6 remove r0=010534b4` sequence at `tick=536`.
+- next: trace the popup object's own consumer/dispatch layer beneath `sub_59E/sub_564`, rather than the high-level timer. The remaining gap is now most likely in the local object method(s) that should convert `queueActive=1` + `queueText=&unk_C20` into a real popup activation or queue clear.
+
+## 2026-06-04
+- changed: pushed the next read-only trace layer beneath the title popup timer into the shared objC bridge that `sub_564()` actually polls. `src/main.c` now logs `trace_title_popup_bridge` at CBE runtime `0x01034874/0x010348FC/0x0103478E/0x01034868/0x01034922`, corresponding to objC `+0x28/+0x24/+0x2C/+0x30` and bridge init, and it also extends `trace_title_child_state_write` to watch objC fields `+4/+8/+0xC/+0x10/+0x11`.
+- purpose: settle the now-narrowest split without changing behavior: whether the repeated `sub_59E/sub_564` revisits are actually entering the shared popup bridge and mutating its internal state, or whether the queue stalls one layer earlier before those objC methods can consume `&unk_C20`.
+
+## 2026-06-04
+- verified: the shared popup bridge is active on the current `010534b4` path, but it degrades into a guard-only loop once the stale queue item is committed. Before the `99/1`-era queue becomes active, the bridge still runs a richer sequence: `shared_popup_bridge_cb28_poll`, then a state write `objC.stateC -> 3`, then `shared_popup_bridge_cb24_dispatch`, and later `shared_popup_bridge_cb30_guard -> shared_popup_bridge_cb2C_pump` while the child event object still reports `eventField10=1`.
+- verified: immediately after the first `99/1` queue commit (`queueText=050177f0`, `queueActive=1`), that richer sequence disappears. On the active title screen, the repeated revisit path becomes only `shared_popup_bridge_cb30_guard`, with stable bridge fields `field4=2`, `stateC=0`, `queueActive=1`, and most importantly `eventObj+16` (`eventField10`) now `0`. Because static `sub_1034868()` only falls through to `sub_103478E()` when `*(_DWORD *)(eventObj + 16)` is non-zero, the bridge now has no reason to enter the pump path anymore.
+- implication: the missing step is no longer just "popup queue not consumed". More narrowly, the bridge's child event object is no longer armed for pumping once the stale queue item is live. The next likely gate is therefore the child event object behind `objC+32`, especially its `+16` flag/state field rather than the top-level queue bits themselves.
+- evidence: `bin/logs/net_trace.log` around `tick=102` (`shared_popup_bridge_cb28_poll`, `objC.stateC -> 3`, `shared_popup_bridge_cb24_dispatch`), `tick=109` (`shared_popup_bridge_cb30_guard` followed by `shared_popup_bridge_cb2C_pump` while `eventField10=1`), and `tick=110..560` where only `shared_popup_bridge_cb30_guard` remains while `queueActive=1`, `queueText=050177f0`, and `eventField10=0`.
+- changed: extended the read-only child-state watcher one more level down so the next rerun can watch `objC.event.byte5`, `objC.event.field10`, and `objC.event.field20` writes directly off the bridge's child event object.
+- next: rerun once on the rebuilt binary and inspect who clears or rearms `objC.event.field10`. That should settle whether the stale popup item fails because the child event object is prematurely reset, or because nothing ever rearms it after the queue item is committed.
+
+## 2026-06-04
+- verified: the child-event rearm question is now resolved. On the active `010534b4` path, `objC.event.byte5` and `objC.event.field10` are first armed by `event_packet_add_field()` (`last=01034606` and `last=0103460e`), which matches the static helper writing `eventObj+5 = 1` and incrementing `eventObj+16`.
+- verified: that same arm is torn back down by the bridge pump path itself before the `99/1` queue item is committed. During the same `tick=107` window, `shared_popup_bridge_cb2C_pump` runs, then `sub_103478E()` clears `objC.event.byte5` (`last=010347aa`), and `event_packet_init()` clears `objC.event.field10` (`last=01034702`) while leaving `objC.event.field20` unchanged (`last=010346f2` only re-stores the existing callback pointer).
+- implication: the stale popup item is not failing because some later unrelated code clears `eventObj+16`; it is failing because the bridge's own `cb2C_pump -> event_packet_init()` cycle resets the child event object to an unarmed state and nothing rearms `eventObj+16` after `queueText=050177f0` / `queueActive=1` goes live.
+- evidence: `bin/logs/net_trace.log` `tick=107` lines for `objC.event.byte5 -> 1`, `objC.event.field10 -> 1`, `shared_popup_bridge_cb2C_pump`, then `objC.event.byte5 -> 0` and `objC.event.field10 -> 0`; paired static recovery of `event_packet_add_field()` (`0x010345D4`), `event_packet_init()` (`0x010346E0`), and `sub_103478E()` (`0x0103478E`).
+- next: stop looking for a mysterious later clearer of `eventObj+16`. The next narrow target is now upstream of `event_packet_init()`: what real contract is supposed to call `event_packet_add_field()` again, or otherwise rearm the child event object after the stale `&unk_C20` queue item has been committed.
+
+## 2026-06-04
+- verified: the new mode-object watcher resolves the first layer beneath `sub_840_mode1_call_cbA`. Runtime `modeObjCb4/8/C` values on the active `010534b4` path map cleanly back to two title-module object families:
+  - `050192f5/05019399/050193fb` -> relocated `0x2724/0x27C8/0x282A` -> `title_four_choice_screen_handle_action`, `title_render_four_choice_menu_hitboxes`, `title_four_choice_screen_render`
+  - `050196ef/050197b1/05019867` -> relocated `0x2B1E/0x2BE0/0x2C96` -> `login_form_handle_action`, `login_form_handle_touch`, `login_form_render`
+- verified: the live owner-side object pointer actually switches between those two families. At `tick=78`, `ownerObj.modeObjPtr` is written to `0501f820` during screen setup while `ownerObj.mode1CbA/mode1CbB` become `01048F8D/01048FB3`; later, at `tick=123`, `ownerObj.modeObjPtr` changes from `0501f820` to `05010db0` while the armed mode-1 loop is already active.
+- verified: after `obj8.flag10` drops to `0`, the repeated `sub_840_mode1_call_cbA` path is therefore not reaching a hidden role-transition object. It first dispatches into the four-choice UI object, then into the login-form UI object, while `obj2C=1` / `local10344=1` remain unchanged and `sub_840_mode1_call_cbB` / all mode-2 exits stay absent.
+- implication: the current mode-1 callback loop is now strongly identified as ordinary title/login UI dispatch, not the missing disarm path that would clear `obj2C/local10344`. The next narrow gap is one level higher again: who calls the tiny pointer-wrapper setter `sub_1048FE0()` to replace `ownerObj.modeObjPtr`, and what real object family is supposed to be installed before the branch can reach `sub_74A()` / `sub_722()`.
+- evidence: `bin/logs/net_trace.log` lines for `ownerObj.modeObjPtr` writes at `tick=78` and `tick=123`, repeated `trace_title_mode_callback label=sub_840_mode1_call_cbA`, plus static recovery in `mmTitleMstarWqvga.cbm` of `0x2724/0x27C8/0x282A/0x2B1E/0x2BE0/0x2C96`.
+
+## 2026-06-04
+- changed: added the next read-only watcher right at the main-CBE mode-object wrapper. `src/main.c` now traces `sub_1048FE0()` and `sub_1048FEE()` as `trace_title_mode_object_set`, logging `LR`, the slot pointer, old/new object pointer, and the new object's `+4/+8/+C` methods whenever the title owner swaps its mode-local dispatch object.
+- purpose: settle the new narrow split without changing behavior: whether the four-choice -> login-form object switch is driven by the expected title flow, or whether some missing branch should have installed a different role/popup object family before the armed mode-1 loop begins.
+
+## 2026-06-04
+- verified: the new mode-object-set watcher closes that split. The first `modeObjPtr` installation happens inside `sub_A50()` screen init: runtime `mode_obj_set_ptr lr=0501774b` maps back to relocated static `0x0B7B` inside `sub_A50`, which is the same init path already known to load `UI2/UI7/UI8` and clear `obj28/obj2C`.
+- verified: the later `modeObjPtr` swap from `0501f820` to `05010db0` is not an external main-CBE override. Runtime `mode_obj_set_ptr lr=0501938b` maps back to relocated static `0x27BB` inside `title_four_choice_screen_handle_action()`, i.e. the four-choice menu object itself is what replaces the dispatch object.
+- static correlation now explains that exact branch. `title_four_choice_screen_handle_action()` uses the wrapper at `v1 + 10464` to install one of two objects:
+  - selection `1` -> `(*(...))(v1 + 10444, *(_DWORD *)(v1 + 10792), 0)` at static `0x27B8`, matching the runtime swap to the login-form object family
+  - selection `2` -> sibling install from `v1 + 10796` at static `0x27C4`
+  - selection `0` with confirm sends `net_build_login_request(1, 12, 5)` directly, and selection `3` exits via `sub_EC(9)`
+- implication: the observed `four-choice -> login form` `modeObjPtr` change is the expected local title flow, not a misroute introduced later by the emulator. The still-missing contract is therefore after that swap: what real event/path should replace the login-form-mode object or clear `obj2C/local10344` before accepted login success later sets `byte2=3`.
+- evidence: `bin/logs/net_trace.log` lines for `trace_title_mode_object_set` at `tick=78` and `tick=128`, plus static recovery of `sub_A50()` and `title_four_choice_screen_handle_action()` in `mmTitleMstarWqvga.cbm`.
+
+## 2026-06-04
+- changed: extended `trace_title_login_write` to watch the four-choice sibling object slots at `base+10792/10796` as `choiceObj1` / `choiceObj2`.
+- purpose: make the next rerun answer the most useful remaining object question directly: which concrete pointers are stored in the selection-1 and selection-2 object slots before `title_four_choice_screen_handle_action()` installs one of them into `ownerObj.modeObjPtr`, and whether the non-login sibling points at a materially different role/popup object family.
+
+## 2026-06-04
+- verified: the first rerun with write-only `choiceObj1/choiceObj2` watching did **not** log any writes to `base+10792/10796` during the visible title/login interaction window. The existing `modeObjPtr` swap pattern remains unchanged: `sub_A50()` installs the four-choice object at `tick=78`, then `title_four_choice_screen_handle_action()` swaps to the login-form object at `tick=122`.
+- implication: those two sibling object slots are probably pre-seeded earlier than the current visible interaction window, or filled through a path that the current write-only watcher does not catch at the moment of interest. So absence of write logs should not be read as "the slots are unused".
+- changed: promoted the same two fields into the live mode callback traces. `trace_title_mode_callback` and `trace_title_mode_object_set` now dump `choiceObj1` / `choiceObj2` on every relevant callback/swap, so the next rerun can read their current values even if no fresh write occurs.
+
+## 2026-06-04
+- verified: the live-value rerun now exposes both sibling object slots directly. On the active `010534b4` screen, `choiceObj1` is `05010db0` and `choiceObj2` is `0501f808` from the earliest visible mode-object wrapper traces onward.
+- verified: `choiceObj1` is the same object later installed into `ownerObj.modeObjPtr` by the `title_four_choice_screen_handle_action()` selection-1 branch. At the swap site, runtime shows `choiceObj1=05010db0` and `newPtr=05010db0` in the same `mode_obj_set_ptr` record.
+- implication: selection `1` is now runtime-confirmed as the login-form object slot, while selection `2` remains a distinct pre-seeded sibling object (`0501f808`) that has not yet been exercised on the current path.
+- changed: widened the live traces one more step so the next rerun also prints `choiceObj1/choiceObj2` callback triples (`+4/+8/+C`). That should let us classify the selection-2 sibling object without needing it to become active first.
+
+## 2026-06-04
+- verified: the callback-triple rerun classifies the selection-2 sibling too. `choiceObj2=0501f808` carries callbacks `0501c0a3/0501c127/0501c181`, which relocate to static `0x54D2/0x5556/0x55B0` in `mmTitleMstarWqvga.cbm`. At that stage we provisionally labeled them as a second login-screen family, pending direct runtime activation.
+- verified: `choiceObj1=05010db0` remains the newer login-form object family (`login_form_handle_action/touch/render`).
+- hypothesis: before a forced activation run, `choiceObj2` still looked like "another login-family sibling" because it shared the same four-choice installation path and had not yet been observed on screen.
+
+## 2026-06-04
+- verified: the newest rerun still does not activate `choiceObj2`. Runtime keeps the initial four-choice object `0501f820` until `tick=290`, then `mode_obj_set_ptr` installs `choiceObj1=05010db0`; there is no `newPtr=0501f808` anywhere in the run.
+- verified: the active local path after that swap is still the same armed mode-1 loop. Repeated `sub_840_mode1_call_cbA` samples show `modeObjPtr=05010db0`, `choiceObj2=0501f808`, and stable `obj2C=1` / `local10344=1`, so the old/simple login-screen sibling exists but is not selected on this path.
+- evidence: `bin/logs/net_trace.log` `tick=70` setup, `tick=290` `mode_obj_set_ptr`, and later repeated `sub_840_mode1_call_cbA` lines with `modeObjPtr=05010db0`.
+
+## 2026-06-05
+- changed: widened the title-login state/write watchers to include the four-choice current selection byte at `base+10733` as `choiceSel`.
+- purpose: the current path is now confirmed to prefer `choiceObj1/login_form`, but the selection source is still opaque. The next rerun should answer whether `choiceSel` is initialized to `1`, later rewritten by local input, or preserved untouched across the `99/1` arm and the later `modeObjPtr` swap.
+
+## 2026-06-05
+- verified: `choiceSel` is not preinitialized to `1`. The new rerun shows it starts at `0` during `sub_A50()` setup and remains `0` across the early `99/1` data-event window (`pre/post_data_event_05017509` at `tick=108`).
+- verified: the decisive `0 -> 1` transition happens later at runtime `last=05019098`, i.e. relocated static `0x24C8` inside `sub_248E()`. Static recovery of `sub_248E()` shows that exact instruction is the generic hit-test helper's `*a9 = n2_2` write, reached when the current pointer/touch falls inside option index `n2_2` and the existing selection byte differs from that index.
+- verified: the following `modeObjPtr` swap to `choiceObj1=05010db0` then happens only on the next same-option activation. In `sub_248E()`, when the hit option already equals the current selection, the helper calls the supplied callback with `0x4000`; in this title path that callback is `title_four_choice_screen_handle_action()`, which then installs `choiceObj1`.
+- implication: the current `four-choice -> login_form` path is not driven by a timer or hidden network state. It is a two-step local UI sequence:
+  1. `sub_248E()` sets `choiceSel = 1`
+  2. a later same-hit invocation calls `title_four_choice_screen_handle_action(0x4000)`, which installs `choiceObj1`
+- evidence: `bin/logs/net_trace.log` `choiceSel` write at `tick=140`, later `mode_obj_set_ptr` at `tick=156`, and static decompile/disassembly of `sub_248E()` at `0x24C8/0x24CC/0x24D0`.
+
+## 2026-06-05
+- changed: built a focused differential experiment into `src/main.c`. When `sub_1048FE0()` is called from `title_four_choice_screen_handle_action()` (`LR=0501938B`) and is about to install `choiceObj1`, the emulator now overrides that one install to `choiceObj2` and also rewrites `choiceSel` to `2`.
+- purpose: compare the older `login_screen_*` family against the newer `login_form_*` family without depending on manual option-2 input. The goal is to settle whether both login UIs still converge into the same armed `obj2C/local10344` mode-1 problem.
+- validation: rebuilt successfully with `make`; this is an explicit experiment build and should be interpreted separately from natural-path traces.
+
+## 2026-06-05
+- verified: the forced-selection experiment works as intended. Runtime now logs `force_title_choice2_install ... forcedPtr=0501f808 choiceSelNew=2`, immediately followed by `mode_obj_set_ptr ... newPtr=0501f808`, so the active mode object is definitely switched away from `choiceObj1` and into `choiceObj2`.
+- verified: direct on-screen observation disproves the earlier "old/simple login-screen" label. The forced `choiceObj2` page renders as a recharge selection screen titled `江湖充值`, with options `快速充值` / `手动充值`, explanatory text `对登录的默认账号直接充值`, and bottom buttons `确认` / `返回`.
+- verified: the recharge-page branch still does not escape the armed mode-1 state. Throughout the forced `choiceObj2` windows (`tick=132`, `196`, `225`, `238`, `293`, `333`, `344`), `sub_840_mode1_call_cbA` runs with `modeObjPtr=0501f808` while `obj2C=1` and `local10344=1` remain unchanged.
+- verified: `choiceObj2` is not a terminal sink; it has at least two local transitions back out:
+  - `lr=0501c125`: `0501f808 -> 0501f820` (recharge page back to the four-choice object)
+  - `lr=0501c11b`: `0501f808 -> 05010db0` (recharge page into `choiceObj1/login_form`)
+- implication: the four-choice branch is no longer "new login form vs old login screen". It is "login form vs recharge selection", and the recharge branch still inherits the same pre-armed `obj2C/local10344=1` mode-1 contract instead of clearing it.
+- evidence: `bin/logs/net_trace.log` lines around `tick=115/158/218/271/418` for `force_title_choice2_install`, `tick=132/196` for `0501f808 -> 0501f820`, `tick=241/361` for `0501f808 -> 05010db0`, plus the user's direct screenshot of the forced page.
+
+## 2026-06-05
+- changed: replaced the temporary `choiceObj2` forced-install build with a new direct-jump validation build aimed at the already recovered `target50` role-list success family. When `title_four_choice_screen_handle_action()` reaches the normal `choiceObj1` install site (`LR=0501938B`), the emulator now substitutes `target50` (`base+10808`) into `sub_1048FE0()` and also forces the composite mode word `base+10748 = 1`.
+- purpose: validate whether the sibling `+0x50` local target can be reached directly from the current `010534b4` path and whether the role-list/server-family UI can be brought up at all without solving the whole `99/1` contract first.
+- validation: rebuilt successfully with `make`; this is another explicit experiment build and should be interpreted separately from both the natural path and the earlier forced-recharge-path build.
+
+## 2026-06-05
+- verified: the direct-jump `target50` experiment does install the target-family object. In the new rerun, `force_title_target50_role_install` fires at `tick=337`, then `mode_obj_set_ptr` switches the active object to `newPtr=0501f850` with callback triple `0501ae61/0501ae89/0501b2c5`.
+- verified: that alone is still insufficient to keep the local composite screen in role mode. In the same window, the forced `mode=1` write is immediately followed by local writes that reset `mode -> 0`, `sel0 -> 0`, `sel1 -> 0`, and keep `roleFamily=0`.
+- implication: the remaining gap has narrowed again. `target50` is a real reachable object family, but it appears to run initialization or fallback logic that immediately returns the composite state to server/idle mode when the expected backing role/server data is absent.
+- changed: added a narrow watcher layer for exactly that reset path. The current build now traces:
+  - `0501ae60/0501ae88/0501b2c4` as the active `target50` callback-family entries
+  - `0501a6b8/0501a6c4/0501a6ce` as the observed local `mode/sel0/sel1` reset sites
+  - `0501c770` as the observed `roleFamily` clear site
+- purpose: the next rerun should answer whether `0501f850` itself actively resets the composite state, or whether a deeper helper discovers missing backing data and forces the fallback.
+
+## 2026-06-05
+- verified: the reset-path rerun resolves the main ambiguity. Runtime `0501a6b8/0501a6c4/0501a6ce` relocate to static `0x3AE8/0x3AF4/0x3AFE`, which are all inside `role_manage_screen_init()`, not a later failure-only fallback helper.
+- verified: the forced `target50` object `0501f850` is the title-side role-manage family. Its callback triple relocates to:
+  - `0501ae61 -> 0x4290 -> role_manage_screen_dispatch_mode_input()`
+  - `0501ae89 -> 0x42B8 -> role_manage_screen_handle_input()`
+  - `0501b2c5 -> 0x46F4 -> role_manage_screen_render()`
+- verified: the first `target50` install window already shows `modeObjPtr=0501f850` while `listPtr=0`, `roleFamily=0`, `obj2C=1`, and `local10344=1`; `role_manage_screen_init()` then immediately resets `mode -> 0` and `sel0/sel1 -> 0` as part of its normal setup.
+- correction: the `0501c770` trace label is broader than first assumed. Static recovery maps it to `sub_5B88()`, a generic zero-fill helper used during screen initialization, so it should not be read by itself as a role-family-specific fallback decision.
+- implication: the current `target50` experiment already proves the role-manage family is installable, but the remaining blocker is no longer “why does a fallback clear mode”; it is “what backing role/server state should exist before `role_manage_screen_init()` so the newly installed role-manage object can progress beyond its normal zeroed startup state”.
+- evidence: `bin/logs/net_trace.log` around `tick=150` (`force_title_target50_role_install`, `target50_reset_mode0`, `trace_title_login_write label=mode`), plus static decompile of `role_manage_screen_init()` / `role_manage_screen_dispatch_mode_input()` / `role_manage_screen_handle_input()` / `role_manage_screen_render()` in `mmTitleMstarWqvga.cbm`.
+
+## 2026-06-05
+- changed: widened the `target50` watcher to expose the role-manage family's backing state directly. `trace_title_target50_path` now includes:
+  - `slotLimit` from `base+10737`
+  - `initDone` and `uiWord56/58/60/62/64` from `base+10754..10764`
+  - `activeRoleIndex` from `base+11124`
+  - `roleCount` plus the first two raw tag bytes at `*base+10788`
+- changed: mirrored the same fields into `trace_title_login_write` so the next rerun can catch live writes to the role-manage setup words, not just their sampled values at `target50` entry.
+- purpose: the next rerun should answer whether the install failure is simply "workspace count is zero", "activeRoleIndex is out of range", or a different role-manage startup precondition altogether.
+
+## 2026-06-05
+- verified: the widened `target50` rerun answers that backing-state split directly. At the forced install window (`tick=121`), the role-manage object is entered with:
+  - `listPtr=0`
+  - `roleCount=0`
+  - `tag=0,0`
+  - `activeRoleIndex=0`
+  - `slotLimit=0`
+  - `initDone=0`
+  - `uiWord56/58/60/62/64 = 0/0/0/0/0`
+- verified: those values remain zero through `target50_reset_mode0`, `target50_reset_sel0`, and `target50_reset_sel1`; only the ordinary `mode -> 0` reset from `role_manage_screen_init()` is observed.
+- implication: the current forced-install path is not failing because of a subtle index mismatch. It is entering `role_manage_screen_init()` with an entirely empty role-manage backing workspace, so the role-manage family never gets past its normal zero-state startup.
+- evidence: `bin/logs/net_trace.log` lines around `tick=121` for `trace_title_target50_path label=target50_clear_roleFamily`, `target50_reset_mode0`, and the matching `trace_title_login_write label=activeRoleIndex`.
+
+## 2026-06-05
+- verified statically: the missing workspace is not something `target50` allocates for itself. In `mmTitleMstarWqvga.cbm`, `role_list_screen_init()` allocates and zeroes the `base+10788` workspace (`19236` bytes), stores the pointer to `base+10788`, seeds per-slot UI objects, and sets `state0=1` / ready byte `base+11046=1`.
+- verified statically: `title_handle_role_list_response()` is the confirmed network-fed filler for that same workspace. On `type=1/subtype=4`, it reads the role count into `*(*base+10788)`, fills repeated role records under the workspace, then calls `title_transition_router_invoke_default_target()`.
+- implication: the current `target50` force-jump is bypassing the whole role-list seeding contract. The empty `listPtr=0` seen at `role_manage_screen_init()` is now best explained by the fact that neither `role_list_screen_init()` nor `title_handle_role_list_response(1/1/4)` has run on the current path.
+- changed: added a new read-only watcher family for that upstream contract:
+  - `role_list_screen_init`
+  - `title_handle_role_list_response`
+  - `title_transition_router_invoke_default_target`
+  It logs `listPtr`, `roleCount`, role-list ready byte, the active mode object, and a couple of representative workspace fields so the next rerun can show whether the title path ever seeds the role-list family before the later `target50` experiment.
+- validation note: because the user's current `bin/main.exe` was still locked by the last run, this watcher build was linked as `bin/main_roletrace.exe` instead of overwriting `bin/main.exe`.
+
+## 2026-06-05
+- verified: the rebuilt `main.exe` with the new role-list watcher still shows no `trace_title_rolelist_path` hits at all on the current login/title run. None of the three upstream probes fire:
+  - `role_list_screen_init`
+  - `title_handle_role_list_response`
+  - `title_transition_router_invoke_default_target`
+- verified: the same rerun also shows no `1/1/16` request or `1/1/4` reply in the packet/log stream before the later forced `target50` substitution.
+- implication: the present path is not “reaching role-list seeding and then leaving the workspace empty”. It is skipping the entire role-list contract before the `target50` experiment point. The empty `listPtr=0` at `role_manage_screen_init()` is therefore a consequence of the upstream branch never entering the role-list family in the first place.
+- evidence: absence of any `trace_title_rolelist_path` lines in `bin/logs/net_trace.log`, plus absence of `1/1/16` / `1/1/4` markers in the same session’s packet/trace logs.
+
+## 2026-06-05
+- changed: replaced the temporary direct-jump target again. The current validation build no longer substitutes `target50`; it now substitutes `target4c` at the same `title_four_choice_screen_handle_action()` install site.
+- change detail:
+  - old experiment: `choiceObj1 -> target50` and force `mode=1`
+  - new experiment: `choiceObj1 -> target4c` only, with no forced write to `base+10748`
+- purpose: validate the earlier role-list family directly, without contaminating the path with the later role-manage local mode contract. The next rerun should look for `force_title_target4c_rolelist_install`, then see whether `role_list_screen_init`, `role_list_screen_render`, or the `1/1/16 -> 1/1/4` exchange finally appears.
+- validation: rebuilt successfully with `make`.
+
+## 2026-06-05
+- verified: the `target4c` direct-jump experiment does enter the earlier role-list family. Runtime now shows `force_title_target4c_rolelist_install`, immediate `mode_obj_set_ptr ... newPtr=0501f838`, and a direct hit on `trace_title_rolelist_path label=role_list_screen_init`.
+- verified: the role-list family then emits a real outbound `1/1/16` request on the next tick. The request appears as `send_payload len=9 ... hex=575400090101100005`, i.e. top-level `1/1/16`, and the same session logs `unhandled_packet WT len=9 hdr=1/16 objs=1/1/16 count=1`.
+- implication: the current blocker has moved again. We no longer need to guess whether `target4c` is the right upstream family; it is. The missing emulator/server contract is now the response side of that `1/1/16` exchange, which should eventually drive `title_handle_role_list_response()` and seed the `base+10788` role-list workspace before any later `target50` / role-manage path can work.
+- evidence: `bin/logs/net_trace.log` around `tick=169..170` for `force_title_target4c_rolelist_install`, `trace_title_rolelist_path label=role_list_screen_init`, `send_call connect=2 len=9`, and `unhandled_packet ... hdr=1/16`; matching `bin/logs/net_packets.log` `send_payload ... hdr=1/16`.
+
+## 2026-06-05
+- changed: wired a minimal live handler for the newly confirmed `1/1/16` role-list request into `src/main.c`. The current build now answers top-level `1/1/16` with a two-object WT packet:
+  - `1/1/16 { result = 1 }`
+  - `1/1/4 { actorinfo = counted title-side role-entry table }`
+- rationale: static `title_handle_role_list_response()` first caches subtype-16 `result` into ready byte `+11046`, then while that byte is `1` it parses subtype-4 `actorinfo` into the `base+10788` workspace and finally invokes the default transition router. `servconf` stays omitted for now because the parser treats it as optional.
+- validation: rebuilt successfully with `make`. The next rerun should confirm whether this minimal stage response is enough to hit `trace_title_rolelist_path label=title_handle_role_list_response` and populate `listPtr/roleCount`.
+
+## 2026-06-05
+- verified: the new live `1/1/16` handler does fire on the forced-`target4c` path. Runtime now shows `mock_default source=builtin-title-rolelist-stage len=73`, then two direct hits on `trace_title_rolelist_path label=title_handle_role_list_response`, followed by `trace_title_rolelist_path label=title_transition_router_invoke_default_target`.
+- verified: this is the first run where the earlier role-list family is confirmed end-to-end through its local response parser. At router time the trace shows `ready=1`, `listPtr=05400000`, and `roleCount=1`, proving the minimal `16(result=1) + 4(actorinfo)` reply is sufficient to drive `title_handle_role_list_response()`.
+- verified: the same window also shows subsequent local seeding for the later family: `initDone -> 1`, `slotLimit -> 2`, resource loads for `UI10/UI14/UI16/UI20/updown.gif`, and a later `target50_cbC_enter` with `modeObjPtr=0501f850` and `listPtr=0501fa50`.
+- implication: the active gap has narrowed again. We are no longer blocked on entering role-list or on satisfying `title_handle_role_list_response()`. The next problem is the handoff/steady-state after that router callback: the title path still remains on `activeScreen=010534b4` with `mode=0`, `obj2C/local10344=1`, and the later target50-side trace still reports `roleCount=0`.
+- evidence: `bin/logs/net_packets.log` line `tick=376 source=builtin-title-rolelist-stage responseLen=73`; `bin/logs/net_trace.log` lines for `title_handle_role_list_response`, `title_transition_router_invoke_default_target`, `trace_title_login_write label=initDone`, `trace_title_login_write label=slotLimit`, `trace_title_login_state ... listPtr=05400000 listCount=2`, and `trace_title_target50_path label=target50_cbC_enter`.
+
+## 2026-06-05
+- clarified: the title login entry is now statically split into two different request/owner families, not one login request with interchangeable field spellings.
+- verified:
+  - `title_four_choice_screen_handle_action()` sends `net_build_login_request(1, 12, 5)` when `choiceSel == 0`
+  - `login_form_submit()` sends `net_build_login_request(1, 1, 6)` on explicit account/password confirm
+  - `net_build_login_request()` uses different credential sources on those branches: subtype `1` writes `userName` from live edit buffers, while subtype `12` writes `username` from saved `mmorpg_LoginRecord`
+  - the response owners are also distinct: `1/1/12 -> login_alt_response_dispatch_wrapper() -> login_stage_success_dispatch()`, `1/1/1 -> login_primary_response_dispatch() -> login_response_result_dispatch()`
+- implication: if the emulator answers a live `1/1/12` request with the `1/1/1` primary-success contract, or lets a later side-stage packet dominate the window, the client may still appear to "accept a login response" while being routed into the wrong local target family. The highest-confidence path for the expected server-list selection UI remains the explicit login-form `1/1/1` branch with `serverinfo/servernum/newVer`.
+- changed: narrowed the queued `1/1/15 {result=1}` follow-up in `src/main.c` so it now only attaches to alternate `1/1/12` requests. The explicit primary `1/1/1` login-form path can now be rerun as a cleaner control case.
+- verified: that clean control rerun is now complete and still negative. The live session shows only the primary pair:
+  - request `hdr=1/1` with `userName/password/imsi`
+  - response `mock_login_primary_validation_response top=1,1,1 servernum=1`
+  - no queued `1/1/15` follow-up in the same window
+- verified: despite that clean wire pair, the response is still delivered under `dispatch=05017509`, and `trace_title_login_state` remains unchanged across `pre/post_data_event_05017509` (`mode=0`, `listPtr=0`, `roleFamily=0`, `activeScreen=010534b4`).
+- implication: removing the old `1/1/15` side-stage contamination is not sufficient to recover the expected server-list flow. The remaining blocker is now better framed as an owner/target handoff problem before primary success delivery, not as a missing late follow-up packet after delivery.
+
+## 2026-06-05
+- changed: documented the confirmed local scene-resource wrapper and added a first standalone exporter script at `tools/export_map_bmp.py`.
+- verified: `JHOnlineData/*.sce` / `*.map` / `*.actor` resources currently split into two confirmed wrapper families: `type=1` (`len_le32` + `0x01` + custom GIF payload for `gifDecodeExt`) and `type=2` (`len_le32` + `0x02` + `be32 compLen` + `be32 outLen` + custom LZSS stream). The `.sce` sample `c00蓬莱仙岛_01.sce` expands to `SCE2` and embeds `00蓬莱仙岛_01.map`; the `.map` sample expands to `u32 imageCount`, `len+name` image list, `u32 mapWidth/mapHeight/tileWidth/tileHeight`, then a dword cell table.
+- verified: for the currently tested map family, the practical render rule that reproduces coherent scene BMPs is `imageIndex = (cell >> 24) & 0x0F`, `tileIndex = cell & 0xFF`, with `imageIndex` selecting the decoded `m_*.gif` atlas and `tileIndex` selecting a row-major `16x16` tile inside that atlas. The upper nibble `cell >> 28` is now recorded as an unresolved flag field; it is not needed to render most tested maps, but two palace-style samples still produce out-of-range tile ids and remain partial.
+- evidence: IDA decompile of `sub_100D564`, `vm_IMG_CreateImageFormStream`, and `src/gifDecode.c`; Python validation against `00蓬莱仙岛_01.map`, `00蓬莱仙岛_02.map`, `00蓬莱仙岛_03.map`, `01桃花岛_01.map`, `04临安府_01.map`; visual check of provisional BMP exports from the new script.
+
+## 2026-06-05
+- corrected: the first exporter pass had the `.map` cell table transposed. The loader stores cells as `cells[col][row]`, not row-major `cells[row][col]`, and the render path indexes them in that same order.
+- verified: `sub_100D564()` reads `cols = div(mapWidth, tileWidth)` into `a1+16`, `rows = div(mapHeight, tileHeight)` into `a1+20`, allocates an outer pointer table of `cols`, then for each outer slot allocates an inner dword array of `rows` and fills it directly from the stream. `sub_10053A4()` later indexes `a1+24[firstIndex][secondIndex]`, where the outer loop advances by tile width / X and the inner loop advances by tile height / Y. This matches `cells[col][row]` storage.
+- corrected: the same exporter pass also truncated the frame selector to `cell & 0xFF`; the draw path actually strips only the top 8 bits and uses the full low 24 bits as the tile/frame ordinal.
+- validation: after switching to column-major lookup and `tileIndex = cell & 0x00FFFFFF`, `01桃花岛_01.map`, `04临安府_01.map`, and `00蓬莱仙岛_01.map` all export into coherent layouts instead of the earlier scrambled/repeated patterns.
+
+## 2026-06-05
+- verified: the ordinary on-disk `JHOnlineData/*.actor` resources are a separate type-2 descriptor family parsed by `sub_100DB82()`, not the synthetic `0xF1` motion-wrapper shape used in the earlier mock experiment.
+- verified: the common type-2 `.actor` payload layout is:
+  - `u32 imageCount`
+  - `imageCount * (u8 len + ascii imageName)`
+  - `u32 rectCount`
+  - `rectCount * { i32 left, i32 top, i32 right, i32 bottom, i32 imageIndex }`
+  - `u32 animationCount`
+  - `animationCount * { u32 partCount, partCount * { u32 partId, u32 frameCount, frameCount * { i32 rectIndex, i32 offsetX, i32 offsetY, i32 unk3, i32 unk4 } } }`
+- verified: `sub_100DB82()` stores the rectangle records as `10-byte` entries derived from two corners (`w = right - left`, `h = bottom - top`) and stores the nested animation records as `8-byte` part headers plus `10-byte` frame entries. In the current asset set, `frame.unk3` is always `1` and `frame.unk4` is always `0`.
+- evidence: static decompile/disassembly of `sub_100DB82()` plus parse validation across all tracked type-2 actor samples in `bin/JHOnlineData`: `130` ordinary `.actor` files parse cleanly with this schema, while only the two mock files `c_mock_missing_motion.actor` / `mock_missing_motion.actor` stay on the synthetic `type=0xF1` path.
+- changed: added `tools/inspect_actor.py` so ordinary `.actor` files can now be dumped into JSON directly from the repository without redoing the format recovery by hand.
+
+## 2026-06-05
+- changed: added `tools/export_actor_gif.py` to render ordinary type-2 `.actor` resources into animated GIFs by compositing their referenced `*.gif` atlases and rectangle table.
+- verified: the raw `.actor` records can be projected into at least two useful visualizations:
+  - `mode=animations`: one GIF per outer animation entry, where each inner entry is treated as a fully composited frame/layer set
+  - `mode=tracks`: one GIF per repeated `part_id`, stitched across outer animation entries in file order
+- evidence: sample exports now render plausibly for both object and character actors, e.g. `b_bamboo.actor` as a static assembled plant sprite and `h_warrior.actor track00` / `boss09.actor track00` as coherent character/monster composites. The exact gameplay meaning of the outer animation index versus repeated `part_id` is still not fully confirmed, so the exporter intentionally keeps both projections available instead of hard-coding one interpretation as final.
+
+## 2026-06-05
+- verified: there are no tracked `.scene` files in `bin/JHOnlineData`; the scene-container files on disk are `.sce`, and they use the same outer type-2 resource wrapper as `.map` / ordinary `.actor`.
+- verified: the `.sce` payload starts with `SCE2`, followed by two little-endian header coordinates/size-like values and a length-prefixed primary `.map` name. Example: `c04临安府_01.sce` decodes to `header_x=304`, `header_y=416`, `header_flag=1`, `map_name=04临安府_01.map`.
+- verified: beyond the header, `.sce` stores scene-content references rather than tile pixels. Recovered samples consistently contain:
+  - references to other `.sce` files, which behave like scene exits / transitions
+  - in-scene `.actor` references for NPCs or interactive props
+  - matching `.xse` names for many of those scene objects
+  - GBK display names for portals and NPCs
+- evidence: direct payload inspection of `c00蓬莱仙岛_01.sce`, `c00蓬莱仙岛_03.sce`, `c04临安府_01.sce`, and `c14蜀山_01.sce`; e.g. `c04临安府_01.sce` includes `04临安府_01.map`, exits to `c04临安府_05.sce` and others, plus NPC records such as `n_solider2.actor` + `04临安宋兵乙.xse` + `宋兵乙`.
+- changed: added `tools/inspect_sce.py`, a heuristic scene inspector that decodes the header, lists `.map/.sce/.actor/.xse` references, and groups nearby actor/xse/display-name triples into a practical scene summary. Its grouping is intentionally heuristic; exact binary field ids inside the post-header object table are still not fully named.
+
+## 2026-06-05
+- changed: upgraded `tools/inspect_sce.py` from the earlier string-only heuristic into a structured scene parser plus static renderer.
+- verified: the leading scene section is now formalized as `kind=1, version=1` plus a prop-scatter block. The common decorative branch uses `placement_count`, `scatter_group=1`, `reserved=0`, `template_count`, then `template_count` `.actor` names and `placement_count * {templateIndex, x, y, flags}`; `c00蓬莱仙岛_01.sce` parses as `2` prop templates (`b_bamboo.actor`, `b_flowers01.actor`) and `7` placements, and the rendered preview places those props coherently on top of the exported map.
+- verified: the most common portal families are now named and parsed structurally:
+  - edge portals with a destination point plus `field6=.sce`, `field7=entryId`, `field0x0A..0x0D=triggerRect`, `field0x13=targetEntryId`
+  - compact/meta portals that omit the destination point but keep the same `.sce + triggerRect + targetEntryId` tail
+  - named/tile portals that use an inline trigger-tile rectangle plus `field0x16=displayName` and `field0x17=targetScene`
+- verified: ordinary scene actors are now parsed as records led by `field3=.actor`, with optional `field4=.xse`, optional `field2=stateText`, optional `field1=displayName`, and a short numeric trailer that often resolves into an on-map position pair. This is enough to render representative town scenes such as `c04临安府_01.sce` and `c14蜀山_01.sce` with their NPC/prop actors composited over the map.
+- validation: representative renders now exist at `tmp/c00_scene.png`, `tmp/c04_scene.png`, and `tmp/c14_scene.png`. A full batch parse over `185` `.sce` files succeeds structurally; only `b_01蓬莱仙岛.sce` still fails earlier at resource decompression, and many non-town scenes still leave some specialized combat/spawner records in `unknown_blob` for future refinement.
+
+## 2026-06-05
+- changed: finished the next owner-handoff watcher in `src/main.c` / `src/hookRam.c`. `hookRamCallBack()` now also traces writes overlapping `g_netCurrentObject + 0x14`, and logs them as `trace_current_net_object_write`.
+- purpose: the clean primary `1/1/1` control already proved that `result=1 + serverinfo + servernum + newVer` still lands while `dispatch=05017509/sub_938` owns delivery. This new watcher is meant to answer the narrower remaining question: which code path installs that shared callback, and whether any earlier local/title transition ever tries to replace it before primary success arrives.
+- validation: rebuilt with `make` after wiring the watcher; build passed.
+
+## 2026-06-05
+- verified: the first `trace_current_net_object_write` rerun finally pins the active-owner handoff sequence around the stuck primary `1/1/1` path.
+- verified: there are exactly two meaningful writes to `g_netCurrentObject + 0x14` before the clean primary login reply arrives:
+  - at `tick=68`, `last=0103BB36`, the main-CBE helper `sub_103BAFA()` clears `*(* (R9+39236) + 20) = 0`
+  - immediately afterwards, still at `tick=68`, `last=050176C2`, the title-module init path `sub_A50()` writes the same callback slot to `05017509`, i.e. relocated `sub_938 + 1`
+- verified: after that install there are no later rewrites before either clean primary `1/1/1` success window. Both login submits log `business_cb_existing obj=010560f0 cb=05017509 reason=login-request`, and both subsequent `pre/post_data_event_05017509` snapshots remain unchanged.
+- implication: the current failure is no longer best framed as “some later code switched the owner away from the primary handler”. On this path, the shared callback slot is explicitly reset by main-CBE startup glue and then claimed by `mmTitleMstarWqvga.cbm::sub_A50()` during `010534b4` screen initialization; nothing later hands it off again before the primary `1/1/1` success lands.
+- evidence: `bin/logs/net_trace.log` lines for `trace_current_net_object_write` at `tick=68`, the later `business_cb_existing ... cb=05017509 reason=login-request` lines, and static IDA for `江湖OL.CBE::sub_103BAFA()` (`0x0103BAFA`, write at `0x0103BB36`) plus `mmTitleMstarWqvga.cbm::sub_A50()` (`0x0A50`, relocated write site at runtime `050176C2`).
+
+## 2026-06-05
+- verified: the outer stuck title screen `010534b4` is created directly by `mmTitleMstarWqvga.cbm::sub_C82()`. The live add-site `last=050178C8` maps back to static `0x0CF8` inside `sub_C82`, exactly where it invokes the manager method at `*(R9+0x203C)+0x10` after `sub_FFA()`, `sub_C54()`, `sub_1114()`, and `title_register_local_screens()`.
+- verified: the same static pass narrows the local child-screen split:
+  - `choiceSel == 0` -> `net_build_login_request(1, 12, 5)`
+  - `choiceSel == 1` -> install `choiceObj1` (`login_form_screen`)
+  - `choiceSel == 2` -> install `choiceObj2` (the recharge/login variant)
+  - `choiceSel == 3` -> call the role-list family's `+0x18` continuation hook, then `sub_EC(9)`
+- implication: there is still no second outer title constructor in this module's recovered local graph; `sub_C82()` is the one visible outer title transition screen, and the interesting remaining branch is now inside its child-screen/continuation setup rather than at a later “mystery owner overwrite”.
+- changed: extended `trace_title_login_state` so the next rerun will print the active child object pointer plus candidate local object callback slot `+0x14` values (`modeObj`, `choiceObj1`, `choiceObj2`, `target48/4c/50/54`). The immediate goal is to confirm at runtime that the installed login-form child already carries `login_primary_response_dispatch()` while the shared owner slot still stays on `sub_938`.
+- validation: rebuilt with `make` after adding the widened title-state trace; build passed.
+
+## 2026-06-05
+- verified: the widened title-state trace disproves the simple “active child object already carries `0x2D80` in `+0x14`” guess. On the clean primary `1/1/1` rerun:
+  - before selection, `modeObj=0501f820` (four-choice) but `modeObj.cb14 = 0`
+  - after switching into the login form, `modeObj=05010db0` with the expected UI callbacks at `cb0/cb4/cb8/cb10`, but `modeObj.cb14` is still `0`
+  - the same is true for `choiceObj1`, `choiceObj2`, and `target48/4c/50/54`: every sampled object's `+0x14` field stays `0`
+- implication: the local screen network callback registered by `title_register_local_screens()` is not stored in the child object instances at the naive `+0x14` slot we just sampled. That means the earlier static owner split (`login_form -> login_primary_response_dispatch`, `role_list -> title_handle_role_list_response`, etc.) is still valid, but the callback must live in manager/registration metadata rather than directly on the active child object payload.
+- evidence: `bin/logs/net_trace.log` lines for `trace_title_login_state` at `tick=118` (`modeObj=0501f820`) and `tick=1160/1169` (`modeObj=05010db0`) showing `cb14=00000000` across the active child, `choiceObj1`, `choiceObj2`, and `target48/4c/50/54`; paired static IDA still shows `title_register_local_screens()` registering `login_primary_response_dispatch`, `title_handle_role_list_response`, and `role_manage_screen_handle_network`.
+
+## 2026-06-05
+- corrected: the previous child-object callback guess was off by one slot family. Static main-CBE helper recovery now shows the local child manager at `base+10444` is built by `sub_1048FEE()` with methods:
+  - `+0x08 -> sub_1048F8C` (call active child `+0x04`)
+  - `+0x0C -> sub_1048FB2/sub_1048FB4` (call active child `+0x08`)
+  - `+0x10 -> sub_1048FCA` (call active child `+0x10`)
+  - `+0x14 -> sub_1048FE0` (replace active child pointer and call child `+0x00`)
+- implication: on the current title path, the most likely local-screen network dispatch route is manager `+0x10 -> child +0x10`, not any direct child `+0x14` field. The login-form child's sampled `cb10` value (`05019951`) already matches relocated `login_primary_response_dispatch + 1`, while the shared business owner still remains `05017509/sub_938`.
+- changed: added a new runtime watcher `trace_title_child_manager_call` at main-CBE `0x1048FCA` (`manager_call_cb10`) and `0x1048FB4` (`manager_call_cb8`). The next rerun should reveal whether the shared title/business path ever forwards a packet into the active child manager, and if so whether `1/1/1` is being passed to the login-form child's `cb10`.
+- validation: rebuilt with `make` after adding the manager-call watcher; build passed.
+
+## 2026-06-05
+- verified: the first `trace_title_child_manager_call` rerun answers the biggest remaining owner question. The clean primary `1/1/1` reply is not being dropped before the child layer; while shared owner `05017509/sub_938` remains active, it **does** forward the packet into the local child manager's `+0x10` path.
+- verified: both primary login windows now show:
+  - `business_cb_existing ... cb=05017509 reason=login-request`
+  - then at delivery time `trace_title_child_manager_call label=manager_call_cb10 ... child=05010db0 ... cb10=05019951 packetKind=1 packetSubtype=1`
+- implication: the earlier framing “`1/1/1` never reaches the primary owner” is now too broad. The packet already reaches the active `login_form` child callback (`login_primary_response_dispatch + 1`) through the outer `sub_938` owner path; the remaining blocker has moved inside the primary wrapper/result-dispatch chain itself.
+- changed: added one more narrow runtime watcher for the relocated primary dispatch family:
+  - `05019950` -> `login_primary_dispatch_entry`
+  - `05018F90` -> `login_result_dispatch_entry`
+  - `05018FA4` -> `login_result_dispatch_success`
+  - `05018FB8/05018FC2` -> failure branches
+  It logs packet `kind/subtype`, current parsed `resultByte`, and the current `target48/4c/50` slots as `trace_title_login_dispatch`.
+- validation: rebuilt with `make` after adding the primary-dispatch watcher; build passed.
+
+## 2026-06-05
+- changed: added a scene-bundle export mode to `tools/inspect_sce.py` via `--bundle-root`. In this mode each scene is written to `<bundle-root>/<scene-file-name>/` and now includes:
+  - `scene.json`
+  - `scene.png`
+  - `map.base.png`
+  - `map_sources/*.png` for the decoded map atlases used by the scene
+  - `actor_previews/*.png` for the actor composites reused during static scene rendering
+- validation: a full rerun to `tmp/all_sce_bundle` produced `185` successful scene bundles and the same single pre-existing decompression failure on `b_01蓬莱仙岛.sce`.
+
+## 2026-06-05
+- verified: the newest clean-primary rerun moves the blocker inside the primary result dispatcher itself. Runtime now shows:
+  - `trace_title_child_manager_call label=manager_call_cb10 ... child=05010db0 ... cb10=05019951 packetKind=1 packetSubtype=1`
+  - `trace_title_login_dispatch label=login_primary_dispatch_entry ... resultByte=1`
+  - `trace_title_login_dispatch label=login_result_dispatch_entry ... resultByte=1`
+  - but no `trace_title_login_dispatch label=login_result_dispatch_success`
+- verified: this matches the current mock payload shape. `bin/logs/net_packets.log` still shows `result` encoded as raw value byte `01` inside the `1/1/1` response (`...726573756c740003000101...`), while static `login_response_result_dispatch()` / `net_handle_login_response()` compare against ASCII digits (`'1'`, `'2'`, ...), not numeric `1/2/...`.
+- changed: updated the built-in login-family mock builders so the `result` field is encoded as ASCII digits on the title-login branches that are statically confirmed to use character comparisons:
+  - primary `1/1/1` success
+  - primary `1/1/1` failure
+  - alternate `1/1/12` success
+  - queued title `1/1/15` success
+- unchanged: numeric `result=1` for the live role-list `1/1/16` path is intentionally left alone, because `title_handle_role_list_response()` checks it as a numeric ready byte rather than an ASCII digit.
+- validation: rebuilt with `make` after the encoding change; build passed.
+
+## 2026-06-06
+- verified: the ASCII-digit fix works. The latest clean primary rerun now shows:
+  - `trace_title_login_dispatch label=login_result_dispatch_entry ... resultByte=49`
+  - `trace_title_login_dispatch label=login_result_dispatch_success`
+  - immediate local transition from `modeObj=05010db0` to `modeObj=0501f838`
+  - `listPtr` seeded to `05400000`
+- verified: the next live client action after primary success is now a real outbound `1/1/16` request (`WT len=9 hdr=1/16 objs=1/1/16 count=1`), which matches the earlier role-list-family recovery.
+- corrected: on the current rolled-back branch that live `1/1/16` request was still unhandled, so the run stopped at `assert(0)` before `title_handle_role_list_response()` could be exercised again.
+- changed: restored a minimal built-in `1/1/16` stage response on the live path:
+  - `1/1/16 { result = 1 }`
+  - `1/1/4 { actorinfo = counted title role-list table }`
+  This matches the already recovered `title_handle_role_list_response()` contract and is intentionally kept separate from the primary `1/1/1` success packet.
+- validation: rebuilt with `make` after restoring the handler; build passed.
+
+## 2026-06-06
+- verified: the restored live `1/1/16` stage is now consumed on the clean primary path. Runtime shows:
+  - `mock_default source=builtin-title-rolelist-stage`
+  - then two child-manager `cb10` dispatches into the active `target4c` family object `0501f838`, first for `packetSubtype=16`, then for `packetSubtype=4`
+  - after that event, the active local object changes from `0501f838` to `0501f850`
+- verified: this means the current mock progression `1/1/1(primary success, ASCII result) -> 1/1/16 -> 1/1/4` is semantically accepted by the real title-local chain. The path no longer stalls at login success and no longer dies on unhandled `1/1/16`.
+- observed: the post-stage local state is still not the expected visible server-select result. After the `16+4` event:
+  - `activeScreen` remains `010534b4`
+  - `modeObj` becomes `0501f850` (the already recovered `target50` role-manage family)
+  - `listPtr` stays nonzero (`05400000`)
+  - sampled `listCount` becomes `2`
+  - but `mode=0`, `roleFamily=0`, and `sel0/sel1=0`
+- implication: the remaining mismatch is now later and narrower than before. The current packet family is sufficient to drive the client into `target4c -> target50`, but the local workspace/content still does not produce the expected stable server/role selection UI state.
+- changed: added a tighter `trace_title_role_path` watcher around the relevant role-list / role-manage family callbacks:
+  - `target4c_handle_network` (`0501A114`)
+  - `target50_init` (`0501A6A2`)
+  - `target50_dispatch_mode_input` (`0501AE60`)
+  - `target50_handle_input` (`0501AE88`)
+  - `target50_render` (`0501B2C4`)
+  - `target50_handle_network` (`0501BFBC`)
+  It samples `ready`, `slotLimit`, `initDone`, `activeRoleIndex`, `listPtr`, `roleCount`, workspace tag bytes, current `mode/sel`, and the active `modeObj` callback triple.
+- validation: rebuilt with `make` after adding the watcher; build pending next rerun.
+
+## 2026-06-06
+- verified: the first `trace_title_role_path` rerun resolves the immediate `target4c -> target50` entry conditions.
+- verified at `target4c_handle_network` on the same `event=7`:
+  - both subtype `16` and subtype `4` are dispatched into the active `0501f838` object
+  - `ready=1`
+  - `listPtr=05400000`
+  - but sampled workspace state is still mostly zero at that instant: `roleCount=0`, `slotLimit=0`, `initDone=0`, `activeRoleIndex=0`, `roleFamily=0`
+- verified at `target50_init` immediately afterwards:
+  - the active object has switched to `0501f850`
+  - `roleCount` is already `1`
+  - but `mode=0`, `slotLimit=0`, `initDone=0`, `activeRoleIndex=0`, and `roleFamily=0` remain unchanged at init entry
+- verified by the end of the same event / first render:
+  - `initDone -> 1`
+  - `slotLimit -> 2`
+  - `ui56/58/60/62/64 -> 48/47/68/56/5`
+  - sampled `listCount -> 2`
+  - `target50_render` sees `ready=1`, `roleCount=2`, `slotLimit=2`, `initDone=1`
+  - but still keeps `mode=0`, `sel0/sel1=0`, `activeRoleIndex=0`, and `roleFamily=0`
+- implication: the remaining blocker is no longer “empty workspace” and no longer “`1/1/16` contract missing”. By first `target50_render`, the role-manage family already has a seeded workspace plus valid `ready/initDone/slotLimit`; the narrower mismatch is that it still chooses to remain in submode `0` / `roleFamily=0` instead of transitioning into the expected visible selection state.
+
+## 2026-06-06
+- corrected: `target50`'s observed `mode=0` should no longer be treated as a generic "zero/failure" state. Static recovery of `role_manage_screen_dispatch_mode_input()` shows:
+  - `mode == 0` dispatches to `role_manage_screen_handle_role_list_nav()`
+  - `mode == 1` dispatches to `role_manage_screen_handle_action_menu_input()`
+  - `mode == 2` dispatches to `role_manage_screen_handle_create_name_input()`
+- corrected: `roleFamily=0` is also a valid live family/tab selection, not proof of missing initialization. Static `role_manage_screen_handle_input()` uses `roleFamily` as a three-way selector (`0/1/2`) and writes a new family value when the user taps a different panel; when the family stays `0` it additionally enables left/right navigation hotspots for the first tab.
+- implication: the latest good primary chain (`1/1/1 -> 1/1/16 -> 1/1/4`) is now entering `target50` in what looks like its normal initial role-list navigation submode. The remaining gap is more likely the semantic contents of the seeded role workspace or a later visual/input expectation, not the mere fact that `mode` and `roleFamily` are zero.
+
+## 2026-06-06
+- verified: `role_manage_screen_handle_role_list_nav()` (`0x3ECE`) gives the concrete meaning of the earliest `target50` workspace fields:
+  - `base+10750` = current slot within the visible page
+  - `base+10752` = page/window offset
+  - `*(*(base+10788))` = role-count byte in the seeded workspace
+  - `base+10737` = slotLimit / visible-capacity bound
+- verified: in `mode=0`, local inputs behave as:
+  - `0x20000` / `4` = move selection left/up through `10750/10752`
+  - `0x40000` / `256` = move selection right/down, bounded by `roleCount` and `slotLimit`
+  - `0x20` / `0x4000` = confirm current slot; if `roleCount == 1`, jump straight into `role_manage_screen_enter_action_menu()`, otherwise call `role_manage_screen_select_role_slot(selectedIndex)`
+  - `0x1000` = if the current selection is not the last slot (`selectedIndex != roleCount - 1`), switch to `mode=2` create-name flow
+  - `0x2000` = call the local wrapper at `base+10464`, then `sub_722()` full-disarm/reset
+- implication: the current post-`1/1/16 -> 1/1/4` state is not “stuck doing nothing”; it is sitting in the normal navigation handler and already has enough state to respond to role-list inputs. The next likely mismatch is the semantic contents/layout of the seeded role records, or a later confirm-path expectation inside `role_manage_screen_select_role_slot()` / `role_manage_screen_enter_action_menu()`.
+
+## 2026-06-06
+- verified: the confirm path on `target50` is now statically recovered too.
+  - `role_manage_screen_select_role_slot(selectedIndex)` (`0x39FC`) treats `selectedIndex == roleCount - 1` as the special final slot and enters action-menu mode (`mode=1`) through `role_manage_screen_enter_action_menu()`.
+  - otherwise it copies fields from the selected workspace record, stores a role identifier into both the role workspace side-buffer and `mmorpg_LoginRecord`, sets `mode=3`, and sends `net_build_login_request(1, 6, 1)`.
+- implication: the latest good chain is already reaching a real role-list navigation state where confirm on a normal slot should advance to live `1/6/1` role-selection traffic, while confirm on the last slot should enter the local action-menu branch. This strengthens the hypothesis that the remaining mismatch is semantic role-record content / visual rendering, not a missing higher-level packet family.
+
+## 2026-06-06
+- changed: tightened `trace_title_role_path` so it now also samples the first seeded role record from `base+10788`:
+  - `role0.id` from record `+104`
+  - `role0.level` from record `+176`
+  - `role0.sex` / `role0.job` from record `+324/+325`
+  - `role0.name` from record `+72` (decoded as GBK for logging)
+  - `selectedRoleIdShadow` from workspace `+2044`
+- purpose: the next rerun should answer whether the post-`1/1/16 -> 1/1/4` workspace already contains semantically plausible role records, or whether `target50` is navigating a structurally valid but content-poor synthetic table.
+- validation: rebuilt with `make` after the watcher extension; build passed.
+
+## 2026-06-06
+- verified from the new runtime samples that the seeded title-side role workspace is now mostly semantically plausible by the time `target50` starts:
+  - `role0.id = 10001`
+  - `role0.name = 侠剑江湖`
+  - `role0.sex = 0`
+  - `role0.job = 1`
+- observed: two fields are still suspicious on the same first-render sample:
+  - `role0.level = 0` even though the current mock builder intends to emit a nonzero role level
+  - `selectedRoleIdShadow = 0`, i.e. the workspace-side selected-role shadow at `listPtr + 2044` is still unset
+- implication: the role-list stage is no longer "empty/garbage", but the synthetic role record still looks incomplete. The next likely mismatch is within the seeded record semantics rather than the outer `1/1/1 -> 1/1/16 -> 1/1/4` packet family.
+
+## 2026-06-06
+- changed: added a dedicated `trace_title_role_workspace_write` watcher for the live role workspace behind `base+10788`.
+- it now logs writes to:
+  - `roleCount`
+  - `role0.id`
+  - `role0.level`
+  - `role0.sex`
+  - `role0.job`
+  - `selectedRoleIdShadow`
+  - plus a name snapshot whenever the first role-name range (`record+0x48..0x67`) is written
+- purpose: the next rerun should distinguish "parser never wrote the suspicious fields" from "fields were written correctly and later overwritten/cleared by local role-manage logic".
+- validation: rebuilt with `make` after adding the watcher; build passed.
+
+## 2026-06-06
+- verified: the new workspace watcher answers the `level/shadow` ambiguity directly on the clean primary chain.
+- before the live `1/1/16 -> 1/1/4` event is consumed, the current workspace is explicitly cleared by local code around `last=0501c770/0501c774`, including:
+  - `roleCount -> 0`
+  - first role name range zeroed
+  - `role0.id -> 0`
+  - `role0.level -> 0`
+  - `role0.sex/job -> 0`
+  - `selectedRoleIdShadow -> 0`
+- after `title_handle_role_list_response()` consumes the fresh `1/1/4.actorinfo`, the parser really does repopulate part of the first record:
+  - `roleCount -> 1` at `last=0501a21c`
+  - `role0.id -> 10001` at `last=0501a23a`
+  - `role0.job -> 1` at `last=0501a24c`
+  - `role0.sex -> 0` at `last=0501a258`
+  - `role0.name -> 侠剑江湖` across `last=0501c818/0501c8c8`
+- crucially, `role0.level` is also written by the same parser path, but it is written as `0` (`last=0501a294`), not lost later to a separate clear/reset.
+- `selectedRoleIdShadow` is not repopulated afterwards; it remains `0` after the earlier clear.
+- implication: the suspicious fields are now narrowed to parser/input semantics, not later local destruction. The current `1/1/4.actorinfo` payload is structurally accepted, but at least one parsed role-record value (`record+0xB0`) is being sourced as `0`, and the workspace-side selected-role shadow is not restored by the role-list response path.
+
+## 2026-06-06
+- changed: added `trace_title_rolelist_reader_methods` inside `title_handle_role_list_response()` at the two narrowest points:
+  - right after the local reader object is initialized
+  - again at the start of the first per-record parse iteration
+- it logs the live stack parser buffer plus the five method pointers the decompiler exposes as `v20/v21/v22/v23/v24`.
+- purpose: the next rerun should let us map the final `record+0xB0` writer (`v22`) back to its concrete reader function, so we can stop guessing whether that field is really “level” or some different trailing role attribute.
+- validation: rebuilt with `make` after adding the watcher; build passed.
+
+## 2026-06-06
+- corrected: the first attempt at `trace_title_rolelist_reader_methods` used the wrong relocated hook addresses (`0x0501AA0E/0x0501AA2A`), so the single sampled `v20..v24` tuple from that run should be treated as invalid for `title_handle_role_list_response()`.
+- fixed: the watcher points are now corrected to the real relocated `sub_3544()` offsets:
+  - `0x0501A20E` (`static 0x363E`) for reader-methods-ready
+  - `0x0501A22A` (`static 0x365A`) for first-record parse
+- validation: rebuilt with `make` after fixing the relocation addresses; build passed.
+
+## 2026-06-06
+- verified: the corrected reader-method trace now resolves the `title_handle_role_list_response()` record parser tuple:
+  - `v21 = 01033A5D -> stream_read_i32_be_tagged`
+  - `v23 = 01033AAD -> stream_read_i8_tagged`
+  - `v24 = 01033A1F -> stream_peek_i16_be`
+  - `v20 = 01033A87 -> stream_read_cstr_len16`
+  - `v22 = 01033A3B -> stream_read_i16_be_tagged`
+- implication: the final per-record field written to `record+0xB0` is not a tagged `u32`; it is sourced from a tagged big-endian 16-bit value. This explains why the earlier synthetic builder, which still encoded the trailing field with `vm_net_mock_seq_put_u32()`, repopulated `role0.id/sex/job/name` correctly but always wrote `role0.level=0`.
+- changed: updated the title-side `1/1/4.actorinfo` builder so the final trailing field in each compact role entry is now emitted with `vm_net_mock_seq_put_i16()` instead of `vm_net_mock_seq_put_u32()`.
+- validation: rebuilt with `make` after the builder fix; build passed.
+
+## 2026-06-06
+- verified on the next rerun: the title-side compact role-entry fix works. `trace_title_role_workspace_write` now shows `role0.level -> 1` at the same parser write site (`last=0501a294`), and both `target50_init` and `target50_render` now sample `role0={id:10001 lvl:1 sex:0 job:1 name:侠剑江湖}`.
+- corrected interpretation: `selectedRoleIdShadow` staying `0` at first render is no longer strong evidence of a parser defect. Static `role_manage_screen_select_role_slot()` shows that field is only written when the user confirms a normal role slot (`listPtr + 2044 = selected record id`) before the subsequent live `1/6/1` request.
+- changed: added `trace_title_role_select_action` around the three narrowest local confirm-chain points:
+  - `role_manage_enter_action_menu`
+  - `role_manage_select_role_slot`
+  - `role_manage_submit_selected_role`
+- purpose: the next rerun should let us see whether a real role confirm writes `selectedRoleIdShadow`, switches local mode/family, and emits the live `1/6/1` request as expected.
+- validation: rebuilt with `make` after adding the confirm-chain watcher; build passed.
+
+## 2026-06-06
+- verified: the current server-list crash at `pc=0x0001fff0` / `lastPc=0x0501b794` is caused by the compact title-side role-list record encoding `sex=0`. Static recovery of relocated `target50_render()` shows it computes a portrait/render-table index as `job * 2 + (sex - 1)` before the final indirect call at `0x0501B794..0x0501B797`; with `sex=0`, that subtraction wraps to `0xFF` and drives the BLX target to the invalid pointer `0x0001FFF0`.
+- evidence: runtime crash report (`pc=1fff0`, `lr=501b797`, `lastPc=501b794`) matches the recovered `target50_render()` table-call site, and the same reruns still sampled `role0={id:10001 lvl:1 sex:0 job:1 name:侠剑江湖}` immediately before the crash.
+- changed: tightened the title-side compact role-list builder in `src/main.c:vm_net_mock_build_title_role_list_actorinfo()` so the `sex` field is now clamped to the 1-based range `1..2` instead of the previous `0..1`.
+- implication: this crash is not caused by `selectedRoleIdShadow`, by the outer `1/1/1 -> 1/1/16 -> 1/1/4` packet family, or by an empty role workspace. It is a narrower semantic mismatch inside the compact title role-entry contract used by `target50_render()`.
+
+## 2026-06-06
+- changed: added `tools/unpack_cbe_resources.py` to unpack the embedded `DF_DataPackage` from a `.CBE` and emit both wrapped loose-resource files plus decoded sidecars for the currently understood wrapper types.
+- verified: `江湖OL.CBE`'s embedded resource area is a `LoadFormTCardEx`-style package rooted at `DF_Data_Pacakage_Offset`; the current main CBE carries `2` package blocks and `16` resources total.
+- verified: package root `0` currently exports `game.mid` and `title.mid`, while child package `"1"` exports startup/UI assets plus the four opaque `MMORPG_Resource_Data_*.mid` payloads used by the update/install flow.
+- evidence: structure recovered from `src/cbeParser.c` and `src/vmFunc.c` (`vm_DF_DataPackage_LoadFormTCardEx`, `vm_DF_DataPackage_GetFileByID`, `vm_GetStreamDataFormRes`), then validated by running the new parser over `bin/CBE/江湖OL.CBE`.
+
+## 2026-06-06
+- changed: added `tools/fix_jhonline_gif.py` to batch-convert `bin/JHOnlineData/*.gif` from the game's custom type-1 wrapper into standard directly-openable GIF files under `tmp/JHOnlineData_fixed_gif`.
+- validation: full batch run matched `332` `.gif` files and produced `331` real conversions plus `1` placeholder GIF, with `0` hard failures.
+- observed: one loose file currently named `加强.gif` is not a normal type-1 image resource; its bytes start with repeated `0xFE` interval markers and fail the usual `len_le32 + type` wrapper check, so the batch fixer now marks it as placeholder output instead of pretending to have recovered a real image.
+
+## 2026-06-06
+- changed: added `tools/batch_export_actor_gif.py` to batch-export `bin/JHOnlineData/*.actor` through the existing ordinary-actor GIF renderer, with one output directory per actor under `tmp/all_actor_gif`.
+- changed: corrected ordinary actor image-name decoding in `tools/inspect_actor.py` from ASCII fallback to GBK, which fixes the effect-family actors that reference Chinese-named source GIFs such as `加强.gif`.
+- validation: full batch run matched `132` `.actor` files and produced `129` real actor exports plus `3` placeholder outputs, with `0` hard failures and `887` total GIF files in `mode=both`.
+- observed: the remaining placeholders are two synthetic `type=0xF1` mock wrappers (`c_mock_missing_motion.actor`, `mock_missing_motion.actor`) plus `f_buff.actor`, whose referenced source image is the abnormal loose file `加强.gif` already flagged by the GIF batch fixer as not being a standard type-1 image resource.
+
+## 2026-06-06
+- changed: added `tools/inspect_xse.py` to decode ordinary `type=2` `.xse` resources and heuristically recover their `XSE0` header, GBK text pool, function table, and command-name table.
+- verified: all `149` loose `JHOnlineData/*.xse` samples currently decode as `type=2` resources whose payload starts with `XSE0`, then a bytecode/metadata region, then a `u32le + GBK` text pool, then a function table, then a length-prefixed ASCII command table.
+- verified: every sampled `.xse` exports a `_MAIN` entry and `SHOWDIALOG`; `132/149` also expose `INIT` and `DOTASK`, strongly indicating that `.xse` is the game's scene/NPC quest-dialog script format rather than a passive text blob.
+- validation: a full batch sweep over all loose `.xse` files succeeded with `0` parse failures. The most common command sets are task/dialog oriented: `INITTASK`, `GETCURRENTTASKID`, `GETTASKSTATE`, `ADDTASK`, `CHECKTASK`, `SETTASKSTATE`, `REMOVETASK`, `ADDTASKOPTION`, `TOCONTINUE`, and `SHOWDIALOG`.
+
+## 2026-06-06
+- verified: the local `.xse` command-call node is `0x1E 00 01 07 <u32 index>`, where `index` is zero-based into the file-local command table. Evidence: the one-command sample `04临安内城守卫.xse` reduces to `push string[0] -> call command[0]=SHOWDIALOG -> return`, and larger quest scripts show call operands `0..9` matching their exported command arrays.
+- verified: the simplest stable operand-load node is `0x1A 00 01 <mode> <u32 value>`. Current high-confidence operand modes are `mode=0` integer literal, `mode=2` text-pool string reference, `mode=3` local variable/state-slot reference, and `mode=8` temporary/last-result slot reference.
+- high-confidence hypothesis: `.xse` task/dialog control flow is built around additional nodes `0x13`, `0x14`, `0x1B`, and `0x1D`. The current evidence points to `0x13/0x14` as control-flow targets/jumps and `0x1B/0x1D` as comparison/branch-structure helpers used around `GETCURRENTTASKID` / `GETTASKSTATE` result handling, but their exact packed field layout still needs one more round of interpreter-side RE.
+
+## 2026-06-06
+- verified: the real local confirm chain on the recovered title role-list path is now working. On the latest rerun, `role_manage_screen_select_role_slot()` wrote `selectedRoleIdShadow = 10001`, switched local `mode` to `3`, and immediately emitted a live outbound WT packet `hdr=1/6 objs=1/1/6` with payload field `actorID=10001`.
+- evidence: `bin/logs/net_trace.log` lines for `trace_title_role_select_action label=role_manage_select_role_slot`, `trace_title_role_workspace_write label=selectedRoleIdShadow ... new=00002711`, `trace_title_login_write label=mode ... new=00000003`, and trailing `unhandled_packet_payload len=25 hex=575400190101060015076163746f7249440006000400002711`; matching wire summary in `bin/logs/net_packets.log`.
+- changed: added a minimal built-in handler for that live role-select request. The mock now answers top-level `1/6` / object `1/1/6` with a single `1/1/6` response object carrying `result=1` and echoed `actorID`, logged as `builtin-title-role-select`.
+- rationale: static `role_manage_screen_handle_network(case 6)` does not currently read any response fields before persisting `mmorpg_LoginRecord`, so this first validation keeps the contract intentionally minimal instead of guessing richer scene-enter payloads too early.
+- validation: rebuilt with `make` after adding the new `1/1/6 actorID` response path; build passed.
+
+## 2026-06-06
+- verified on the next rerun: the new live role-select ack is accepted by the real role-manage network path. After confirming the first role slot, the client again writes `selectedRoleIdShadow = 10001`, switches to `mode=3`, receives `builtin-title-role-select`, and then forwards the resulting `packetSubtype=6` into `target50_handle_network`.
+- evidence: `bin/logs/net_packets.log` now shows `source=builtin-title-role-select responseLen=39 WT len=25 hdr=1/6 objs=1/1/6 count=1`, with payload `result=1` and echoed `actorID=10001`; matching `bin/logs/net_trace.log` lines `trace_title_child_manager_call ... child=0501f850 ... packetKind=1 packetSubtype=6` and `trace_title_role_path label=target50_handle_network ... mode=3 ... selectedRoleIdShadow=10001`.
+- corrected implication: the live `1/1/6 actorID` contract is no longer missing at the transport level. A lone `1/1/6` ack is sufficient to enter `role_manage_screen_handle_network(case 6)`, but it does not by itself trigger any visible local transition or later scene/bootstrap requests on this rerun.
+- next: stop treating “no handler for 1/6” as the blocker. The narrower question is now whether the real server replies with additional objects after subtype `6` (title-side or scene-side), because the current single-object ack appears too weak to move the client beyond `mode=3`.
+
+## 2026-06-06
+- changed: tightened the next role-select experiment to a minimal two-object title-local combo. `builtin-title-role-select` now answers live role confirm with `1/1/6 { result=1, actorID=<echo> }` immediately followed by the existing subtype-15 success shell, i.e. `1/1/6 + 1/1/15`.
+- rationale: static `role_manage_screen_handle_network()` shows `case 6` alone only persists `mmorpg_LoginRecord`, while `case 15(result=1)` is the nearest sibling branch that causes an immediate local mode transition (`role_manage_screen_enter_action_menu()`).
+- validation: rebuilt with `make` after changing the role-select response combo; build passed.
+
+## 2026-06-06
+- corrected: the new `1/1/6 + 1/1/15` role-select combo exposed a different crash that is not caused by the title-side compact role record anymore. The failing PC is `0x01033A68` with `lr=0x0100FAC5`, which maps back to `stream_read_i32_be_tagged_impl()` under `parse_actorinfo_response()`.
+- verified: static `scene_runtime_init_and_sync()` explains the crash path. Once the role-select follow-up advances the client, the main scene-side bootstrap also consumes the same subtype-6 object through its cached packet loop. For `type=1` packets with `subtype==6`, it reads `revivetype/ruffianflag/type/practiseflag/pcimg/expcard/expbook/practiseinfo/...`, and if `pcimg==1` it allocates a blob and calls the scene-object parser slot `+0x3C`, i.e. `parse_actorinfo_response()`.
+- implication: the old minimal `1/1/6 {result, actorID}` ack is no longer safe once subtype-15 is appended. The crash is strong evidence that the scene side treats this reply as a full subtype-6 scene-enter family packet, not as a tiny title-local ack.
+- changed: updated `builtin-title-role-select` so its first object now reuses the existing full subtype-6 success shell (`revivetype/ruffianflag/type/practiseflag/pcimg/expcard/expbook/practiseinfo/lastexp/curexp/persentexp/actorinfo`) before appending `1/1/15 {result=1}`. This keeps the subtype-15 local-mode experiment intact while removing the known null-blob hazard from the scene-side subtype-6 consumer.
+- validation: rebuilt with `make` after replacing the minimal role-select subtype-6 ack with the full scene-compatible subtype-6 shell; build passed.
+- changed: added a narrow scene-runtime compatibility shim in `src/main.c` for the first-scene HUD divide-by-zero. At `scene_rebuild_status_meter_node()` seed gate (`0x0100FF26`), when runtime is still in `n2==1`, `R9+0x6048` is empty, and both meter display maxima are still `0/0`, the emulator now seeds `sceneStatusMeterNode + 0xC4/+0xC8` and the mirrored current-node `+0xC4/+0xC8` from the already-recovered base maxima. The new trace label is `trace_status_meter_seed_fallback`.
+- evidence: latest `bin/logs/net_trace.log` crashing session shows `trace_status_meter_rebuild_site label=seed_gate ... n2=1 sourceHead=00000000 currentBase=120/100 meterDisplay=0/0`, then first HUD draw faults at `trace_status_bar_divide_site label=primary ... baseMax=120 displayMax=0`; `scene_rebuild_status_meter_node()` static branch still only performs the built-in seed when `n2==2`, so this shim is intentionally mirroring the missing fallback on the confirmed empty-head path rather than masking an arbitrary divide.
+- next: rerun and confirm whether `trace_status_meter_seed_fallback` appears before the first `scene_draw_status_panels()` pass, whether the `pc=0x0101477E` divide-by-zero disappears, and what the next post-scene/bootstrap blocker becomes once HUD display maxima are non-zero on first draw.
+
+## 2026-06-06
+- verified on the next rerun: the narrow HUD fallback removed the old post-scene packet assert from the active path. `bin/logs/net_packets.log` now shows `source=builtin-scene-resource-followup` for the earlier unhandled `WT len=49` / `Type=101` request, so the client proceeds into the later resource-update flow instead of crashing there.
+- verified: the new visible blocker is a real `18/7` update loop on the resource-update screen. `bin/logs/net_trace.log` shows repeated `trace_update_request_prepare ... name=侠剑江湖 type=1 start=0/4096/...`, and the same session visibly sits on `"正在更新资源文件, 请稍候!"`.
+- verified: the previous `18/7` mock reply was still writing the wrong local key. Even when the request name is `侠剑江湖`, the old trace logged `mock_update_chunk_response name=MMORPGTempcbm ...`, and `bin/logs/storage_trace.log` shows the temp file being renamed to `JHOnlineData/MMORPGTempcbm` before the client immediately fails another local open for `JHOnlineData/侠剑江湖`.
+- changed: tightened `vm_net_mock_build_update_chunk_response()` / `vm_net_mock_load_resource_update_payload()` so the built-in `18/7` reply now:
+  - extracts request fields `name` and `type`
+  - echoes the same `name/type` back instead of hardcoding `MMORPGTempcbm` / `0`
+  - tries an exact local payload lookup at `JHOnlineData/<request.name>` before falling back to the old generic update payload sources
+- rationale: this is a narrow compatibility fix aimed at the confirmed rename/reopen mismatch. It does not assume the true semantic format of the misrouted `侠剑江湖` resource is already understood.
+- validation: rebuilt with `make` after the `18/7` echo fix; build passed. Runtime confirmation of the new rename/reopen behavior is pending the next manual rerun.
+
+## 2026-06-06
+- verified on the next rerun: the first `18/7` resource-update phase now preserves the requested packet key on the wire. `bin/logs/net_packets.log` shows response `type=1` with `name` bytes `cfc0bda3bdadbafe` (the same non-ASCII key the request sent), and `bin/logs/net_trace.log` now logs `mock_update_chunk_response reqName=... reqType=1 name=... type=1`.
+- corrected implication: the active blocker is no longer the first `18/7` response contract itself. The same run still fails afterwards because the emulator's local file shim decodes the guest path bytes inconsistently: `bin/logs/storage_trace.log` shows the temp file renamed from `JHOnlineData/MMORPGTempbin` to a garbled host filename (`bin/JHOnlineData/燨QR_lVn`) instead of the intended selected-role resource key, followed immediately by another reopen failure for the same resource.
+- changed: tightened `src/vmFunc.c::vm_read_path_string()` so non-ASCII guest path strings now keep ASCII/valid UTF-8 as-is, but when the byte stream is not valid UTF-8 it is converted from guest GBK into host UTF-8 before the later open/rename normalization path runs.
+- rationale: this keeps the fix in the emulator filesystem bridge, where the mismatch is now evidenced, rather than adding more protocol-side special cases after the first `18/7` request is already correct on the wire.
+- validation: `make` recompiled the changed object successfully, but replacing `bin/main.exe` was blocked because the running emulator process kept the file open. A full alternate link to `bin/main_patched.exe` succeeded, so the code change itself is build-clean; runtime verification is pending the next rerun on the new binary.
+
+## 2026-06-06
+- corrected: the previous filesystem-bridge tweak was too broad and caused a new early startup assert. On the next run, `bin/logs/stdout_trace.log` reports `vMAssert file=..\\..\\code\\src\\DF_PictureLibrary.c line=95 lr=01000647`, and `bin/logs/storage_trace.log` shows the immediate cause: startup can no longer open `CBE/江湖OL.CBE` after `vm_read_path_string()` rewrites the original narrow GBK path into UTF-8 bytes that the current host `fopen` path does not resolve.
+- verified: the failing rename/open case and the startup CBE case use two different guest path encodings:
+  - startup `CBE/江湖OL.CBE` arrives as a normal narrow GBK byte string (`43 42 45 2F BD AD BA FE 4F 4C ...`)
+  - the later resource-rename target arrives as UCS2-LE (`A0 4F 51 52 5F 6C 56 6E 00 00`, i.e. `侠剑江湖`)
+- changed: replaced the broad UTF-8 fallback in `src/vmFunc.c::vm_read_path_string()` with a narrower path decoder:
+  - detect likely UCS2-LE path strings by validating 16-bit code units
+  - convert only those UCS2 paths through `ucs2_to_gbk()`
+  - leave ordinary narrow/GBK path strings untouched
+- rationale: this matches the two confirmed on-wire/on-memory path families without changing the host file API expectations for existing GBK paths.
+- validation: rebuilt with `make` after the decoder rollback+UCS2 fix; build passed.
+
+## 2026-06-06
+- verified on the next rerun: the narrowed path decoder is now good enough for the first resource-update reopen path. `bin/logs/storage_trace.log` shows `MMORPGTempbin -> JHOnlineData/�������� success=1`, followed immediately by a successful reopen of the same path and `file_read ... len=4 hex=fefefefe`.
+- corrected implication: the active blocker is no longer the `18/7` packet key echo or the file rename/open bridge. Static IDA for `sub_100D338()` (`0x0100D338`) shows that this local resource-open path first reads a little-endian 4-byte payload length, allocates that many bytes, and only then reads the body. The current fallback `18/7(type=1,name=侠剑江湖)` still downloads raw `mmGameMstarWqvga.cbm` bytes, so the reopened file begins with `fefefefe` and is interpreted as an invalid giant length rather than as a normal local resource stream.
+- changed: tightened `src/main.c::vm_net_mock_load_resource_update_payload()` again on the narrow named-fallback path. When `18/7` carries a non-empty `name`, there is no exact local `JHOnlineData/<name>` file, and the request is still on the named resource branch, the mock now wraps the generic fallback payload as `u32le payloadLen + payload` and logs `mock_update_named_resource_wrapper`.
+- rationale: this matches the confirmed `sub_100D338()` consumer contract while leaving the already-working exact-name lookup path and the earlier synthetic `0xF1` actor/image resource wrappers untouched.
+- validation: rebuilt with `make` after the named-resource wrapper change; build passed. Runtime confirmation is pending the next manual rerun.
+
+## 2026-06-06
+- corrected on the next rerun: the new named-resource wrapper was not the immediate crash site yet. The latest session never reaches a fresh `18/7` request at all; instead, right after first scene `actor_pass`, the client directly reopens the already-downloaded local key `JHOnlineData/侠剑江湖`, and that stale on-disk file still begins with `fefefefe`.
+- evidence: newest `bin/logs/storage_trace.log` tail shows `file_open handle=3 path=JHOnlineData/�������� mode=rb` followed immediately by `file_read ... len=4 hex=fefefefe`, while the same newest `bin/logs/net_packets.log` session ends before any new `source=builtin-update-chunk` for this run. Directory listing confirms both stale files now exist on disk: `JHOnlineData/侠剑江湖` and the older garbled sibling `JHOnlineData/燨QR_lVn`, each `48858` bytes.
+- implication: there are now two separate cache hazards to handle:
+  - the client must not treat an existing extensionless Chinese-named local file with an impossible `u32le` header as a valid resource stream
+  - the mock server must not treat that same stale file as an exact local payload source for the next named `18/7` response
+- changed:
+  - `src/vmFunc.c::vm_get_file_handle()` now rejects read-only opens of `JHOnlineData/<non-ascii name>` files with no extension when the first 4 bytes are not a plausible `u32le payloadLen <= fileSize-4`, logging `file_open_reject_invalid_named_cache`
+  - `src/main.c::vm_net_mock_load_resource_update_payload()` now also ignores such stale exact-name payloads on the server side, logging `mock_update_named_resource_reject_invalid_cache`, and then falls through to the new wrapped fallback builder instead of re-serving the same bad bytes
+- rationale: this keeps the fix extremely narrow. It only targets the confirmed bad-cache family (extensionless, non-ASCII, read-only local resource key) and leaves normal `.actor/.map/.sce/.gif/.dsh` loads plus startup `MMORPGTempcbm` behavior unchanged.
+- validation: rebuilt with `make` after the invalid-cache guards; build passed.
+
+## 2026-06-07
+- verified: the scene HUD divide-by-zero is no longer the active blocker. Latest `bin/logs/net_trace.log` reaches `tick=291` with `trace_status_bar_divide_site label=primary ... baseMax=120 displayMax=120` and `label=secondary ... baseMax=100 displayMax=100`, then continues into `scene_runtime_tick label=actor_pass`.
+- verified: the wrapped named-cache path is also no longer failing at the old `fefefefe` header check. Latest `bin/logs/storage_trace.log` reopens `JHOnlineData/侠剑江湖`, reads `hex=dabe0000`, then reads the `48858`-byte wrapped body successfully.
+- corrected implication: the current flash-exit is now later and more specific than “named update body still has no length header”. At `tick=289`, `scene_hud_main_panel_init()` forwards a non-ASCII string through `parse_actor_motion_descriptor()` into `load_resource_stream_by_name()` (`trace_sub_10352ae_call_from_scene_rebuild`, `trace_parse_actor_motion_entry`, `trace_resource_stream_call_from_actor_motion`), and the same session later reopens `JHOnlineData/侠剑江湖`. This makes the stronger current hypothesis “scene actorinfo mid-body string is being mis-filled as role display name” rather than “the trailing scene-key field is still wrong”.
+- evidence:
+  - `bin/logs/net_trace.log` lines around the newest `tick=289..291` window:
+    - `trace_sub_10352ae_call_from_scene_rebuild ... stack0Name=<nonascii:01056a16>`
+    - `trace_parse_actor_motion_entry ... arg4Name=<nonascii:01056a16>`
+    - `trace_resource_stream_call_from_actor_motion ... namePtr=01056a16`
+    - later `trace_resource_open_helper ... namePtr=0540010a name=<nonascii:0540010a>`
+  - `bin/logs/storage_trace.log` tail for the same session:
+    - `file_open handle=3 path=JHOnlineData/�������� mode=rb`
+    - `file_read ... len=4 hex=dabe0000`
+    - `file_read ... len=48858 ... ascii=...MMORPGInGame...`
+  - static IDA:
+    - `scene_rebuild_runtime_nodes()` (`0x0100F7A6`) passes `sceneCurrentNode + 0x60` into `scene_hud_main_panel_init()` as `currentActorName`
+    - `parse_actor_motion_descriptor()` (`0x0100D6E2`) immediately feeds its incoming resource-name argument into `load_resource_stream_by_name()`
+- changed: tightened `src/main.c:vm_net_mock_build_actor_info()` so the earlier 20-byte mid-body string now uses `vm_net_mock_actor_motion_resource_name(actorJob, actorSex)` instead of the role display name `侠剑江湖`. Added `motion=%s` to `mock_login_actor_response` trace output to make the next rerun easier to confirm.
+- rationale: the current runtime now proves that this field is consumed as a local resource identifier on the live scene path. Reusing the role display name there forces the client down the wrong `JHOnlineData/侠剑江湖` asset chain even after the update-cache wrapper issues are fixed.
+- validation: rebuilt with `make` after the actorinfo mid-body resource-name fix; build passed.
+
+## 2026-06-07
+- corrected: the previous “mid-body string should be `.actor`” conclusion was too coarse. Static IDA for `parse_actorinfo_response()` (`0x0100FA88`) now pins the earlier two-string block to `actor+0x100` (10 bytes) and `actor+0x10A` (20 bytes), while a later separate string still lands at `actor+0xD8`.
+- verified: the latest late crash/open matches that exact `actor+0x10A` slot. `bin/logs/net_trace.log` ends the failing actor pass with `trace_resource_open_helper ... namePtr=0540010A name=h_warrior.actor`, which is the same offset the parser uses for the 20-byte mid-body string.
+- verified: the normal `.actor` container path is still healthy and distinct. The same session earlier shows `trace_resource_stream_call_from_db82 ... name=h_warrior.actor`, followed by direct image opens `h_warriorwalk1.gif`, `h_warriorwalk2.gif`, `jian.gif`, `guang1.gif`, `guang2.gif`, `death.gif`, and `ying.gif`.
+- implication: the active mismatch is now narrower and better grounded. The `actor+0x10A` mid-body field is feeding a direct image-decode consumer, so it must carry a concrete image name, while the later `actor+0xD8` field remains the real `.actor` resource string for the descriptor/parser path.
+- changed: updated `src/main.c:vm_net_mock_build_actor_info()` again so the 20-byte mid-body field now uses a new direct preview-image helper (`h_warriorwalk1.gif`/`hW_warriorwalk1.gif`/`h_assassinwalk1.gif`/`hW_assassinwalk1.gif`/`h_magewalk1.gif`/`hW_mage1.gif`) instead of the earlier `.actor` fallback. The trailing `.actor` field is unchanged. `mock_login_actor_response` now logs `preview=%s actor=%s`.
+- validation: rebuilt with `make` after the `actor+0x10A -> first gif` correction; build passed.
+
+## 2026-06-07
+- verified: the new actor preview-image correction is good enough to keep the client alive in-scene. Latest logs no longer show a crash/assert after scene entry; the client reaches the map HUD and keeps ticking through later `scene_runtime_tick` passes.
+- corrected: the next active gap is back in the old `WT len=49` scene follow-up family, but now as a response-shape mismatch rather than an unhandled assert. `bin/logs/net_packets.log` shows the request still carries seven objects: `1/12/1, 1/7/42, 1/6/1, 1/6/13, 1/6/14, 1/2/10, 1/25/5`, while the previous built-in reply only emitted five objects and substituted `1/25/12` for `1/25/5`.
+- verified: static `net_handle_task_response_dispatch()` (`0x0104726C`) now recovers two more safe minimal contracts:
+  - case `13` (`tasktypes`) walks exactly six entries, each parsed as `(i16 + short string)`
+  - case `14` first reads `action`; when `action==0`, it takes the zero-item path `tasknum + taskinfo`
+- changed: widened `builtin-scene-resource-followup` in `src/main.c` from the earlier 5-object shell to a full 7-object compatibility reply:
+  - `1/12/1 {learnednum=0, learnedskill=\"\"}`
+  - `1/7/42 {booknum=0, booksinfo=\"\"}`
+  - `1/6/1 {taskinfo=<empty blob>}`
+  - `1/6/13 {tasktypes=<6 x (0, \"\")>}`
+  - `1/6/14 {action=0, tasknum=0, taskinfo=<empty blob>}`
+  - `1/2/10 {othernum=0}`
+  - `1/25/5 {result=4}`
+- rationale: this keeps every newly added object on a statically confirmed zero-item branch, but removes the obvious family/count mismatch from the previous reply.
+- validation: rebuilt with `make` after the fuller 7-object scene-followup reply; build passed.
+
+## 2026-06-07
+- verified on the next manual rerun: the fuller `builtin-scene-resource-followup` reply is accepted on the live scene path. `bin/logs/net_packets.log` now shows `source=builtin-scene-resource-followup responseLen=246` for the former `WT len=49` site, and `bin/logs/net_trace.log` logs `mock_scene_resource_followup_response objects=7 ... len=246` followed by `handled_packet ... count=7`.
+- verified: this is no longer just “packet handled without immediate assert”. After the queued `event=7` is dispatched, `runtime_state` drops `loadFlags` from `1,0,0` to `0,0,0`, and the same log tail continues through repeated `trace_scene_runtime_tick label=draw_pass`, `status_panels`, and `actor_pass`.
+- verified: the older first-frame HUD crash is still gone on this run. `bin/logs/net_trace.log` reaches `trace_status_bar_divide_site` with `displayMax=120/100`, and later samples at `tick=757` and `tick=857` show the primary meter rising `current=1 -> 2` while `displayMax` stays nonzero.
+- verified: there is no newer wire-level blocker in this session tail. No additional `send_payload`, no new unhandled-packet marker, and no assert/abort appear after the accepted 7-object follow-up; `bin/logs/stdout_trace.log` only contains normal `ScreenResume/ScreenInit` lines.
+- implication: the old “scene first-frame follow-up packet is still the active blocker” hypothesis is now retired. The next real missing contract is more likely to surface only after a later manual in-scene action triggers new client behavior.
