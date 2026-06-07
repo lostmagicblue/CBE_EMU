@@ -37,6 +37,26 @@ Confirmed contract for pool/dynamic screens:
 
 Without this, lower-screen resume and dynamic-title/login transitions will run under the wrong module state.
 
+## Main CBE Small-Data Base
+
+Confirmed emulator/loader contract:
+
+- for the main CBE, `R9` is set to the copied module data base, not to a heap-local scene object
+- the loader copies code bytes to `ROM_ADDRESS`
+- it then copies parser-selected module data bytes from `fileBuffer + g_cbeInfo.BssDataOffset` to `ROM_ADDRESS + g_cbeInfo.headerInt2`
+- after that it sets `Global_R9 = ROM_ADDRESS + g_cbeInfo.headerInt2` and writes the same value to guest `R9`
+
+Evidence:
+
+- `src/main.c:9141-9146`
+- `src/main.c:9158`
+- `src/cbeParser.c:80-124`
+
+Implication:
+
+- fixed `R9+offset` blocks such as the scene actor-asset ops descriptor at `R9+0x5C48` may be image-seeded or loader-relocated small-data
+- they should not be assumed to belong to heap-local scene object constructors like `scene_object_vtable_init(*[R9+0x54AC])`
+
 ## Nullable Screen Entrypoints
 
 Confirmed screen lifecycle behavior:
@@ -57,3 +77,11 @@ Current contract is still intentionally conservative:
 - the no-input logic tick semantics for pool screens are still unconfirmed
 
 Future work should confirm from logs whether the CBE or firmware provides a dedicated idle event path for those screens.
+
+## Game Utility Geometry Helpers
+
+Confirmed by firmware static analysis (`8533n_7835.axf`):
+
+- `CdRectPoint(left, top, right, bottom, x, y)` returns true when `x` and `y` are inside the rectangle using inclusive bounds
+- concrete predicate: `right >= x && left <= x && bottom >= y && top <= y`
+- the emulator should implement the same contract for both the newer `vm_manager_game_util` slot `idx=2` and the legacy `vm_manager_gameold` slot `idx=51`
