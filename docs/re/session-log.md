@@ -3512,3 +3512,18 @@ Suggested entry format:
 - next verification:
   - rerun manually and check that `trace_scene_actorinfo_snapshot ... preview=<empty>` (or blank) appears.
   - if the actor-adjacent fragments disappear while the protagonist remains visible, mark the root cause as confirmed mismatch: server mock wrote a body GIF into the optional overhead badge field.
+
+## 2026-06-08 side fix: restore portal move-entry after preview fix
+
+- user screenshot after the `previewImage(+0x10A)` empty-default fix confirms the actor-art fragments are gone and the protagonist is visible, but the bottom-center transfer marker is missing.
+- corrected implication:
+  - the older `0x0100F468` portal append guard is now too broad. It was added while the fragment source was still ambiguous, but the newer final-consumer evidence points the fragments at `actor+0x10A` / overhead badge misuse instead.
+  - the skipped record (`actorId=1`, `grid=223,382`, trigger box `203,402,240,422`, `kind=2`) matches the local `.sce` portal/transfer point and should be allowed into the body/world move-entry table.
+- changed:
+  - removed the active `vm_should_skip_portal_move_entry_append()` bypass from the `0x0100F468` hook path.
+  - kept normal `trace_actor_move_entry_append` logging so the next rerun can show whether the portal entry is appended and drawn without reintroducing actor-art fragments.
+- validation:
+  - `make` compiled `src/main.c` but failed at link because `bin/main.exe` was locked by a running emulator process (`cannot open output file bin/main.exe: Permission denied`).
+- next verification:
+  - close the running emulator, rebuild, then rerun manually.
+  - expected result: `trace_actor_move_entry_append ... actorId=1 grid=223,382 ... kind=2` returns, bottom-center transfer marker is visible again, and `trace_scene_actorinfo_snapshot ... preview=` remains empty so the old fragments do not return.

@@ -15691,12 +15691,6 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     }
     if (address == 0x100F468)
     {
-        if (vm_should_skip_portal_move_entry_append((u32)address))
-        {
-            vm_bx(0x0100F46B);
-            lastAddress = address;
-            return;
-        }
         vm_trace_actor_move_entry_append((u32)address);
     }
     if (address == 0x101477E || address == 0x10147AE)
