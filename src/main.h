@@ -41,6 +41,8 @@ void vm_net_trace_title_login_write(uint64_t address, uint32_t size, int64_t val
 void vm_net_trace_title_role_workspace_write(uint64_t address, uint32_t size, int64_t value);
 void vm_net_trace_shared_event_owner_write(uint64_t address, uint32_t size, int64_t value);
 void vm_net_trace_current_net_object_write(uint64_t address, uint32_t size, int64_t value);
+void vm_net_trace_scene_dispatch_gate_write(uint64_t address, uint32_t size, int64_t value);
+void vm_net_trace_scene_loading_owner_write(uint64_t address, uint32_t size, int64_t value);
 
 u32 last_gpt1_interrupt_time;
 u32 IRQ_MASK_SET_L_Data;

@@ -148,7 +148,7 @@ Track unresolved work here so future Codex sessions can pick it up quickly.
 - in an older modified-runtime trace, the path reached `scene_runtime_tick` (`0x0101517A`) and `scene_draw_status_panels` (`0x0101466A`) before failing with a client-side `SIGABRT` through `sub_104D538 -> sub_104E7C8 -> sub_104EA2C`.
 - refined hypothesis:
   - the current loading stall is protocol-semantic rather than crash-related. A now-confirmed sub-hypothesis is that `type=2/3` must not be forced onto `0x0A/0x1A`, because that only feeds the name/money/gift/glamour handler. The next narrow question is whether the older `pcimg/expcard` path is sufficient by itself, or whether another post-login response is still missing before the client emits a real scene-enter / scene-channel request (`0x1C` or `0x1E`) or calls `scene_send_map_enter_request()`.
-  - the strongest current protocol hypothesis is now that the missing semantic is an initial scene-enter packet, not another `pcimg/expcard` field: the client has already consumed the `0x0A/0x1A` name/money packet and the `7/20` + `7/32` misc-field packets, yet remains blocked behind `sceneGate=1` without ever entering `kind=0x1E subtype=1`.
+  - historical note, now superseded by the latest dispatch-gate evidence: an older branch treated the `7/20` + `7/32` misc-field packets as already consumed, but the current exact-WT49 run shows the standalone `type=2/3` responses taking `early_gate_off`; the active experiment now bundles `7/20.pcimg` and `7/32.expcard` into the first open dispatch window.
   - after that hypothesis was confirmed and fixed, the next strongest protocol hypothesis is that the remaining loading stall comes from the rest of the post-enter composite request, not from the scene-enter packet itself. The clearest candidates are the embedded `0x1B/11` follow-up event and the repeated `0x0C/1 + 7/42` learned-skill/books request pair that the emulator had not been answering inside the same `len=86` packet.
   - the strongest current sub-hypothesis is now inside `net_handle_business_followup_events()` (`0x01010594`): either the client never scans the appended `12/1` and `27/11` objects from the composite scene-change reply, or one of those branches is the missing contract that finally clears the loading overlay/state after the scene screen already starts drawing.
   - that earlier sub-hypothesis is now partly disproven: the client does scan and consume both `12/1` and `27/11`, but loading still remains. The next strongest candidates are therefore a later `27/4` follow-up exchange or a scene-channel `0x1E/3` room/NPC list packet (`curpage`, `pagenum`, `roomnum`, `roomlist`, and likely downstream `npcnum` / `npcinfo` semantics) that has not yet appeared in the trace.
@@ -201,7 +201,7 @@ Track unresolved work here so future Codex sessions can pick it up quickly.
   - the newest rerun with the narrow HUD shim confirms that this particular divide-by-zero blocker is now bypassed, not merely postponed ambiguously. The same clean session logs `trace_status_meter_seed_fallback` exactly once at `tick=198` on `n2=1 sourceHead=00000000`, and the later divide-site watcher reaches `scene_draw_status_panels()` with `primary displayMax=120` and `secondary displayMax=100`.
   - the next failure is later and local. After that successful first HUD pass, the same session reaches `scene_runtime_tick label=actor_pass` at `tick=200`, then immediately fails a local open through `sub_100D338() -> sub_100D2BE()` for GBK name `侠剑江湖`, and right after that emits a new unhandled `WT len=49` request with object sequence `1/12/1, 1/7/42, 1/6/1, 1/6/13, 1/6/14, 1/2/10, 1/25/5`.
   - because that missing local key is the selected role name rather than a known asset/resource filename, the active blocker has now shifted again: the strongest live suspicion is no longer the empty HUD source-head itself, but a first in-scene resource-key misroute or resource-miss queue transition on the actor/bootstrap path after HUD draw survives.
-  - that split is now resolved one step further. `1/6/13` can be recovered as a fixed six-entry `tasktypes` blob where each entry is `(i16 + short string)`, `1/6/14` has a confirmed safe `action=0, tasknum=0, taskinfo=<empty>` branch, and the next rerun confirms the full 7-object reply is accepted: `logs/net_packets.log` shows `source=builtin-scene-resource-followup`, `logs/net_trace.log` shows `handled_packet ... count=7`, and the same session keeps ticking in-scene with `loadFlags=0,0,0`.
+  - corrected 2026-06-08: `1/6/13` is now resolved for the all-empty tasktype shape. The current confirmed encoding is raw `tasktypes` payload with six `tagged i8 + len16 C string` records; the earlier same-window callback corruption came from wrapper/scalar mismatches and is superseded by the later cursor trace that reaches `6/14` without a fault.
   - that older resource-update branch is no longer the newest active path on the current clean run. After the accepted 7-object reply, the latest logs show no new `18/7` loop, no new unhandled packet, and no assert; instead the client stays alive on the visible map HUD and continues local scene ticks. The next useful blocker is therefore likely to come from a later in-scene manual interaction rather than from the original first-frame follow-up packet family.
   - that later manual interaction is now partly answered too: the moving center/bottom strip still does not correlate with new wire traffic. The newest logs show several `mouse_event` / `touch_dispatch` entries on the live map screen after the accepted `len=49` follow-up, but there is still no newer `send_payload`. So the current strip should be treated as a local scene/UI state question first, not as a missing packet by default.
   - static scene tick code now supports that interpretation directly. `scene_runtime_tick()` (`0x01014D3A`) only calls `sub_1003568() -> sub_100337C(0)` when either scene gate byte at `R9+0x5C67/+0x5C68` is still zero; the same newest live logs already show `sceneTickGate=1,1` and `loadFlags=0,0,0` while the visible strip remains on screen.
@@ -641,3 +641,67 @@ Suggested entry format for additional questions:
   - a second newly surfaced question is the unhandled post-scene interaction packet family:
     - `WT len=61 hdr=2/10 objs=1/2/10,1/14/14,1/14/4,1/14/5,1/14/6`
     - this now hard-asserts the emulator after manual interaction
+
+## 2026-06-08 Scene first-window resource wait
+
+- current confirmed facts:
+  - the large `WT len=49` scene-resource request is not satisfied by the late standalone `builtin-scene-resource-followup`, because `30/1` has already closed `sceneObj+0x164` before that packet reaches `net_business_response_dispatch()`.
+  - first-window `12/1`, `7/42`, `6/1`, and `27/4` are accepted but do not suppress WT49.
+  - first-window `25/5` is accepted but does not suppress WT49.
+  - first-window `27/11 + 27/4` without `27/12` is accepted but does not suppress WT49.
+  - first-window `27/12 + 27/11 + 27/4` with `30/3` present and `30/7` omitted is accepted, performs the expected `R9+0x5C67/0x5C68` gate transitions, but still does not suppress WT49.
+  - first-window `27/12 + 27/11 + 27/4` with `30/7` present and `30/3` omitted is also accepted, but still does not suppress WT49.
+  - corrected first-window `6/13.tasktypes` plus `6/14` is accepted, reaches `6/14`, and no longer corrupts the dispatch callback; its empty record grammar is now raw `tasktypes` with six `tagged i8 + len16 C string` records.
+  - corrected `6/13 + 6/14` still does not suppress WT49.
+  - parser-safe empty `2/10` is accepted in the first-window bundle after `6/14`, does not corrupt `ActorSceneNode.drawAt`, but still does not suppress WT49.
+  - exact first-window coverage of the later WT49 family (`12/1`, `7/42`, `6/1`, `6/13`, `6/14`, empty `2/10`, `25/5`) is also accepted but still does not suppress WT49 or stop the `sub_1013C8A()` loading-widget owner.
+  - standalone `1/7/7 type=2` and `type=3` responses are currently built correctly enough to match known consumers (`7/20.pcimg` and `7/32.expcard`), but they are delivered after the dispatch gate is closed and therefore take `early_gate_off`.
+  - a 12-object first-window packet containing group/type1, `7/20`, `7/32`, `30/1`, and the WT49 family is not parser-valid: it exits through `unpack_error` before object dispatch.
+  - in that invalid run, the later `7/20`, `7/32`, and seven-object WT49 responses were consumed only because the failed first packet never reached `30/1` and therefore never closed the dispatch gate.
+  - the valid small/deferred shape now consumes all intended packets without unpack or gate errors:
+    - first response: `5/10`, `10/26`, `7/20`, `7/32`
+    - later response: `12/1`, `7/42`, `6/1`, `6/13`, `6/14`, empty `2/10`, `25/5`, trailing `30/1`
+  - the trailing `30/1` closes the dispatch gate after the WT49 family dispatches, but the `sub_1013C8A()` loading owner still persists with `R9+0x9590 == 0`.
+  - no resource-request enqueue trace fired in that run, and the `.sce` portal stream is still being handed to `sub_100F094` through the `currentMapIdText=c00蓬莱仙岛_01`, mode-10 callback path.
+- unresolved:
+  - why the first fresh-enter mode-10 descriptor path pairs `currentMapIdText=c00蓬莱仙岛_01` with `sub_100F094` even though that local `.sce` stream is portal grammar, not the actor/status record grammar consumed by `sub_100F094`.
+  - the exact non-empty encoding/timing for `2/10 otherinfo`; earlier same-window `othernum=1` corrupted `ActorSceneNode.drawAt`.
+  - whether omitting room-list objects (`30/3` and/or `30/7`) is harmless for the map-name/status side effects.
+  - whether the missing top-center map text is tied to empty `promptName_0x12_R9_5CD8`, omitted `30/3`, or the still-active `sub_1013C8A()` loading widget family.
+- next experiment:
+  - recover the intended source/policy for the first fresh-enter `{namePtr, mode=10, callback}` tuple before changing mock fields:
+    - confirmed source path: actorinfo tail string -> `R9+0x5E46` -> `scene_rebuild_runtime_nodes(currentMapIdText)` -> `scene_hud_main_panel_init(... mode=10 callback=sub_100F094)`.
+    - active hypothesis A: the mock actorinfo tail scene key should not collide with the concrete local GBK `.sce` resource for this field. Current experiment defaults it to ASCII `c00PenglaiXiandao_01` and serves a minimal motion descriptor if the client requests that key.
+    - hypothesis B: the first fresh-enter callback-choice seed should be null until prompt-local data exists.
+    - hypothesis C: a different local descriptor resource, not the `.sce` portal stream, should be paired with `sub_100F094`.
+  - 2026-06-08 update:
+    - hypothesis A is partly confirmed and partly incomplete. The ASCII key does force the client through `18/7 type=6` update and prevents local `.sce` portal bytes from reaching `sub_100F094`, but the downloaded minimal wrapper yields no prompt/status text and is followed by a new `WT len=39` resource subset request.
+    - newer correction: a cached ASCII descriptor removes the actor-adjacent fragments but leaves the map viewport black, and storage trace no longer opens `c00蓬莱仙岛_01.sce`. Therefore this should stay an experiment knob, not the default mock policy.
+    - next manual-run check: with the default scene key restored to the GBK `.sce` key, confirm the map background returns and then reassess whether the portal-entry append guard is sufficient for the fragments without masking a required descriptor side effect.
+  - 2026-06-08 latest update:
+    - confirmed: the default GBK key restores the map and title, and the portal-entry append guard leaves the body/world move-entry table empty.
+    - corrected: the current visible actor-adjacent fragments are the scene `loading.gif` / progress widget from `sub_1013C8A()`, not protagonist draw corruption and not the skipped body/world entry.
+    - confirmed negative: appending `27/12 + 27/11` directly to the WT49 response is accepted and reaches `case27_11`, but it leaves the scene in `sceneTickGate=0,1` and repeatedly calls `sub_1003568 -> sub_100337C(0)`.
+    - confirmed negative: appending only `27/12` is accepted by `net_handle_fb_target_dispatch()` (`pc=0x01010BC0`), but it does not make the client emit a later `WT len=34` / `27/11+27/4` finalize request.
+    - confirmed partial/negative: `27/12 + 27/4(type=1, info=蓬莱-铜雀台)` is accepted and visibly pops the map-name prompt, but it still leaves `trace_loading_gif_widget_draw_entry ... sceneGate=1,1 overlayCounter=0`.
+    - confirmed negative: the complete `27/12 -> 27/11 -> 27/4(info)` trio in the WT49 follow-up scan is accepted and restores `sceneGate=1,1`, but it still leaves `trace_loading_gif_widget_draw_entry ... overlayCounter=0`.
+    - confirmed: after manual click/move, the client emits `WT len=32 hdr=2/1 objs=1/2/1 count=1` with a `moveinfo` field; `builtin-actor-moveinfo-ack` now handles it without a new unhandled packet. Static `net_handle_actor_move_info()` still says subtype `1` is a default-return case, so the empty ack is parser-safe but not semantically meaningful yet.
+    - confirmed negative: restoring trailing `30/1 scene+posinfo` after the full fb-target trio restores `sceneState=7` but does not change the persistent `sub_1013C8A()` owner condition; runtime still shows `sceneGate=1,1 overlayCounter=0`.
+    - confirmed: no `trace_resource_request_enqueue`, `trace_resource_request_mark`, or `netManagerCount_R9_9590` write appears in the restored-`30/1` run.
+    - next experiment: stop reshuffling the WT49 tail for now. Recover the `R9+0x9588` manager/replay producer contract and the correct fresh-enter descriptor policy for `{currentMapIdText/sceneKey, mode=10, callback=sub_100F094+1}`.
+    - instrumentation added for the next run:
+      - `trace_actor_motion_open_result` at `0x0100D702` splits local-open-success/direct-parse from local-open-fail/enqueue after `sub_100D534(name)`.
+      - `trace_actor_motion_enqueue_fallback` at `0x0100DB4A` / `0x0100DB74` catches fallback manager-writer context if the local descriptor open fails.
+      - `trace_manager_replay_entry` at `0x01036768` dumps the `R9+0x9588` current record before replay into `scene_hud_main_panel_init()`.
+    - newest result:
+      - confirmed: default GBK `c00蓬莱仙岛_01` takes `local_open_success_direct_parse`, not fallback/enqueue.
+      - confirmed: no manager replay occurs, and no `R9+0x9590` write appears.
+      - confirmed: fresh scene init itself sets `R9+0x5C67/+0x5C68` to `1,1`; `27/11` clears A and `27/4` restores A/B, so gate `1,1` is not by itself evidence of a missing response.
+      - corrected newest interpretation: later `trace_loading_gif_widget_draw_entry` lines with `flag10=0` are function entries, not confirmed continuing blits. The latest centered green `蓬莱-铜雀台` panel may be a message box rather than the original loading strip.
+      - new trace-only target: `trace_scene_message_request` now covers `sub_1013BDC -> sub_10110E6 -> ui_show_message_box/sub_101037E`. The next run should first decide whether the panel comes from `message_box_branch` with map-title text or from the `scene_widget_timeout_message` branch.
+      - if the message path is normal, re-check the remaining "fragments" after the modal is dismissed/waits out before changing packet fields. If the timeout branch is confirmed, identify the missing local completion signal before another WT49 tail reshuffle.
+      - newest run:
+        - no `trace_scene_message_request` appears, so the traced message-box/timeout path did not fire in that reproduction.
+        - static final-consumer review changes the `previewImage(+0x10A)` interpretation: `scene_draw_node_overhead_overlay()` (`0x01045578`) treats that string as an optional overhead badge/icon resource, not as body-frame art.
+        - current mock was still writing `h_warriorwalk1.gif` there, which is now the strongest evidence-backed explanation for the actor-art fragments.
+        - `src/main.c` now defaults `CBE_ACTOR_PREVIEW_IMAGE` / `previewImage(+0x10A)` to empty while preserving explicit env override. Next run should confirm `trace_scene_actorinfo_snapshot ... preview=<empty>` and whether the fragments disappear.

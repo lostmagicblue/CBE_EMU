@@ -126,6 +126,22 @@ static bool vm_trace_progress_strip_image_region_overlap(int x, int y, int w, in
            y + h > regionTop;
 }
 
+static bool vm_trace_scene_actor_image_region_overlap(int x, int y, int w, int h)
+{
+    const int regionLeft = 56;
+    const int regionTop = 192;
+    const int regionRight = 184;
+    const int regionBottom = 384;
+
+    if (w <= 0 || h <= 0)
+        return false;
+
+    return x < regionRight &&
+           x + w > regionLeft &&
+           y < regionBottom &&
+           y + h > regionTop;
+}
+
 static bool vm_trace_progress_strip_scene_settled_filelocal(void)
 {
     u8 sceneTickGate3 = 0;
@@ -148,6 +164,41 @@ static bool vm_trace_progress_strip_scene_settled_filelocal(void)
            load0 == 0 &&
            load1 == 0 &&
            load2 == 0;
+}
+
+static bool vm_trace_scene_actor_residual_window(u8 *sceneGateA,
+                                                 u8 *sceneGateB,
+                                                 u8 *load0,
+                                                 u8 *load1,
+                                                 u8 *load2)
+{
+    u8 gateA = 0;
+    u8 gateB = 0;
+    u8 localLoad0 = 0;
+    u8 localLoad1 = 0;
+    u8 localLoad2 = 0;
+
+    if (!Global_R9)
+        return false;
+
+    uc_mem_read(MTK, Global_R9 + 0x5C67, &gateA, 1);
+    uc_mem_read(MTK, Global_R9 + 0x5C68, &gateB, 1);
+    uc_mem_read(MTK, Global_R9 + 23673, &localLoad0, 1);
+    uc_mem_read(MTK, Global_R9 + 23674, &localLoad1, 1);
+    uc_mem_read(MTK, Global_R9 + 23675, &localLoad2, 1);
+
+    if (sceneGateA)
+        *sceneGateA = gateA;
+    if (sceneGateB)
+        *sceneGateB = gateB;
+    if (load0)
+        *load0 = localLoad0;
+    if (load1)
+        *load1 = localLoad1;
+    if (load2)
+        *load2 = localLoad2;
+
+    return gateA == 0 && gateB == 1;
 }
 
 static void vm_trace_progress_strip_image(const char *apiName,
@@ -216,6 +267,84 @@ static void vm_trace_progress_strip_image(const char *apiName,
                        callerLr,
                        lastAddress,
                        s_progressStripImageTraceCount);
+}
+
+static void vm_trace_scene_actor_region_image(const char *apiName,
+                                              u32 srcInfo,
+                                              u32 srcPtr,
+                                              u16 srcW,
+                                              u16 srcH,
+                                              u32 dstInfo,
+                                              u32 dstPtr,
+                                              u16 dstW,
+                                              u16 dstH,
+                                              int origSrcX,
+                                              int origSrcY,
+                                              int origW,
+                                              int origH,
+                                              int origDstX,
+                                              int origDstY,
+                                              int srcX,
+                                              int srcY,
+                                              int w,
+                                              int h,
+                                              int dstX,
+                                              int dstY)
+{
+    static u32 s_sceneActorImageTraceCount = 0;
+    u32 lr = 0;
+    u32 sp = 0;
+    u32 callerLr = 0;
+    u8 sceneGateA = 0;
+    u8 sceneGateB = 0;
+    u8 load0 = 0;
+    u8 load1 = 0;
+    u8 load2 = 0;
+
+    if (apiName == NULL || s_sceneActorImageTraceCount >= 160)
+        return;
+    if (!vm_trace_scene_actor_residual_window(&sceneGateA, &sceneGateB, &load0, &load1, &load2))
+        return;
+    if (dstPtr != VM_screenImage_ADDRESS || dstW != LCD_WIDTH)
+        return;
+    if (!vm_trace_scene_actor_image_region_overlap(dstX, dstY, w, h))
+        return;
+
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+    uc_mem_read(MTK, sp + 0x34, &callerLr, 4);
+    ++s_sceneActorImageTraceCount;
+    vm_lcd_image_trace("trace_scene_actor_region_draw api=%s srcInfo=%08x srcPtr=%08x srcDim=%u,%u dstInfo=%08x dstPtr=%08x dstDim=%u,%u orig sx=%d sy=%d w=%d h=%d dx=%d dy=%d clipped sx=%d sy=%d w=%d h=%d dx=%d dy=%d sceneGate=%u,%u loadFlags=%u,%u,%u lr=%08x caller=%08x last=%08x count=%u\n",
+                       apiName,
+                       srcInfo,
+                       srcPtr,
+                       (unsigned)srcW,
+                       (unsigned)srcH,
+                       dstInfo,
+                       dstPtr,
+                       (unsigned)dstW,
+                       (unsigned)dstH,
+                       origSrcX,
+                       origSrcY,
+                       origW,
+                       origH,
+                       origDstX,
+                       origDstY,
+                       srcX,
+                       srcY,
+                       w,
+                       h,
+                       dstX,
+                       dstY,
+                       sceneGateA,
+                       sceneGateB,
+                       load0,
+                       load1,
+                       load2,
+                       lr,
+                       callerLr,
+                       lastAddress,
+                       s_sceneActorImageTraceCount);
 }
 
 #if TRACE_RESOURCE_IO
@@ -2691,6 +2820,27 @@ void vM_DrawImageWithClipEx()
                                   h,
                                   dstX,
                                   dstY);
+    vm_trace_scene_actor_region_image("vMDrawImageWithClipEx",
+                                      (u32)srcInfo,
+                                      (u32)srcPtr,
+                                      src_w,
+                                      src_h,
+                                      (u32)dstInfo,
+                                      (u32)dstPtr,
+                                      dst_w,
+                                      dst_h,
+                                      origSrcX,
+                                      origSrcY,
+                                      origW,
+                                      origH,
+                                      origDstX,
+                                      origDstY,
+                                      srcX,
+                                      srcY,
+                                      w,
+                                      h,
+                                      dstX,
+                                      dstY);
 
     int srcImgPitch = (((4 - src_w) & 3) + src_w) * 2; // 源图片的宽度按4像素对齐后再x2就是原图片一行像素占用的字节数
     int dstImgPicth = (((4 - dst_w) & 3) + dst_w) * 2;
@@ -2821,6 +2971,27 @@ void vm_vMDrawImageClipAndAlphaEx()
                                   h,
                                   dstX,
                                   dstY);
+    vm_trace_scene_actor_region_image("vMDrawImageClipAndAlphaEx",
+                                      (u32)srcInfo,
+                                      (u32)srcPtr,
+                                      src_w,
+                                      src_h,
+                                      (u32)dstInfo,
+                                      (u32)dstPtr,
+                                      dst_w,
+                                      dst_h,
+                                      origSrcX,
+                                      origSrcY,
+                                      origW,
+                                      origH,
+                                      origDstX,
+                                      origDstY,
+                                      srcX,
+                                      srcY,
+                                      w,
+                                      h,
+                                      dstX,
+                                      dstY);
 
     int srcImgPitch = (((4 - src_w) & 3) + src_w) * 2; // 源图片的宽度按4像素对齐后再x2就是原图片一行像素占用的字节数
     int dstImgPicth = (((4 - dst_w) & 3) + dst_w) * 2;
