@@ -788,6 +788,13 @@ Correction after the next rerun:
 - current code now only reuses a persisted scene key if it matches a known canonical internal scene key; otherwise it keeps the saved coordinates but falls back to the default safe scene key
 - this preserves position memory while avoiding scene-key encoding contamination of the resource-update path
 
+Second correction after map/position split was observed:
+
+- movement uploads update only the persisted coordinates and preserve the last trusted scene key
+- the persisted scene key is updated only from explicit scene-change targets derived from `2/3 mapID/exitID`
+- safe scene keys are validated against local `.sce` resources; c-prefixed saved filenames such as `c00蓬莱仙岛_03.sce` are replayed to fresh-enter builders as extensionless `c00蓬莱仙岛_03`, matching the historical actorinfo/sceneKey contract while still loading the correct local `.sce`
+- this avoids the split state where a later-map coordinate is paired with an earlier-map scene key
+
 ### `actorinfo` trailing string and `R9+0x5E46`
 
 Status: `mixed`
@@ -2539,18 +2546,483 @@ Current first-scene gate experiment:
   - `sub_1037ED4()` (`0x01037ED4`) constructs the matching outgoing `1/4/1` object and writes `id`, `index`, `posx`, and `posy`. Its only direct static caller is `task_hall_activate_selected_entry()` action `13` (`0x01049370`), while the newest runtime touch also shows the scene/menu child callback family around `0x0101AA0B`.
 - current mock:
   - `builtin-challenge-interaction` recognizes the exact single-object `1/4/1` request with `id/index/posx/posy`.
-  - it returns `1/4/14 { result=4 }`, a parser-safe local failure path, instead of trying to start battle or mutate local state.
+  - it returns `1/4/14 { result=1 }`, a parser-safe no-message placeholder, instead of trying to start battle or mutate local state.
 - status:
   - confirmed: outgoing request field names/order from runtime bytes and IDA `sub_1037ED4()`.
   - confirmed: response field order for the chosen failure path from IDA `net_handle_login_or_name_result()`.
   - hypothesis: the real success response may involve battle module setup or another packet family; that contract is not implemented yet.
 
-Newest runtime result:
+Runtime result with `result=4`:
 
 - confirmed:
   - the unhandled/assert path is gone. Packet log shows `source=builtin-challenge-interaction responseLen=23 WT len=60 hdr=4/1 objs=1/4/1(id=105) count=1`.
   - response bytes are the intended `1/4/14 { result=4 }`: `mock_challenge_interaction_response response=4/14 result=4 len=23`.
   - no `unhandled_packet`, `assert(0)`, `scene_widget_timeout_message`, `count=10 cap=10`, or immediate-flush marker appears in this run.
+- correction:
+  - the user-visible "玩家不存在" prompt is explained by IDA `net_handle_login_or_name_result()` (`0x0101258A`): subtype `14` subtracts `2` from `result`; `result=4` lands on the `gbk_msg_player_not_found` branch at `0x01012632`.
+  - the mock now returns `result=1`, which stays in the confirmed `4/14` parser family but falls through the default no-popup branch.
 - caveat:
-  - the response is delivered after the scene business gate has already closed (`runtime_state pre_data_event ... sceneGate=0` at tick `893`), so this run does not confirm that `net_handle_login_or_name_result()` consumed the `4/14` object.
-  - the outgoing request still opens the local loading owner (`flag10=1 gate5530=1` around ticks `892..897`), and it clears only after the next movement upload/ack path. Treat the current `4/14` response as packet-layer coverage plus parser-shaped evidence, not as a confirmed success/clear contract.
+  - this still does not implement the real success/battle-start response. It only removes a misleading local failure prompt while preserving packet-layer coverage.
+
+Composite `4/1 + 2/1` request correction:
+
+- confirmed runtime evidence:
+  - the client can batch a hotspot/challenge object and a movement upload in the same WT packet.
+  - newest unhandled packet: `WT len=88 hdr=4/1 objs=1/4/1(id=106),1/2/1 count=2`.
+  - decoded fields include `id=106`, `index=4`, `posx=327`, `posy=352`, followed by the usual `moveinfo` blob.
+- corrected mock:
+  - `builtin-challenge-interaction` now accepts one `1/4/1` object plus an optional `1/2/1 moveinfo` object in the same request.
+  - unknown `4/1` IDs still return the parser-safe placeholder `1/4/14 { result=3 }`.
+  - when `moveinfo` is present in the same request, the response also appends an empty `1/2/1` ack and snapshots the current player position through the normal movement persistence path.
+- status:
+  - confirmed: the assert was caused by WT object batching, not a new `4/1` field grammar.
+  - hypothesis: `id=106,index=4` success semantics remain unknown; do not map it to scene entry until runtime/static evidence identifies a target.
+
+Latest stuck-scene correction:
+
+- confirmed runtime evidence:
+  - on the stuck run, no `2/3 mapID/exitID` scene-change request was emitted at the failure point. The packet tail instead shows periodic `2/10 Type=1` refreshes and the earlier `4/1 id=105,index=1,posx=142,posy=310` interaction.
+  - the local scene is `01桃花岛_01.sce`; `trace_actor_move_entry_table` reports two portal move entries and `statusText=桃花岛-北面桃林`, so the base `.sce` portal table was parsed.
+  - `tools/inspect_sce.py bin/JHOnlineData/01桃花岛_01.sce` parses the bottom edge portal as target `01桃花岛_02.sce`, `target_entry_id=0`, trigger rect `(208,432,256,448)`. The persisted/current player position in the same run reaches that portal area.
+- static evidence:
+  - `send_game_event_type()` (`0x0100EDA0`) constructs the standalone `2/10 Type=<u8>` request. `sub_1012958()` (`0x01012958`) confirms the current empty `othernum=0, otherinfo=<empty>` response is parser-safe, but it does not synthesize portal map changes.
+  - `net_handle_login_or_name_result()` (`0x0101258A`) treats `4/14 result=1` as the default no-message branch. The real success/battle-start/special-scene continuation is still unknown.
+- corrected mock:
+  - `vm_net_mock_get_scene_change_target()` now includes桃花岛 scene-change spawn points recovered from local `.sce` portals. Confirmed examples include `01桃花岛_02.sce exitID=0 -> (80,60)` and the adjacent `01桃花岛_01/03/04` edge-entry coordinates.
+  - `builtin-challenge-interaction` no longer returns success-shaped `result=1`; it returns `4/14 result=3`, which lands in a confirmed local failure branch instead of entering an unimplemented success continuation.
+- status:
+  - confirmed: empty `2/10` was not itself a map-enter trigger in this stuck run.
+  - confirmed: `result=1` is not enough evidence for a safe `4/1` success flow.
+  - hypothesis: some桃花岛 `target_entry_id` values that do not directly match a parsed `entry_id` are approximated to the nearest scene edge spawn until a live request/response trace proves the exact mapping.
+
+Follow-up correction from the next stuck run:
+
+- confirmed runtime evidence:
+  - the live `4/1` request is `id=105,index=4,posx=108,posy=448`, still with no later `2/3 mapID/exitID`.
+  - responding with `4/14 result=3` dispatches through the kind-4 parser (`trace_business_dispatch_item ... kind=4 subtype=14`), but only the wrapper block gate clears; `loadingGate_R9_5530` remains `1` and the center loading strip continues.
+  - therefore `4/14` failure values are parser-shaped but not a correct completion response for this hotspot.
+- static evidence:
+  - IDA `parse_scene_response_entry()` (`0x010396D6`) consumes `kind=30 subtype=1` as `scene + posinfo` and updates scene/position through the normal scene-enter path.
+  - `net_business_response_dispatch()` routes kind `30` objects to `net_handle_scene_channel_dispatch`, so a `30/1` response can be carried on the same normal business event.
+- corrected mock:
+  - the known桃花岛 hotspot `4/1 id=105,index=4,posy>=400` while current scene is `01桃花岛_01.sce` now returns a single `1/30/1 { scene=01桃花岛_02.sce, posinfo=(80,60) }`.
+  - this is a narrow server-side interpretation of the hotspot request. Unknown `4/1` requests still fall back to the temporary `4/14 result=3` failure placeholder.
+
+Latest no-trigger rerun:
+
+- confirmed runtime evidence:
+  - this run did not emit the previous `4/1 id=105` hotspot packet and did not emit `2/3 mapID/exitID`.
+  - the final movement upload snapshot is `scene=01桃花岛_01.sce pos=229,410`.
+  - `tools/inspect_sce.py bin/JHOnlineData/01桃花岛_01.sce` parses the bottom edge portal trigger rect as `(208,432)-(256,448)` with spawn point `(230,425)` and target `01桃花岛_02.sce`.
+- conclusion:
+  - confirmed: the client stopped above the actual trigger rectangle on this run, so the lack of a later scene-change request is explained by local trigger geometry rather than a missing `4/1` response.
+  - hypothesis: the server/live path may complete this edge portal from the movement upload when the avatar reaches the portal approach band, or the current emulator pathing/coordinate restore leaves the actor slightly short of the rectangle.
+- current mock:
+  - `2/1 moveinfo` still returns the confirmed empty subtype-1 ack by default.
+  - only when current scene is `01桃花岛_01.sce` and the uploaded/snapshotted actor position is inside the narrow bottom-portal approach band `x=208..256, y=408..448`, it returns `1/30/1 { scene=01桃花岛_02.sce, posinfo=(80,60) }` and saves that scene/position.
+  - this does not patch client movement, draw, parser, or scene globals; it is a server-response fallback for a single evidenced portal.
+
+Correction after actor-motion trace:
+
+- confirmed runtime evidence:
+  - `trace_current_actor_motion_state` shows the actor moves from `grid=229,410` to `grid=229,426` and then `grid=229,434`.
+  - `grid=229,434` is inside the local bottom portal trigger rect `(208,432)-(256,448)`.
+  - after entering the rect, the client still emits only periodic `2/10 Type=1` refreshes; it does not emit `2/1 moveinfo`, `2/3 mapID/exitID`, or `4/1 id=105`.
+- corrected mock:
+  - the same single-portal fallback is now also checked on `2/10 Type=1`.
+  - by default `2/10` still returns empty `othernum=0`; only when current scene is `01桃花岛_01.sce` and the snapshotted actor position is inside `x=208..256,y=432..448`, the response becomes `1/30/1 { scene=01桃花岛_02.sce, posinfo=(80,60) }`.
+  - evidence status: confirmed for this local client/resource behavior; still a hypothesis for the original server's exact choice of response family.
+
+Split-completion correction from the next rerun:
+
+- confirmed runtime evidence:
+  - the `2/10` portal response did dispatch successfully at first: `mock_actor_other_portal_response ... len=54`, followed by `trace_business_dispatch_item ... kind=30 subtype=1` at tick `237`.
+  - consuming that immediate full `30/1 scene+posinfo` set `sceneState=7` and closed `sceneObj+0x164` (`trace_scene_dispatch_gate_write ... old=1 new=0 pc=01039766`), but the client stayed on the old scene for a roughly 30-tick transition countdown.
+  - at tick `266..268` the client emitted only another `2/10 Type=1`; the previous mock returned empty `2/10`, and business dispatch hit `early_gate_off` because the scene dispatch gate was already closed.
+  - later `actor-other-portal-check` calls also polluted the persisted state by saving live source coordinates under the already-saved target scene, e.g. `scene=01桃花岛_02.sce pos=229,434`.
+- corrected mock:
+  - the `2/10` portal trigger no longer snapshots/saves position just to check the rect; it reads the live actor grid without mutating persisted state.
+  - the immediate portal response now mirrors the already verified split scene-change pattern: `1/30/2 { result=1,type=2,scene=01桃花岛_02.sce }` with no `posinfo`, and records a pending target `(80,60)`.
+  - the following normal `2/10` response, while the pending target is valid, returns the deferred completion bundle used by the scene-change follow-up path: task/other/banner side-family objects plus `27/12`, `27/11`, `27/4`, and full `30/2 { result,type,scene,posinfo }`.
+- status:
+  - confirmed negative: immediate full `30/1` is parser-valid but incomplete for this portal because it closes the dispatch gate before the follow-up `2/10` can be consumed.
+  - hypothesis pending rerun: split `30/2` ack plus deferred full `30/2` on the next `2/10` should preserve the dispatch gate long enough to enter the target map, matching the existing `2/3 mapID/exitID` split-completion evidence.
+
+Newest adjacent-map portal correction:
+
+- confirmed runtime evidence:
+  - the latest run starts in `01桃花岛_02.sce` from persisted state and actorinfo confirms that scene key.
+  - the actor motion trace reaches `grid=321,314`; packet traffic after that is only ordinary `2/1` movement acks and periodic empty `2/10 Type=1` responses.
+  - no `2/3 mapID/exitID` or `4/1` hotspot request is emitted for this edge portal.
+- local `.sce` evidence:
+  - `tools/inspect_sce.py bin/JHOnlineData/01桃花岛_02.sce` parses the east edge portal as target `01桃花岛_03.sce`, trigger rect `(320,272)-(352,336)`, spawn point `(305,310)`, and `target_entry_id=3`.
+  - `grid=321,314` is inside that trigger rect.
+- corrected mock:
+  - the `2/10` portal fallback is no longer hardcoded to only `01桃花岛_01.sce -> 01桃花岛_02.sce`.
+  - it now uses a small local `.sce`-derived portal table for the adjacent桃花岛 edge portals; the current confirmed failing case is `taohuadao-02-east-to-03`, which returns the same split `30/2` ack and deferred completion already used by the first portal.
+  - target spawn coordinates for adjacent reverse-edge pairs are derived from the paired local scene portal spawn; for ambiguous `target_entry_id` values this remains a `hypothesis` until a real server trace confirms exact spawn selection.
+
+Follow-up after the next rerun:
+
+- confirmed runtime evidence:
+  - the portal fallback now fires: `mock_actor_other_portal_response ... portal=taohuadao-02-east-to-03 ... target=01桃花岛_03.sce targetPos=40,70`.
+  - the immediate response is consumed as `kind=30 subtype=2`; it sets scene-side state and triggers a short `25/5` default-scene request, but no target-map enter/load follows.
+  - the deferred response is also consumed and reaches `kind=30 subtype=2`; after it, runtime reports `sceneState=7` and the dispatch gate closes, but the actor remains on `01桃花岛_02.sce`.
+- correction:
+  - `30/2` is sufficient as the first split ack, but the deferred completion should finish with the normal scene-enter consumer (`30/1 scene+posinfo`) rather than a second full `30/2`.
+  - `mock_actor_other_deferred_scene_response` now appends a trailing scene-aware `30/1` while preserving the immediate `30/2` ack.
+- status:
+  - confirmed negative: `30/2` ack plus deferred full `30/2` does not live-switch the `01桃花岛_02.sce -> 01桃花岛_03.sce` edge portal.
+  - hypothesis pending rerun: `30/2` ack plus deferred trailing `30/1` should drive the same parser used by normal scene-enter responses.
+
+Second follow-up:
+
+- confirmed runtime evidence:
+  - the deferred trailing `30/1` is consumed (`trace_business_handler ... kind=30 subtype=1`), so the remaining failure is not a gate-off before `30/1`.
+  - however, the same response processes `27/12` before `30/1`; `27/12` closes the scene dispatch gate at `0x0100EA6A` and shows the user-visible prompt family.
+  - after the deferred response, the live actor remains on the source portal coordinates, e.g. `grid=40,54`, instead of the saved target `01桃花岛_02.sce pos=305,310`.
+- correction:
+  - the `2/10` portal deferred response no longer includes the `27/12`, `27/11`, or `27/4` prompt/target family.
+  - it now sends the parser-safe task/other subset followed directly by trailing `30/1 scene+posinfo`.
+- status:
+  - confirmed negative: placing `27/12` before the deferred `30/1` is not correct for this actor-other edge-portal completion.
+  - hypothesis pending rerun: removing the `27/*` prompt family should allow `30/1` to be the gate-closing scene-enter object for this path.
+
+Third follow-up:
+
+- confirmed runtime evidence:
+  - the actor-other portal rect detection is still working: `mock_actor_other_portal_response ... portal=taohuadao-02-east-to-03 ... pos=321,310 target=01桃花岛_03.sce targetPos=40,70`.
+  - the immediate split ack is consumed as `kind=30 subtype=2` at tick `390`, then the client immediately emits a short `25/5` default-scene request at tick `390`.
+  - the current mock answers that short `25/5` with only `25/12 result=4`; the scene-aware completion is delayed until the next periodic `2/10` at tick `420`.
+  - the delayed `2/10` completion consumes trailing `30/1`, but no `trace_actor_motion_descriptor_context` or local resource-open for `01桃花岛_03.sce` follows, and the actor remains on the old live scene coordinates.
+- conclusion:
+  - confirmed negative: putting actor-other portal completion only in the next periodic `2/10` response is too late or the wrong continuation window for this path.
+  - hypothesis: the short `25/5` emitted immediately by the `30/2` handler is the expected actor-other portal completion window.
+- corrected mock:
+  - pending scene-change targets now remember whether they came from the actor-other portal fallback.
+  - only for that source, `builtin-scene-default-event` responds to the immediate short `25/5` with `1/30/1 { scene=<target>, posinfo=<targetPos> }` and clears the pending target.
+  - ordinary explicit `2/3 mapID/exitID` scene changes keep the existing non-actor-other pending flow.
+- status:
+  - hypothesis pending rerun: completing through the immediate `25/5` should give the client the scene-enter object before the later periodic `2/10` loop resumes.
+
+Crash correction:
+
+- confirmed runtime evidence:
+  - the crash run did not reach the new actor-other portal completion path. Packet traffic stops during initial scene startup; no `mock_actor_other_portal_response` or `mock_scene_default_event_actor_other_portal_completion` appears.
+  - startup loaded `mock_player_pos_load scene=01桃花岛_03.sce pos=293,310` from `nvram/jhol_mock_player_pos.bin`.
+  - stdout reports an access fault at `pc=0104521C`, address `0x4C`; IDA identifies `sub_10451C2()` as a collision/grid table query that indexes through `a1[6]`.
+- conclusion:
+  - confirmed: the immediate split `30/2` actor-other portal ack must not persist the target scene before a real completion object is accepted.
+  - hypothesis: the poisoned saved state paired source-map coordinates with the target scene, producing an invalid collision/grid lookup on the next startup.
+- corrected mock:
+  - `builtin-actor-other-portal` now only remembers the pending target after the split `30/2` ack.
+  - the target scene/position is saved only when the mock actually emits scene-aware `30/1 scene+posinfo` completion, either on the immediate short `25/5` path or the remaining deferred `2/10` fallback.
+
+Fourth follow-up:
+
+- confirmed runtime evidence:
+  - the repaired startup state reaches `01桃花岛_02.sce` and the actor is visible at `grid=305,310`.
+  - the east-edge portal fallback still fires: `mock_actor_other_portal_response ... portal=taohuadao-02-east-to-03 ... pos=321,310 target=01桃花岛_03.sce targetPos=40,70`.
+  - the split `30/2` ack is consumed, and the immediate short `25/5` response carrying a single `30/1 scene+posinfo` is also consumed.
+  - after that, no `trace_actor_motion_descriptor_context` for `01桃花岛_03.sce` appears. The live actor remains on `01桃花岛_02.sce`, and the client emits a new `4/1 id=3,index=4,posx=299,posy=237` request.
+  - the generic `4/14 result=3` reply to that later request is queued after the scene dispatch state is no longer in the expected completion window, leaving `loadingGate_R9_5530=1`.
+- conclusion:
+  - confirmed negative: `30/2` ack plus immediate single-object `30/1` is parser-valid but still incomplete for this actor-other portal.
+  - hypothesis: the immediate `25/5` continuation should include the same parser-safe task/other synchronization subset used by other scene-resource follow-up paths before the final `30/1 scene+posinfo`.
+- corrected mock:
+  - the actor-other short-`25/5` completion now returns task-list/actor-other/info-banner side objects followed by trailing `30/1 scene+posinfo`, instead of a lone `30/1`.
+  - this keeps the change in the server response stream and does not write client globals or patch the scene/draw logic.
+
+Latest `01桃花岛_03.sce` bottom portal rerun:
+
+- confirmed runtime evidence:
+  - the newest run starts from saved `01桃花岛_03.sce pos=116,398`; actorinfo and `trace_actor_motion_descriptor_context` confirm the live scene is `01桃花岛_03.sce`.
+  - the earlier `4/1 id=4,index=4,posx=211,posy=444` was handled by the generic `4/14 result=3` fallback and did not enter a map.
+  - after that, the actor reaches the bottom portal area: `trace_current_actor_motion_state` reports positions including `grid=208,558`, `grid=208,574`, and nearby values.
+  - packet traffic in that phase is only `2/1 moveinfo` uploads; no `2/10 Type=1` refresh appears, so the previous actor-other-only portal fallback cannot run.
+- local `.sce` evidence:
+  - `tools/inspect_sce.py bin/JHOnlineData/01桃花岛_03.sce` parses the bottom edge portal as target `01桃花岛_04.sce`, trigger rect `(160,553)-(240,570)`, spawn `(200,540)`, target entry `0`.
+  - `tools/inspect_sce.py bin/JHOnlineData/01桃花岛_04.sce` parses the reverse north portal spawn as `(42,60)`, so the mock continues to use `(42,60)` as the current best target-side spawn hypothesis for `01桃花岛_03.sce -> 01桃花岛_04.sce`.
+- corrected mock:
+  - `2/1 moveinfo` handling now also checks the same local `.sce`-derived portal table, with a small `8px` margin for sampled movement-upload positions around the rect edge.
+  - when matched, it returns the same split `30/2 { result=1,type=2,scene=<target> }` ack and records a pending target; the existing immediate `25/5` completion path remains responsible for emitting the final scene-aware `30/1`.
+  - the target scene/position is still not persisted until completion, preserving the previous crash correction.
+- status:
+  - confirmed negative: relying only on periodic `2/10` refreshes misses this portal because the client emits only `2/1 moveinfo` while walking through it.
+  - hypothesis pending rerun: split scene ack on the movement upload should give the client the same continuation window used by the actor-other portal path.
+
+Correction after the next rerun:
+
+- confirmed runtime evidence:
+  - the `01桃花岛_03.sce -> 01桃花岛_04.sce` portal fallback now triggers through `2/10` at `grid=204,562`.
+  - the split `30/2` ack is consumed and emits the immediate short `25/5`.
+  - the short-`25/5` completion response is consumed as six objects: `6/1`, `6/13`, `6/14`, `2/10`, `25/5`, and trailing `30/1`.
+  - the trailing `30/1` reaches `parse_scene_response_entry()` and closes the scene dispatch gate at `0x01039766`; post-dispatch state is `sceneState=7`.
+  - no `trace_actor_motion_descriptor_context` for `01桃花岛_04.sce` follows, so emitting a parser-consumed `30/1` is still not confirmed as a live load.
+  - the mock had saved `01桃花岛_04.sce` immediately when it emitted the completion packet; later movement snapshots then paired source-map live coordinates with the target scene.
+- static evidence:
+  - IDA `parse_scene_response_entry()` (`0x010396D6`) reads `scene` and `posinfo`, calls the scene object's vtable method at offset `0x74`, calls vtable offset `0x44`, sets `sceneState=7`, and clears the dispatch gate. It does not by itself prove the target `.sce` resource was opened.
+- corrected mock:
+  - actor-other portal completion no longer persists the target scene/position when the mock merely emits the completion response.
+  - instead, it records a pending host-side save and commits it only if runtime later reaches `parse_actor_motion_descriptor` for the same target `.sce`.
+  - this prevents the mock's persisted scene from running ahead of the client's actual loaded scene.
+- status:
+  - confirmed negative: "completion packet emitted" is not equivalent to "target scene loaded".
+  - hypothesis pending rerun: the next clean log, without persisted-scene pollution, should isolate the remaining scene-load contract after the consumed `30/1`.
+
+Latest gate-off rerun:
+
+- confirmed runtime evidence:
+  - in the last clean session, startup loaded `01桃花岛_03.sce pos=204,554`.
+  - the bottom portal fallback fired from `2/10 Type=1`: `taohuadao-03-bottom-to-04`, source `01桃花岛_03.sce`, target `01桃花岛_04.sce`, target position `(42,60)`.
+  - the split `30/2` ack was consumed and produced the short `25/5` continuation.
+  - the short `25/5` completion was consumed as `6/1`, `6/13`, `6/14`, `2/10`, `25/5`, and trailing `30/1`.
+  - the trailing `30/1` reached `parse_scene_response_entry()` and closed `sceneObj+0x164` at `0x01039766`, but no `parse_actor_motion_descriptor` trace for `01桃花岛_04.sce` followed.
+  - later `2/10` and `2/1` portal responses were queued, but `net_business_response_dispatch` exited through `early_gate_off` because the scene dispatch gate was already `0`.
+- static evidence:
+  - IDA `parse_scene_response_entry()` (`0x010396D6`) calls the scene object callback at `0x01039754` as `sceneObj+0x74(scene,len,x,y,0)`, then calls `sceneObj+0x44(0)` at `0x0103975C`, then clears the dispatch gate at `0x01039766`.
+  - IDA `parse_scene_posinfo_field()` (`0x01039770`) has the same `sceneObj+0x74/+0x44` path when `30/2` contains `posinfo`; the current split ack intentionally omits `posinfo`.
+- added trace-only instrumentation:
+  - `trace_scene_enter_apply` now logs the arguments and callback addresses at `0x01039754`, `0x0103975C`, `0x010397FC`, and `0x01039804`.
+  - this is evidence gathering only; it does not mutate guest state or bypass client code.
+- corrected mock hypothesis:
+  - the actor-other portal short-`25/5` completion no longer ends with `30/1 scene+posinfo`.
+  - it now ends with `30/2 result=1,type=2,scene,posinfo`, because IDA shows the `30/2` posinfo path runs the same scene-object apply callbacks and then continues through `sub_10491AE()`, which performs additional scene/loading cleanup and follow-up work that `30/1` does not perform.
+- status:
+  - confirmed negative: repeated portal responses after the consumed `30/1` are not sufficient, because the dispatcher is already gate-off.
+  - hypothesis pending rerun: `task/other` subset plus trailing full `30/2` should exercise the scene-object apply path and the `sub_10491AE()` continuation in the same immediate `25/5` window.
+
+Follow-up after trailing full `30/2`:
+
+- confirmed runtime evidence:
+  - the short-`25/5` completion now reaches the `30/2` posinfo parser path: `trace_scene_enter_apply ... label=scene30_2_obj_apply_0x74 ... scene=01桃花岛_04.sce len=15 x=42 y=60`.
+  - the scene object callbacks are invoked with the expected target scene and spawn coordinates, then `parse_scene_posinfo_field()` closes the scene dispatch gate.
+  - `parse_scene_posinfo_field()` continues into `sub_10491AE()`, which emits another short `25/5`; that later response is queued after the gate is already off and exits through `early_gate_off`.
+  - no `trace_actor_motion_descriptor_context` for `01桃花岛_04.sce` follows, and runtime later reaches the same-current screen-manager path (`last=010182a6`) instead of opening the target `.sce`.
+- static evidence:
+  - IDA `sub_101809C` (scene object vtable `+0x74`) stores the pending scene string, pending coordinates, and same-class mode, then uses `sub_100EEBC(scene)` to decide whether to call the full load path (`sub_10037A6`) or the same-current manager callback.
+  - `sub_100EEBC()` returns the scene class bit from a local matcher or from a leading `c`; adjacent `01桃花岛_03.sce -> 01桃花岛_04.sce` appears to stay in the same class, so a full class-change load is not expected from this callback alone.
+- conclusion:
+  - confirmed negative: the remaining portal failure is not caused by malformed `30/2 scene,posinfo` field order; those fields are parsed correctly.
+  - hypothesis: same-class map switching depends on the scene runtime table consumed by `sub_1018166()` rather than another business response object after the gate closes.
+- added trace-only instrumentation:
+  - new log key `trace_same_class_scene_table` at `sub_1018166()` branch sites `0x01018166`, `0x01018190`, `0x010181C2`, `0x010181D6`, `0x010181EA`, `0x010181EE`, `0x01018296`, `0x010182A6`, `0x010182AA`, and `0x0101835E`.
+  - each sample records pending scene, pending mode/coordinates, current actor grid, scene class flags, table base/count, and up to six 0x20-byte table entries (`rect`, scene pointer/name, state byte, countdown).
+- next evidence check:
+  - after a rerun, search for `trace_same_class_scene_table` and verify whether any entry names `01桃花岛_04.sce` and whether its state byte reaches `2`.
+
+Latest same-class table rerun:
+
+- confirmed runtime evidence:
+  - `trace_same_class_scene_table` shows the local table already contains the bottom portal before the server response: entry `0` has rect `(160,553)-(240,570)`, scene `01桃花岛_04.sce`, `state=2`.
+  - entry `1` similarly points back to `01桃花岛_02.sce` with rect `(20,10)-(60,55)`, `state=2`.
+  - while the actor is still above the portal (`grid=204,530/534`), `sub_1018166()` correctly iterates both entries and reaches `no_match`.
+  - after the actor reaches `grid=204,554`, the old `builtin-actor-other-portal` fallback returns `30/2` immediately; that response is consumed and closes the business dispatch gate, and later follow-ups hit `early_gate_off`.
+- static evidence:
+  - IDA `sub_1018166()` sends `send_game_event_type(1)` and sets a 30-tick countdown when a `state=2` table entry matches the current actor coordinates. After the countdown it copies the entry scene name and runs the same-class screen-manager path.
+- conclusion:
+  - confirmed negative: these adjacent桃花岛 edge portals do not require the mock to invent a `30/2` scene ack on `2/10`; the target scene/rect/state are already present in the local `.sce`-derived table.
+  - hypothesis: the observed `2/10 Type=1` at the portal is part of the client's local same-class countdown/notification path. Returning a server-forced `30/2` there interrupts the local transition by closing the dispatch gate early.
+- corrected mock:
+  - `builtin-actor-other-portal` no longer emits a split `30/2` response for local `.sce` table portals.
+  - when such a portal is detected, it logs `mock_actor_other_portal_local_table_passthrough` and falls through to the normal empty `2/10 othernum=0` response.
+  - `trace_same_class_scene_table` cap was raised so the next run can capture the match/countdown branch after the actor enters the rect.
+
+Combined continuation packet:
+
+- confirmed runtime evidence:
+  - after a movement-upload portal split ack, the client emits a combined request rather than separate objects: `WT len=24 hdr=2/10 objs=1/2/10,1/25/5 count=2`.
+  - raw bytes: `5754001801020a000f045479706500030001010119050005`, i.e. `2/10 { Type=1 }` followed by empty `25/5`.
+  - this packet is emitted after `parse_scene_posinfo_field()` / `sub_10491AE()` queues the scene-default continuation; treating only standalone short `25/5` as valid caused the mock to assert.
+- corrected mock:
+  - added an exact matcher for the two-object `2/10 Type=1 + 25/5` continuation.
+  - it reuses `vm_net_mock_build_scene_default_event_response()`, so pending actor-other portal completions get the same task/other plus trailing `30/2 scene,posinfo` response as the standalone short `25/5` path.
+  - without a pending target it falls back to the existing parser-safe `25/12 result=4` response.
+
+Local-table completion staging:
+
+- confirmed runtime evidence:
+  - after the passthrough change, the client no longer asserts and the local same-class table path reaches its intended branches.
+  - at `grid=204,554`, `sub_1018166()` matches entry `0` (`01桃花岛_04.sce`, `state=2`) and calls `send_game_event_type(1)`.
+  - subsequent ticks reach `countdown_check` / `countdown_copy`; the pending scene string stored in the scene object changes from `01桃花岛_03.sce` to `01桃花岛_04.sce`.
+  - after the countdown, the client calls the same-current screen-manager path, but it still does not open `01桃花岛_04.sce`; later periodic `2/10` requests receive empty otherinfo and the live actor remains on the source portal coordinates.
+- corrected mock hypothesis:
+  - the first `2/10` while `pendingScene` is still the source scene remains passthrough.
+  - once the client itself has copied the target scene into the scene object pending scene string, the next local-table `2/10` is treated as the server completion point.
+  - that response is the same parser-safe task/other subset plus trailing full `30/2 scene,posinfo` used by the scene-default completion path, and the target save remains pending until `parse_actor_motion_descriptor` confirms the target `.sce` opened.
+
+Pending-scene encoding correction:
+
+- confirmed runtime evidence:
+  - the latest run reached the intended local table path: `trace_same_class_scene_table_entry` showed the active entry rect `(160,553)-(240,570)` and target scene `01桃花岛_04.sce`, and the actor remained inside it at `grid=204,554`.
+  - after the countdown copy, the trace-visible pending scene was `01桃花岛_04.sce`, but `mock_actor_other_portal_local_table_passthrough` still logged `target=01ÌÒ»¨µº_04.sce` and returned empty `otherinfo`.
+- conclusion:
+  - confirmed mismatch: the trace label was decoded to UTF-8 for readability, while the mock fallback target scene constants are stored as the original GBK byte strings used by the packet/resource builders.
+  - the local-table completion comparison must use the raw guest NUL-terminated bytes; decoded labels are evidence/logging only.
+- corrected mock:
+  - `vm_net_mock_build_actor_other_portal_response()` now reads both forms from `sceneObj+0x475`: a decoded label for logs and raw bytes for comparison against the target scene.
+  - `pendingRawMatch` in the trace records whether the raw pending scene matches the GBK target scene.
+
+Local-table completion split correction:
+
+- confirmed runtime evidence:
+  - after the raw-byte fix, the next run logged `mock_actor_other_local_table_completion ... pendingRawMatch=1`, so the mock did recognize that the client had copied `01桃花岛_04.sce` into its pending scene.
+  - that response was consumed as six objects ending in `kind=30 subtype=2`; `trace_scene_enter_apply ... scene30_2_obj_apply_0x74 ... scene=01桃花岛_04.sce x=42 y=60` confirms the field order and values were parsed.
+  - the client then called the same-current screen-manager path and emitted the short `25/5` continuation, but the mock answered that continuation with only `25/12 result=4`; no `trace_actor_motion_descriptor_context` for `01桃花岛_04.sce` followed.
+- conclusion:
+  - confirmed negative: a full `30/2 scene,posinfo` inside the local-table `2/10` response is parser-valid but still not the live map-load completion.
+  - hypothesis: this path should mirror the actor-other split flow: the `2/10` response acknowledges the target with `30/2 result,type,scene` and no `posinfo`, while the immediately following short `25/5` carries the task/other subset plus final scene-position completion.
+- corrected mock:
+  - `mock_actor_other_local_table_split_ack` now emits only the split `30/2` ack and remembers the target as an actor-other portal target.
+  - the existing `builtin-scene-default-event` actor-other completion path handles the next short `25/5` and saves the target only when that completion response is emitted.
+
+Actor-other position sync inside same-class completion:
+
+- confirmed runtime evidence:
+  - the split `2/10` ack and the following short-`25/5` completion both dispatch.
+  - the final `30/2 scene,posinfo` parses correctly, and `pendingPos` becomes `(42,60)`.
+  - the live current actor node still reports the source grid `(204,554)` after completion, and no `parse_actor_motion_descriptor` for `01桃花岛_04.sce` occurs.
+  - `sub_1012958()` reads `2/10 otherinfo` records and calls `scene_node_find_or_create(actorId, gridX, gridY, targetY, targetX, ...)`.
+- conclusion:
+  - confirmed negative: same-class local-table completion does not rely on a target `.sce` descriptor reload.
+  - disproven hypothesis: carrying a compact actor-other record for actor `10001` in this completion is unsafe.
+- follow-up crash evidence:
+  - after the non-empty `2/10 otherinfo` was consumed, stdout reported `pc=0x10`, `lr=0x01014597`, `lastPc=0x01014594`.
+  - IDA `scene_draw_actor_pass()` (`0x01014456`) shows `0x01014592..0x01014594` loads the actor node callback from node offset `+0x148` and executes `BLX R3`; the crash means that callback slot had become `0x10`.
+  - therefore the non-empty actor-other completion record either has an incomplete/incorrect record shape for the current actor, or it is the wrong completion window for updating the local player node.
+- corrected mock:
+  - actor-other portal completions no longer include non-empty `2/10 otherinfo`.
+  - when the client-local table already has the same raw pending scene key, the `2/10 Type=1` request is treated as the post-local-table synchronization window and receives a single `30/1 scene+posinfo` final scene object.
+  - evidence for this window: `sub_1018166()` first sends `2/10 Type=1` when the portal rect is entered, starts a 30-frame countdown, calls `screen_manager same_current`, and then emits the second `2/10 Type=1` with `pendingRawMatch=1`.
+
+Same-class load criterion correction:
+
+- static evidence:
+  - IDA `sub_101809C(scene,len,x,y,a5)` stores `scene` at `sceneObj+0x475`, writes `a5` to `R9+23692`, resets the current scene node, writes pending x/y to `R9+23694/23696`, then checks `sub_100EEBC(scene)`.
+  - if the target scene class bit equals the current `R9+23669`, it calls the screen-manager `+8` same-current path and does not call `sub_10037A6()`.
+  - only a class-bit mismatch calls screen-manager `+0x18`, then `sub_10037A6(3 or 4)`, and updates `R9+23669`.
+  - IDA `sub_1018166()` uses the same class-bit branch after copying a matched local-table entry scene into `sceneObj+0x475`; same-class Taohuadao edge portals therefore naturally reach `same_current`.
+- runtime evidence:
+  - the latest final `30/1 scene+posinfo` path called `sceneObj+0x74` with target `01桃花岛_04.sce`, `x=42,y=60`, `stack0=0`, `stack4=0x2a`, then immediately reached `screen_manager idx=2 same_current`.
+  - the live current actor node remained at the source portal grid `(204,554)` with unchanged draw/step callbacks, so the failure is still real; however, absence of `parse_actor_motion_descriptor_context` for `01桃花岛_04.sce` is no longer a valid negative criterion for same-class map switching.
+- added trace-only instrumentation:
+  - new log key `trace_same_class_node_callback` records the local-table completion path around `0x0101824E`, `0x01018260`, `0x01018264`, and `0x010182A6`.
+  - it captures pending scene/mode/position, `hudState+0x40` current node, `hudState+0x44` reset target, callback argument node, grid/name, and draw/step callback pointers before and after the same-class node callback.
+- next evidence check:
+  - rerun manually and compare `trace_same_class_node_callback` before/after `same_class_node_callback_before/after`.
+  - if the callback leaves current node grid/draw/step unchanged, the missing contract is likely in the local same-class node migration callback input/state rather than in packet field order.
+  - if it updates the node briefly and later reverts, inspect the later owner/state-machine path that restores source grid.
+
+Moveinfo fallback race correction:
+
+- confirmed runtime evidence:
+  - the newest run reached the local same-class path at `grid=204,554` and emitted the first `2/10 Type=1`; `builtin-actor-other-portal` correctly logged `mock_actor_other_portal_local_table_passthrough`.
+  - before the local-table path reached a clean post-countdown completion, a `2/1 moveinfo` at `grid=204,546` matched the same portal via the `8px` margin and returned `mock_actor_moveinfo_portal_split_response`.
+  - that moveinfo split ack set the actor-other pending target and the immediate `25/5` completion marked a pending scene save for `01桃花岛_04.sce (42,60)`.
+  - later `2/10 Type=1` requests had `pendingRawMatch=1`, but the local-table final response was suppressed by the already-pending scene save guard and fell back to empty otherinfo.
+  - `trace_same_class_node_callback` showed the same-class callback did not move the current actor node: current node stayed at `grid=204,554`, with unchanged draw/step callbacks before and after.
+- conclusion:
+  - confirmed negative: the moveinfo-side portal split ack races the client-local same-class countdown for Taohuadao local-table portals.
+  - the latest run did not actually test the intended pure local-table `pendingRawMatch=1 -> 30/1` completion path, because the moveinfo fallback had already installed a pending target/save.
+- corrected mock:
+  - `2/1 moveinfo` still snapshots coordinates and logs portal-margin hits, but local-table Taohuadao portal hits now pass through to the normal empty subtype-1 moveinfo ack.
+  - this leaves the local `sub_1018166()` countdown and the later `2/10 pendingRawMatch=1` completion window unclaimed by moveinfo.
+- status:
+  - hypothesis pending rerun: with moveinfo no longer racing the local path, the next `2/10` after `pendingRawMatch=1` should emit the intended single `30/1 scene+posinfo` local-table final response.
+
+Latest `01桃花岛_03.sce` hotspot rerun:
+
+- confirmed runtime evidence:
+  - the newest run did not enter the local table portal rect. `trace_same_class_scene_table` repeatedly reports current grid `(204,546)`, while entry `0` for `01桃花岛_04.sce` is rect `(160,553)-(240,570)`, so `sub_1018166()` correctly reaches `no_match`.
+  - there is no `mock_actor_moveinfo_portal_split_response`, no `pendingRawMatch=1`, and no `mock_actor_other_local_table_final_scene`; the prior moveinfo race fix held.
+  - the only later portal-like request is `WT len=60 hdr=4/1 objs=1/4/1(id=4)`, with fields `id=4,index=4,posx=211,posy=444`, handled by the generic `builtin-challenge-interaction` response `4/14 result=3`.
+- conclusion:
+  - confirmed: this run still did not validate the pure local-table final path because the actor stopped above the portal trigger rectangle.
+  - hypothesis: when the actor is near the `01桃花岛_03.sce` bottom portal but not inside the local rect, the client uses a server-decided `4/1` hotspot interaction, analogous to the earlier `01桃花岛_01.sce` bottom hotspot.
+- corrected mock hypothesis:
+  - `vm_net_mock_build_special_scene_interaction_response()` now also recognizes `01桃花岛_03.sce` request `id=4,index=4,posy>=400`.
+  - it returns a narrow `30/1 scene+posinfo` response targeting `01桃花岛_04.sce (42,60)`, using the target-side spawn recovered from the reverse local portal evidence.
+  - unlike the older `01桃花岛_01.sce -> 01桃花岛_02.sce` hotspot, this same-class case marks the save pending rather than immediately persisting the target scene, pending another run to confirm the client accepts the transition.
+
+Same-class local-table final confirmation:
+
+- confirmed runtime evidence:
+  - with moveinfo no longer racing the local path, the actor entered the `01桃花岛_03.sce` bottom rect and `sub_1018166()` reached `countdown_check` / `countdown_copy`.
+  - `trace_same_class_node_callback` fired around the same-current path; before and after the node callback, both `currentNode` and `nodeArg` were `05400000`, with unchanged grid `(204,554)` and unchanged draw/step callbacks.
+  - the later `2/10 Type=1` reached `mock_actor_other_local_table_final_scene ... pendingRawMatch=1`, and the response was a single `30/1 scene+posinfo` targeting `01桃花岛_04.sce (42,60)`.
+  - the client consumed that response as `kind=30 subtype=1`; `trace_scene_enter_apply ... scene30_1_obj_apply_0x74` confirmed `scene=01桃花岛_04.sce`, `x=42`, `y=60`, then closed the scene dispatch gate.
+  - the live current actor node still reported source grid `(204,554)` afterward.
+- conclusion:
+  - confirmed: the local-table final `30/1` is parser-valid and reaches the scene-object apply path.
+  - confirmed negative: neither the local same-current callback nor the later `30/1` apply currently migrates the live actor node to `(42,60)`.
+  - because same-class transitions do not necessarily reload the target `.sce`, waiting for `trace_actor_motion_descriptor_context` to confirm pending save is not a valid persistence criterion for this path.
+- corrected mock:
+  - `mock_actor_other_local_table_final_scene` now saves `01桃花岛_04.sce (42,60)` immediately when emitting the confirmed final `30/1`.
+  - this is a persistence correction only; it does not alter guest registers, scene globals, parser control flow, draw callbacks, or the local same-class state machine.
+
+Immediate-save follow-up:
+
+- confirmed runtime evidence:
+  - the next manual run still started from `01桃花岛_03.sce`; actorinfo and `trace_actor_motion_descriptor_context` both reported `01桃花岛_03.sce` during startup.
+  - this is expected for the first run after the code change, because the prior run only marked a pending save and did not persist `01桃花岛_04.sce`.
+  - during the new run, the local-table final path fired again: `mock_actor_other_local_table_final_scene ... pendingRawMatch=1 ... response=30/1 save=immediate`.
+  - the immediate-save trace confirms the target was written: `mock_player_pos_save reason=actor-other-local-table-final scene=01桃花岛_04.sce pos=42,60 path=nvram/jhol_mock_player_pos.bin`.
+  - the same response again parsed as `scene30_1_obj_apply_0x74 ... scene=01桃花岛_04.sce x=42 y=60`.
+- status:
+  - confirmed: the persistence correction now writes the target scene/position when the final local-table `30/1` is emitted.
+  - still confirmed negative: in the same live session, current actor node remains on the source-side grid after the `30/1` apply.
+  - next rerun should verify whether startup now loads the persisted `01桃花岛_04.sce (42,60)` entry.
+
+Same-class persistence verified on next startup:
+
+- confirmed runtime evidence:
+  - the next manual run starts from the persisted target. `trace_scene_actorinfo_snapshot` reports `scene=01桃花岛_04.sce`, confirming that the immediate save from the previous `03 -> 04` final `30/1` affected startup.
+  - the live actor node is also on the target side, with later motion traces showing `grid=42,56`, then `grid=42,36`.
+  - movement uploads on `01桃花岛_04.sce` update the persisted position normally, e.g. `mock_player_pos_save reason=moveinfo-upload scene=01桃花岛_04.sce pos=42,68`.
+  - after moving into the north-side local portal, the client reaches the same local-table final path in reverse: `mock_actor_other_local_table_final_scene ... portal=taohuadao-04-north-to-03 ... target=01桃花岛_03.sce targetPos=200,540 response=30/1 save=immediate`.
+  - the reverse final response parses as `scene30_1_obj_apply_0x74 ... scene=01桃花岛_03.sce x=200 y=540`.
+- conclusion:
+  - confirmed: same-class local-table transition persistence works across startup for `01桃花岛_03.sce -> 01桃花岛_04.sce`.
+  - confirmed: the reverse `01桃花岛_04.sce -> 01桃花岛_03.sce` local-table path uses the same `pendingRawMatch=1 -> 30/1 scene+posinfo` completion shape and immediate-save policy.
+  - remaining live-session behavior: after a same-session reverse `30/1`, the actor still remains visually/live-positioned on the source-side 04 grid until the next startup or a separate live-node migration contract is recovered.
+
+Reverse persistence verified:
+
+- confirmed runtime evidence:
+  - the newest manual run begins from the prior `04` save: `trace_scene_actorinfo_snapshot` reports `scene=01桃花岛_04.sce`.
+  - the actor moves on the `04` side, with motion traces around `grid=42,56`, `42,36`, and moveinfo persistence `scene=01桃花岛_04.sce pos=42,68`.
+  - the north-side local-table portal then fires in reverse: `mock_actor_other_local_table_final_scene ... portal=taohuadao-04-north-to-03 ... target=01桃花岛_03.sce targetPos=200,540 response=30/1 save=immediate`.
+  - the reverse response is consumed as `kind=30 subtype=1`, and `trace_scene_enter_apply ... scene30_1_obj_apply_0x74` confirms `scene=01桃花岛_03.sce`, `x=200`, `y=540`.
+  - later same-class table traces show `currentNode` at `grid=200,540`, `pendingScene=01桃花岛_03.sce`, and no match against the `03 -> 04` bottom rect because `y=540` is below the trigger's `553..570` range.
+- conclusion:
+  - confirmed: the `04 -> 03` reverse immediate-save path also takes effect within the run, placing the actor on the expected `03` target-side coordinates.
+  - the bidirectional `01桃花岛_03.sce <-> 01桃花岛_04.sce` same-class local-table completion contract is now confirmed at packet parse and persistence levels.
+
+Same-current screen-manager contract:
+
+- static/runtime evidence:
+  - IDA `sub_101809C(scene,len,x,y,a5)` writes the pending scene and pending coordinates, then calls `sub_100EEBC(scene)` to classify the target scene.
+  - when the target scene class matches the current class, `sub_101809C()` does not call the full load path `sub_10037A6()`. Instead it calls the platform screen manager slot `+8` with the current scene screen pointer.
+  - runtime logs show exactly that shape after local-table finals: `screen_manager idx=2 same_current ... last=010182a6` for the local table same-current callback and `last=01018150` for the scene-object apply path.
+  - the emulator's screen-manager shim previously treated `idx=2` where `r0 == vmAddedScreen` as a no-op, so the client reached the intended platform API but the emulator swallowed the lifecycle notification.
+- corrected platform contract:
+  - `hook_vm_manager_screen_func()` now treats `idx=2` calls from the confirmed local-table same-current callback site (`last=0x010182A6`) as a real re-change of the current screen.
+  - it sets `VM_SCREEN_nextSubTScreen_ADDRESS`, clears `VM_SCREEN_isInQuit`, and raises `screenStructChange` so the scheduler re-enters the existing screen lifecycle instead of ignoring the same-current request.
+  - this does not alter guest parser results, draw callbacks, actor nodes, scene globals, or packet contents; it restores an emulator platform behavior that the client was already requesting.
+- status:
+  - hypothesis pending rerun: after a same-class local-table final, the new `screen_manager idx=2 same_current_rechange` should let the screen re-enter its scene setup path and either migrate the live actor node to the pending target map/position or expose the next missing platform callback.
+
+Follow-up correction after the first successful loading-screen rerun:
+
+- confirmed runtime evidence:
+  - the `0x010182A6` same-current rechange now enters the loading flow and opens the target descriptor: `trace_actor_motion_descriptor_context ... name=01桃花岛_04.sce`.
+  - target position is `01桃花岛_04.sce (42,60)`.
+  - that spawn is not inside the reverse north portal rect `(20,5)-(64,35)`, and the reverse target spawn `01桃花岛_03.sce (200,540)` is not inside the forward bottom portal rect `(160,553)-(240,570)`.
+  - the observed load loop instead correlates with repeated `builtin-scene-change` / `builtin-scene-task-subset-followup` responses for the same target and repeated screen-manager calls from `last=0x01018150` after `scene30_2_obj_apply_0x74`.
+- corrected contract:
+  - keep the platform rechange only for `last=0x010182A6`.
+  - treat `last=0x01018150` as a scene-object apply follow-up site, not as a standalone same-class lifecycle request.
+  - explicit `mapID/exitID` scene-change responses now remember the last completed target and suppress re-registering another deferred completion for the same scene/exit/position within a short tick window.
+- status:
+  - confirmed negative: the new repeated loading is not explained by target spawn overlapping a portal trigger rectangle.
+  - hypothesis pending rerun: cutting the repeated deferred completion and `0x01018150` rechange should keep the first target load while preventing the immediate second loading loop.
