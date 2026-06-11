@@ -2590,19 +2590,27 @@ Latest runtime result with generic `4/10`:
   - `bin/logs/net_trace.log` then shows `trace_business_dispatch_item ... kind=4 subtype=10` at tick `164`, so the object reaches the client business dispatcher.
   - read-only Battle.cbm state trace after the parser shows `trace_battle_module_state ... side=1 ownCount=0 enemyCount=0 subtype=10 parseOk=1 ... ownHead=00000000... enemyHead=00000000...`; this confirms the parser entered the battle-start path but did not populate either side's fighter list.
   - after that dispatch, the client emits a standalone `WT len=19 hdr=2/10 objs=1/2/10 count=1` with field `Type=100` (`send_payload ... 04547970650003000164`).
-  - the current mock answers that follow-up through `builtin-actor-other-only10` with empty `1/2/10 { othernum=0, otherinfo=<empty> }`.
+  - superseded: the old mock answered that follow-up through `builtin-actor-other-only10` with empty `1/2/10 { othernum=0, otherinfo=<empty> }`.
   - the same run reaches the battle screen, but later logs `trace_scene_message_request ... text=你已经死亡不能使用` after a manual touch and shows no player/monster sprites; this is consistent with the confirmed zero fighter counts.
 - static evidence for the likely next response family:
   - Battle.cbm `sub_8996()` (`0x00008996`) handles response `25/2` by reading `result` and `type`; if `result=1,type=1`, it calls the main bridge with value `100`.
   - the same function also handles `25/3`, `25/4`, `25/8`, and `7/19`, so the `2/10 Type=100` follow-up may expect a non-`2/10` battle/status response object rather than the generic actor-other empty shell.
 - current instrumentation:
-  - `mock_actor_other_only10_response` now logs the request `Type` field while preserving the same empty response behavior.
+  - `mock_actor_other_only10_response` logs the request `Type` field.
   - new read-only runtime trace `trace_battle_module_state` watches Battle.cbm `sub_66CC` entry/return (`0x050866CC`, `0x05086BEC`), `sub_7BD0` after the `4/10` parser (`0x05087DF4`), and `sub_8996` / its `25/2 type=1 -> Type=100` site (`0x05088996`, `0x050889F0`).
 - status:
   - confirmed: `4/10` is accepted far enough to transition into Battle.cbm state, enter the battle UI, and trigger the next `Type=100` request.
   - confirmed negative: double-wrapped `battleinfo` is not accepted as a fighter stream; it leaves `ownCount=0` and `enemyCount=0`.
-  - corrected mock: `battleinfo` now uses `vm_net_mock_put_object_raw()`, and `mock_actor_other_only10_response` reads request `Type` as u8 so the next trace should report `requestType=100` instead of `<absent>`.
-  - hypothesis pending rerun: after raw `battleinfo`, the next blocker may be enemy-id resolution through `sub_66A4()` if the request id does not match the local encounter table (`enemyTable ... enemyIds=10001,0,0,0` in the latest trace), or the `Type=100` follow-up may still require a Battle.cbm-specific response such as a `25/*`, `4/8 combatinfo`, or another battle status object.
+  - corrected mock: `battleinfo` now uses `vm_net_mock_put_object_raw()`, and `mock_actor_other_only10_response` reads request `Type` as u8.
+  - superseded Type=100 experiment: a standalone `2/10 Type=100` request received `1/25/2 { result=1, type=1 }`, logged as `mock_actor_other_type100_battle_sync_response`.
+  - latest runtime result: the `25/2` response reaches the main business dispatcher as `kind=25 subtype=2`, then the fallback callback enters Battle.cbm `sub_17AC()` (`battle_event7_dispatch_entry_sub_17AC`), but no `sub_8996_entry` or `sub_8996_25_2_type1_send_type100` probe fires.
+  - confirmed negative: filtered `trace_battle_sub17ac_flow` shows the `25/2` packet takes the early `sub_17AC` path through `0x17F8`, then jumps to the common tail (`0x17FA` unconditional branch toward the `0x1EE4` tail); it never reaches the later kind-specific dispatch block where `kind=4` calls `sub_7BD0()` at `0x1820`.
+  - superseded Type=100 experiment: the mock answered `2/10 Type=100` with `1/4/7` battle status, logged as `mock_actor_other_type100_battle_status_response`. Evidence for this experiment was that `sub_17AC()` dispatches `kind=4` responses into `sub_7BD0()`, and `sub_743C()` is the confirmed `4/7` parser for battle status plus optional `combatinfo/info/fbs/fdata`.
+  - confirmed negative: the newest manual run proves the current empty `4/7` status shell is unsafe as the Type=100 follow-up. `bin/logs/net_packets.log` shows `WT len=19 hdr=2/10` with `Type=100`, followed by mock response `1/4/7` length `244`; `bin/logs/net_trace.log` then shows `trace_business_dispatch_item ... kind=4 subtype=7`, `sub_743C_status7_entry`, `sub_743C_iteminfo_read`, `sub_743C_item_stream_init`, and `sub_743C_crash_lastpc_candidate`.
+  - crash evidence: `bin/logs/stdout_trace.log` reports invalid access `地址无法访问:4255de5a type:0 size:19 value:1`, with `pc=05189178`, `lastPc=05189178`, `lr=05189931`, `r9=01050bd0`; using the Battle.cbm runtime code base `0x05181F20`, that maps to offset `0x7258` after the `sub_743C()` iteminfo stream path.
+  - corrected mock: `2/10 Type=100` is rolled back to parser-safe `1/2/10 { othernum=0, otherinfo=<empty> }`, logged as `mock_actor_other_type100_empty10_response`. This is only a no-crash fallback; the true Type=100 battle continuation remains unresolved.
+  - trace-only instrumentation: `hook_vm_pool_code_callback()` records the Battle.cbm `sub_17AC` event-7 dispatch window (`0x17AC..0x1850`) as `trace_battle_sub17ac_flow` only when the incoming WT packet is `kind=25 subtype=2`.
+  - latest manual-run evidence: the filtered flow proves the old `25/2` experiment exits before Battle.cbm's kind-specific parser, and the newer `4/7` experiment reaches `sub_743C()` but crashes in the iteminfo stream path. Future Type=100 work should look for another real battle continuation/parser field shape, not reuse the current empty `4/7` shell as default.
 
 Raw `battleinfo` follow-up crash and subtype-7 status hypothesis:
 
@@ -2783,6 +2791,121 @@ Enemy id lookup correction:
 - evidence status:
   - confirmed: `4/10.battleinfo.enemy.id` must be resolvable by `sub_66A4()` for a stable enemy render slot.
   - hypothesis: using the first nonzero client table id is a parser-safe placeholder until the upstream response/resource contract that fills the real encounter enemy table is recovered.
+
+Negative result from the first resolvable-id fallback:
+
+- confirmed runtime evidence:
+  - the fallback wrote `enemyWireId=10001` while the request/touch id was `3`: `mock_challenge_interaction_response ... requestEnemyId=3 enemyWireId=10001 enemyTableIds=10001,0,0,0`.
+  - this makes the enemy render slot stable, but the opponent is visibly the player character. The enemy table entry being reused is the local player template, not the touched monster.
+  - newest runtime trace keeps the same shape after the Type=100 rollback: `mock_challenge_interaction_response ... requestEnemyId=3 enemyWireId=10001 enemyTable=0500c718 enemyTableIds=10001,0,0,0`, then Battle.cbm `sub_66CC_entry` sees the same `enemyTable=0500c718`.
+  - `trace_battle_module_data_write` shows Battle.cbm stores that table pointer into `battleState+0x50` at `pc=051884ce`; using code base `0x05181F20`, this is Battle.cbm offset `0x65AE`.
+  - the same pointer appears earlier in main-CBE scene setup: `trace_sub_1010228_callsite ... srcObj=05400000 dstObj=0500c718`, so the Battle enemy-template table is currently the scene/copied encounter-object table produced by main CBE `sub_1010228()`.
+- conclusion:
+  - confirmed negative: `firstNonzero(enemyTableIds)` is not a valid semantic fix when the first entry is the player id.
+  - current unresolved contract: before `4/10.battleinfo`, some upstream scene/otherinfo/resource response should populate the Battle.cbm enemy template table with the touched monster's id/visual entry.
+  - the mock currently logs this case as `runtime_negative=enemy_template_fallback_is_player_character`; do not treat it as a confirmed real server mapping.
+- instrumentation:
+  - `trace_encounter_table_records` now dumps the first four `0x4c` records from the main-CBE encounter table at `sub_1010228` and again when `vm_net_mock_resolve_battle_enemy_id()` reads Battle.cbm's `battleState+0x50`.
+  - each dump includes the ids at record offset `+0x24` (the field compared by Battle.cbm `sub_66A4()`), plus raw fields at `+0x00`, `+0x20`, `+0x28`, `+0x36`, and `+0x44`.
+
+Latest source-table correction:
+
+- confirmed runtime evidence:
+  - latest `trace_encounter_table_records` from the main-CBE `sub_1010228` source pointer logs `table=05400000 ids=88098216,1701734764,120,0` with raw words that decode partly as the active scene/player object, not as a normal four-record monster-template table.
+  - the later Battle-side table remains `table=0500c718 ids=10001,0,0,0`, and generic `4/1 id=3` still resolves to `enemyWireId=10001`.
+- conclusion:
+  - confirmed negative: the `sub_1010228` source pointer being copied into `0500c718` is not the source of the touched monster id `3`; treating it as a four-entry monster list was an over-broad interpretation of the Battle.cbm `0x4c` record shape.
+  - confirmed: the touched `4/1.id=3` comes from a different scene/menu interaction record than Battle.cbm's current enemy-template table.
+- new trace-only instrumentation:
+  - first attempt `trace_challenge_request_source` watched `0x01037ECC/0x01037ECE/0x01037ED4`, but the next run produced no marker while still sending `4/1 id=3`. This is confirmed negative evidence for that exact PC set as the active touch path.
+  - static correction: the literal pool near `0x01038240..0x010382AC` shows that the `0x01037C9C` / `0x01037F6E` family writes several fields (`taskid`, `state`, `page`, `roomid`, `type`, `index`, `posx`, `posy`, etc.); individual callsites must be identified by runtime field-name pointers rather than by assuming one PC is the `id` writer.
+  - `trace_outgoing_field_callsite` now watches the field-writer `BLX` callsites in `sub_1037C9C()` and `sub_1037F6E()`, logging `fieldPtr`, decoded field name, value, packet object, and current event object. This is trace-only and does not change packets, guest registers, Battle.cbm globals, or scene state.
+  - newest manual run confirms another negative: no `trace_outgoing_field_callsite` marker appears, while the packet log still shows the live request `WT len=88 hdr=4/1 objs=1/4/1(id=3),1/2/1 count=2` with fields `index=3,posx=173,posy=272` and a `moveinfo` blob. Therefore the active touch/encounter producer is still outside the watched `sub_1037C9C()` / `sub_1037F6E()` field-writer set.
+  - new send-boundary trace-only instrumentation `trace_outgoing_wt_send_context` runs inside `vm_net_mock_on_send()` for outgoing `4/1`, `4/2`, and `2/10` WT packets. It records the first object family, object count, current PC/LR/lastAddress, R0-R7, `g_netCurrentObject`, the `R9+0x5540` event object, and decoded fields such as `id/index/posx/posy/Operate`. This does not change packet bytes, guest registers, CBE globals, Battle.cbm globals, parser flow, or renderer state.
+  - newest send-boundary evidence: the live simple request is `trace_outgoing_wt_send_context first=4/1 objectCount=1 ... id=3 index=3 pos=173,272 ... lr=010347e5 last=010347e2 netFlush=0103478f eventObj=01056124 eventBase=05000000 uiName=01桃花岛_02.sce`.
+  - paired allocation trace identifies the real producer: immediately before that send, `trace_alloc_outgoing_game_event ... pc=0100e2e4 lr=0518243b caller=0518243a regs=00000005,00000001,00000004,00000001 r5=00000003` allocates the `1/4/1` object from Battle.cbm, not from main-CBE `sub_1037C9C()` / `sub_1037F6E()`.
+  - static Battle.cbm evidence: at actual address `0x0518241E` (offset `0x04FE` from code base `0x05181F20`), the function allocates a `1/4/1` object via the main-CBE outbound-event API, then writes field literals `id`, `index`, `posx`, and `posy` (`0x0518244C..0x0518247C`, literal pool around `0x05182740`). Its entry arguments are `r0=id` and `r1=index`.
+  - trace-only instrumentation now adds `trace_battle_outgoing_request_source` at Battle.cbm offsets `0x04FE` (`battle_send_challenge_4_1_entry`) and `0x2B50` (`battle_send_operate_4_2_entry`) to record the dynamic caller and battle state at the request-builder entry. This is read-only and does not alter packet bytes or guest state.
+
+Latest Battle.cbm challenge producer evidence:
+
+- confirmed runtime evidence:
+  - the newest manual run logs `trace_battle_outgoing_request_source label=battle_send_challenge_4_1_entry pc=0518241e off=04fe lr=05182961 caller=05182960 ... regs=00000003,00000003,... enemyTable=0500c718 enemyIds=10001,0,0,0`.
+  - therefore Battle.cbm enters the `1/4/1` builder with `r0=3,r1=3`, and the selected monster id/index are already known before the mock builds `4/10.battleinfo`.
+  - static Battle.cbm disassembly around actual `0x05182940..0x0518295C` shows the latest caller is the fallback branch: it calls the method at `[global+0x6c]` with stack out-params, then loads `[sp+0x90]` and `[sp+0x8c]` into `r0/r1` before calling `0x0518241E`.
+  - at that same runtime point, the Battle.cbm enemy template table is still `0500c718` with ids `10001,0,0,0`; the `4/10` mock therefore still falls back from request id `3` to `enemyWireId=10001`, which is parser-safe but visibly the wrong opponent.
+- conclusion:
+  - confirmed: the `4/1` selected monster id/index and the enemy visual/template table are separate client-side data sources in the current state.
+  - confirmed negative: changing `4/10.battleinfo.enemy.id` to the first resolvable table id fixes the previous render crash, but it does not represent the touched monster when that table contains only the player id.
+- trace-only instrumentation:
+  - added `trace_battle_challenge_source_branch` at Battle.cbm offsets `0x0A04`, `0x0A0C`, `0x0A20`, `0x0A2A`, `0x0A38`, and `0x0A3C` (actual `0x05182924/0x0518292C/0x05182940/0x0518294A/0x05182958/0x0518295C` for code base `0x05181F20`).
+  - it records `[global+0x6c]`, stack out-params `[sp+0x90]/[sp+0x8c]`, the direct-branch candidate fields at `global+0x3B4/0x3B6`, nearby record fields derived from the returned index, and the current enemy-template table ids. It does not alter registers, packets, CBE globals, Battle.cbm globals, parser flow, or rendering.
+
+Follow-up selector evidence for `0x010183A0`:
+
+- confirmed runtime evidence:
+  - latest `trace_battle_challenge_source_branch` shows `[global+0x6c]=010183a1`.
+  - the method returns false for several ticks, then at tick `184` writes stack out-params `[sp+0x90]=3` and `[sp+0x8c]=3`; immediately after, `challenge_fallback_call_4_1` enters the Battle.cbm `4/1` builder with `r0=3,r1=3`.
+  - after the packet is emitted, the sent flag at `global+r7` flips from `0` to `1`, preventing repeated challenge sends.
+- static evidence:
+  - main CBE `sub_10183A0()` (`0x010183A0`) is the prompt/hotspot selector already documented as depending on `R9+0x5CD8`.
+  - its loop at `0x010184A8..0x0101850C` scans up to 25 records of size `0x154` from `[R9+0x5C64+0x4C]`.
+  - the candidate gate checks record bytes around `record+0x13B` and `record+0x13F`, calls a rect/collision callback through `record+0x40`, requires `[R9+0x5C64+0x74]` (`R9+0x5CD8`) to be non-null, then writes `outId = [record+0x64]` and `outIndex = loopIndex` at `0x010184FA..0x01018502`.
+- conclusion:
+  - confirmed: the touched monster request id/index come from the main-CBE prompt/hotspot record table, not from Battle.cbm's enemy-template lookup table.
+  - unresolved: the server/resource contract that should copy or materialize a matching monster visual/template entry into Battle.cbm `battleState+0x50` before `4/10.battleinfo` is still missing.
+- trace-only instrumentation:
+  - added `trace_prompt_hotspot_candidate` at `0x010183A0`, `0x010184A8`, `0x010184BE`, `0x010184D8`, `0x010184F8`, `0x010184FA`, `0x01018502`, and `0x01018504`.
+  - it records the prompt/hotspot table pointer, first eight record ids and gate bytes, current candidate record fields including `record+0x64`, and the `R9+0x5CD8` prompt label. It does not alter packets or guest state.
+
+Battle operate request `4/2`:
+
+- confirmed runtime evidence:
+  - once battle entry no longer crashes, Battle.cbm emits `WT len=36 hdr=4/2 objs=1/4/2`.
+  - decoded request fields are `index=1` and `Operate=0`.
+  - newest send-boundary evidence confirms this request is also built inside Battle.cbm: `trace_alloc_outgoing_game_event ... lr=05184a95 caller=05184a94 regs=0000000a,00000000,00000004,00000002` immediately precedes `trace_outgoing_wt_send_context first=4/2 ... index=1 operate=0`.
+  - newest builder-entry trace logs `trace_battle_outgoing_request_source label=battle_send_operate_4_2_entry pc=05184a70 off=2b50 lr=051882d9 caller=051882d8 ... counts=1,1 subtype=10 parseOk=1 enemyTable=0500c718 enemyIds=10001,0,0,0`.
+- static evidence:
+  - corrected: Battle.cbm `sub_7BD0()` reaches the real subtype-2 response switch at actual code-buffer address `0x05189BD2`.
+  - the first field is read through the u8 getter at `0x05189BD6..0x05189BDA`, then dispatched by a jump table at `0x05189BDC..0x05189BE6`.
+  - latest runtime evidence shows `result=1` reaches the subtype-2 switch but then takes a no-visible-action path; none of the previously marked `0x05189D32` `info` probes fire for `result=1`.
+  - corrected hypothesis: the `0x05189D16..0x05189DBC` block is a later subtype-2 result-table case, not the default success path for `result=1`. It still reads field `info` twice (`0x05189D32..0x05189D46`, literal `info` at `0x05189F4C`) if that case is reached.
+  - Battle.cbm request-builder evidence: actual address `0x05184A70` (offset `0x2B50`) allocates the outgoing `1/4/2` object through the same main-CBE outbound-event API and has nearby literals `index` and `seq` around `0x05184B08..0x05184B18`.
+  - static Battle.cbm disassembly around actual `0x051882BE..0x051882D8` shows the current caller path reads an operation mode from `[r4+6]`, passes `r1=4`, `r2=2`, `r3=0`, and calls the method at `[r4+0x18]`, which reaches the `0x05184A70` builder and returns at `0x051882D8`.
+- current mock:
+  - superseded negative: `builtin-battle-operate` answered `1/4/2` with `1/4/2 { result=2, info="" }`.
+  - evidence status: `4/2.result=1` and `4/2.result=2` are both superseded as response experiments because the `kind=4` top-level subtype table maps response subtype `2` to the empty-return target `0x05189B34`.
+  - logging correction: the request `index` field is encoded as u8 in the latest packet (`index=1`), while `Operate` is u32 (`Operate=0`); the mock now accepts either width for trace logging.
+  - superseded experiment: `builtin-battle-operate` answered the `4/2` request with `1/4/9 { result=1 }`, logged as `mock_battle_operate_response response=4/9 result=1 ...`.
+  - evidence for that experiment: Battle.cbm `sub_7BD0()` top-level kind-4 subtype table maps response subtypes `1` and `9` to the result parser at actual `0x05189BD2`, while subtype `2` maps to the no-op return target.
+  - newest runtime evidence: `1/4/9 { result=1 }` is parser-valid and does reach the intended Battle.cbm branch. `bin/logs/net_trace.log` records `trace_business_dispatch_item ... kind=4 subtype=9`, then `battle_event7_kind4_call_sub_7BD0`, `sub_7BD0_subtype_switch`, and `sub_7BD0_4_2_result1_gate` at actual `0x05189BF0`.
+  - confirmed negative: despite reaching the result=1 gate, no `sub_actioninfo_parser_*` marker and no `sub_4B70_battle_apply_entry` marker fires afterwards, and the user-visible attack still does not animate. Therefore `4/9 result=1` is only a partial parser hit, not the full operate/action response contract.
+  - static follow-up target: after `0x05189BF0`, Battle.cbm checks state bytes at `[battleObj+0x470+4]` and `[battleObj+0x470]` before branching to `0x05189EA4 -> sub_51844BA`; if neither byte is `1`, the branch returns quietly to `0x05189B18`.
+  - latest focused flow confirms the exact return reason. At tick `303`, `trace_battle_kind4_subtype9_flow` enters the subtype-9 result parser, reaches `0x05189BF0`, then reads `gateBytes=2,0,0,0,0` at `mainObj=0500b210 gateBase=0500b680`; `[+4]` is `0` and `[+0]` is `2`, so the branch at `0x05189C02` returns to `0x05189B18` instead of reaching `0x05189C04/0x05189EA4`.
+  - latest gate-write evidence: `trace_battle_main_gate_write` shows main CBE `0x0101345E..0x01013466` clears `mainObj+0x474/+0x472/+0x473` and initializes `mainObj+0x470=2`; later Battle.cbm writes at `0x05188418/0x0518841A/0x0518913C` only clear `+2/+3`. No current run writes either `+0` or `+4` to `1` before the attack ack.
+  - superseded negative experiment: `builtin-battle-operate` answered `4/2 index/Operate` with `1/4/8 { result=1, info=<raw empty> }`, logged as `mock_battle_operate_response response=4/8 result=1 infoLen=0 ...`.
+  - evidence for that experiment: Battle.cbm `sub_7BD0()` maps response subtype `8` to actual `0x05189D16`; when the current mode value in `r0` is `2`, this branch reads `result`, then for `result=1` reads raw `info` at `0x05189D32..0x05189D46`.
+  - latest runtime evidence: empty `info` reaches `trace_business_dispatch_item ... kind=4 subtype=8` and then `sub_4B70_battle_apply_entry`, but the caller is `lr=05189E25`, i.e. the fallback path `0x05189DBC -> 0x05189E20`, not the intended action path `0x05189D82 -> 0x05189DB4`. User-visible behavior is player escape/flee after pressing attack.
+  - static explanation: `0x05189D7C` checks Battle.cbm data byte `R9+0x3450+0x0B` after copying raw `info`; empty `info` leaves it not equal to `1`, so the parser branches to the fallback/escape path.
+  - corrected mock: default `builtin-battle-operate` is restored to the safe no-escape `1/4/9 { result=1 }` response. The empty `4/8` experiment is now gated behind `CBE_BATTLE_OPERATE_EXPERIMENT_4_8=1` and must remain marked as a confirmed negative until a valid non-empty `info` stream is recovered.
+  - trace-only instrumentation: `trace_battle_kind4_subtype9_flow` records the `sub_7BD0()` window for `kind=4 subtype=9` only, including actual PC/off, registers, `[r5]` as the pointer to the main object pointer, and bytes at `mainObj+0x470..0x474`. This does not alter guest memory, packet bytes, parser flow, or Battle.cbm globals.
+  - new trace-only instrumentation: `trace_battle_main_gate_write` watches writes to the currently loaded Battle.cbm main object gate bytes `mainObj+0x470..0x474`. This is meant to identify which parser/state path sets the observed `2,0,0,0,0` gate and whether any real server response should transition either byte to `1` before an operate ack is accepted.
+- latest runtime result:
+  - confirmed: the `result=2` response is emitted on wire as `WT len=32 ... result=2, info=<empty>` and is parser-safe; no crash/assert follows in `stdout_trace.log`.
+  - confirmed negative: `result=2` does not visibly execute an attack. Runtime dispatch reaches `trace_business_dispatch_item ... kind=4 subtype=2` and `sub_7BD0_subtype_switch` with `regs r0=2`, then returns to the data-event tail; no `sub_7BD0_4_2_success_*`, `sub_4B70_battle_apply_entry`, or battle-state action marker fires.
+  - confirmed correction: the `result=1` no-op did not reach the `0x05189D32` `info` read probes; the earlier statement that `result=1` copied `info` is superseded.
+  - newest manual attack run repeats the same result: tick `4384` dispatches `kind=4 subtype=2`, `sub_7BD0_subtype_switch` reads `result=2`, and render state remains `counts=1,1 subtypeState=10 parseOk=1` with `enemy0=...00002711...`; no action/apply probe fires.
+  - newest packet/trace rerun shows the same no-op at a shorter timeline: `bin/logs/net_packets.log` records `WT len=36 hdr=4/2 objs=1/4/2` with `index=1,Operate=0`, followed by `1/4/2 { result=2, info=<empty> }`; `bin/logs/net_trace.log` records `mock_battle_operate_response ... result=2 ... index=1 operate=0` and dispatch `kind=4 subtype=2`, with no action/apply probe afterwards.
+  - corrected trace mapping for the subtype-2 `result` jump table at actual `0x05189BE8`: bytes `3f 03 0f 2a 18 21 3f 33` map `result=1` to actual `0x05189BF0`, `result=2` to `0x05189C08`, `result=3` to `0x05189C3E`, `result=4` to `0x05189C1A`, `result=5` to `0x05189C2C`, `result=7` to `0x05189C50`, and `result=0/6/ge8` to the cleanup/default area. This explains why the previous `result=2` branch labels did not fire at the expected address.
+  - newest manual rerun confirms the `4/2` response still reaches Battle.cbm: `trace_business_dispatch_item ... kind=4 subtype=2`, then `battle_event7_kind4_call_sub_7BD0`, `sub_7BD0_kind4_dispatch_entry`, and `sub_7BD0_subtype_switch` with `regs=00000002,00000002,...` at tick `1224`.
+  - trace limitation found in that rerun: render-loop probes later consumed the shared `trace_battle_pool_probe` cap (`count=1200`), and the single-point result-branch marker still did not prove the exact post-jump PC. A focused `trace_battle_kind4_subtype2_flow` window now records actual PCs in `sub_7BD0` offsets `0x7BD0..0x7D60` only when the packet object is `kind=4 subtype=2`.
+  - focused flow evidence from the next rerun: `trace_battle_kind4_subtype2_flow` records `subtype=2` entering `0x05189AF0`, reading subtype `2`, jumping from `0x05189B16` to actual `0x05189B34` (`off=0x7C14`), then returning via `0x05189B18/0x05189B1A`. Thus response subtype `4/2` is confirmed no-op in this Battle.cbm state.
+  - static table map for the top-level kind-4 switch: subtype `0->0x05189B34`, `1->0x05189BD2`, `2->0x05189B34`, `3->0x05189B34`, `4->0x05189E26`, `5->0x05189C86`, `6->0x05189E84`, `7->0x05189F7C`, `8->0x05189D16`, `9->0x05189BD2`, `10->0x05189C86`, `11->0x05189B36`.
+- related action/combat parser evidence:
+  - Battle.cbm strings/xrefs identify `actioninfo` at `0x051891BC` and `actionnum` at `0x051891CC`, referenced by parser code at `0x05188DF8` and `0x05188E1A`.
+  - another response/status parser reads `combatinfo` at `0x05189A94`, then optional `info`, `fbs`, and `fdata` fields around `0x05189958..0x05189A2E`.
+  - trace-only probes now cover the subtype-2 success path offsets `0x7E12/0x7E1A/0x7E1C/0x7E28/0x7E58/0x7E62/0x7E94` and battle-apply entry `0x2C50`; these log the copied `info` pointer, length, and first bytes without changing client state.
+  - additional trace-only probes now mark the corrected subtype-2 result jump-table heads around `0x7CD0..0x7D48`, plus the `actioninfo/actionnum` parser entry/read sites at offsets `0x6EB0`, `0x6ED8`, and `0x6EFA`, so the next attack run can prove whether any server response reaches the action-script parser.
 
 Runtime result with `result=4`:
 

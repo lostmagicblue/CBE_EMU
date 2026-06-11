@@ -247,6 +247,8 @@ void vm_net_trace_scene_dispatch_gate_write(uint64_t address, uint32_t size, int
 void vm_net_trace_scene_loading_owner_write(uint64_t address, uint32_t size, int64_t value);
 static void vm_format_trace_bytes_hex(const u8 *bytes, u32 count, char *out, size_t outCap);
 static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
+static bool vm_net_trace_read_u32(u32 addr, u32 *value);
+static bool vm_net_trace_read_u8(u32 addr, u8 *value);
 static uc_err scheduler_dispatch_net_tasks(void);
 static uc_err scheduler_flush_post_vm_business_send_ready(const char *reason);
 
@@ -2815,6 +2817,154 @@ static void vm_net_packet_log_exchange(const u8 *request, u32 requestLen, const 
     vm_net_packet_trace_bytes("mock_response_payload", response, responseLen);
 }
 
+static void vm_net_read_active_ui_name_best_effort(char *out, size_t outCap);
+
+static void vm_net_trace_outgoing_wt_send_context(const u8 *request, u32 requestLen, u32 connectId, u32 dataPtr, u32 dataLen)
+{
+    static u32 s_outgoingWtSendContextCount = 0;
+    u32 offset = 4;
+    u32 objectCount = 0;
+    u32 firstKind = 0;
+    u32 firstSubtype = 0;
+    u32 id = 0;
+    u32 index = 0;
+    u32 posx = 0;
+    u32 posy = 0;
+    u32 operate = 0;
+    u32 pc = 0;
+    u32 lr = 0;
+    u32 sp = 0;
+    u32 r0 = 0;
+    u32 r1 = 0;
+    u32 r2 = 0;
+    u32 r3 = 0;
+    u32 r4 = 0;
+    u32 r5 = 0;
+    u32 r6 = 0;
+    u32 r7 = 0;
+    u32 eventObj = 0;
+    u32 eventCount = 0;
+    u32 eventCap = 0;
+    u32 eventBase = 0;
+    u32 netObjCb = 0;
+    u32 netObjFlush = 0;
+    u8 eventByte5 = 0;
+    char uiName[96];
+    vm_net_mock_request_object object;
+
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T')
+        return;
+    if (s_outgoingWtSendContextCount >= 80)
+        return;
+
+    while (vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+    {
+        if (objectCount == 0)
+        {
+            firstKind = object.kind;
+            firstSubtype = object.subtype;
+        }
+        ++objectCount;
+    }
+    if (!((firstKind == 4 && firstSubtype == 1) ||
+          (firstKind == 4 && firstSubtype == 2) ||
+          (firstKind == 2 && firstSubtype == 10)))
+    {
+        return;
+    }
+
+    (void)vm_net_mock_get_object_u32_field(request, requestLen, "id", &id);
+    if (!vm_net_mock_get_object_u32_field(request, requestLen, "index", &index))
+    {
+        u8 index8 = 0;
+        if (vm_net_mock_get_object_u8_field(request, requestLen, "index", &index8))
+            index = index8;
+    }
+    (void)vm_net_mock_get_object_u32_field(request, requestLen, "posx", &posx);
+    (void)vm_net_mock_get_object_u32_field(request, requestLen, "posy", &posy);
+    if (!vm_net_mock_get_object_u32_field(request, requestLen, "Operate", &operate))
+    {
+        u8 operate8 = 0;
+        if (vm_net_mock_get_object_u8_field(request, requestLen, "Operate", &operate8))
+            operate = operate8;
+    }
+
+    uiName[0] = 0;
+    uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+    uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+    uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+    uc_reg_read(MTK, UC_ARM_REG_R4, &r4);
+    uc_reg_read(MTK, UC_ARM_REG_R5, &r5);
+    uc_reg_read(MTK, UC_ARM_REG_R6, &r6);
+    uc_reg_read(MTK, UC_ARM_REG_R7, &r7);
+    vm_net_read_active_ui_name_best_effort(uiName, sizeof(uiName));
+
+    if (Global_R9)
+    {
+        (void)uc_mem_read(MTK, Global_R9 + 0x5540, &eventObj, 4);
+        if (eventObj)
+        {
+            (void)uc_mem_read(MTK, eventObj + 0x05, &eventByte5, 1);
+            (void)uc_mem_read(MTK, eventObj + 0x10, &eventCount, 4);
+            (void)uc_mem_read(MTK, eventObj + 0x14, &eventCap, 4);
+            (void)uc_mem_read(MTK, eventObj + 0x18, &eventBase, 4);
+        }
+    }
+    if (g_netCurrentObject)
+    {
+        (void)uc_mem_read(MTK, g_netCurrentObject + 0x14, &netObjCb, 4);
+        (void)uc_mem_read(MTK, g_netCurrentObject + 0x2c, &netObjFlush, 4);
+    }
+
+    ++s_outgoingWtSendContextCount;
+    vm_net_trace("trace_outgoing_wt_send_context first=%u/%u objectCount=%u connect=%u dataPtr=%08x dataLen=%u requestLen=%u"
+                 " pc=%08x lr=%08x last=%08x sp=%08x tick=%u regs=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x"
+                 " id=%u index=%u pos=%u,%u operate=%u netObj=%08x netCb=%08x netFlush=%08x"
+                 " eventObj=%08x byte5=%u eventCount=%u eventCap=%u eventBase=%08x uiName=%s activeScreen=%08x currentThis=%08x count=%u"
+                 " evidence=runtime:vm_net_mock_on_send_boundary\n",
+                 firstKind,
+                 firstSubtype,
+                 objectCount,
+                 connectId,
+                 dataPtr,
+                 dataLen,
+                 requestLen,
+                 pc,
+                 lr,
+                 lastAddress,
+                 sp,
+                 g_schedulerTick,
+                 r0,
+                 r1,
+                 r2,
+                 r3,
+                 r4,
+                 r5,
+                 r6,
+                 r7,
+                 id,
+                 index,
+                 posx,
+                 posy,
+                 operate,
+                 g_netCurrentObject,
+                 netObjCb,
+                 netObjFlush,
+                 eventObj,
+                 eventByte5,
+                 eventCount,
+                 eventCap,
+                 eventBase,
+                 uiName,
+                 vmAddedScreen,
+                 g_currentScreenThis,
+                 s_outgoingWtSendContextCount);
+}
+
 static void vm_net_log_unhandled_packet(const u8 *request, u32 requestLen)
 {
     char summary[512];
@@ -3069,6 +3219,255 @@ static void vm_net_trace_sub_10352ae_callsite(const char *tag, u32 pc, u32 lr, u
                  tag, pc, lr, lastAddress, g_schedulerTick, r0, r1, r2, stackArg0, stack0Name, stackArg4, stackArg8, uiName);
 }
 
+static void vm_net_trace_encounter_table_records(const char *label, u32 tableBase)
+{
+    static u32 s_encounterTableTraceCount = 0;
+    u32 ids[4] = {0};
+    u32 raw0[4] = {0};
+    u32 raw20[4] = {0};
+    u32 raw28[4] = {0};
+    u32 raw36[4] = {0};
+    u32 raw44[4] = {0};
+
+    if (tableBase == 0 || s_encounterTableTraceCount >= 96)
+        return;
+
+    for (u32 i = 0; i < 4; ++i)
+    {
+        u32 rec = tableBase + i * 0x4Cu;
+        (void)uc_mem_read(MTK, rec + 0x00u, &raw0[i], 4);
+        (void)uc_mem_read(MTK, rec + 0x20u, &raw20[i], 4);
+        (void)uc_mem_read(MTK, rec + 0x24u, &ids[i], 4);
+        (void)uc_mem_read(MTK, rec + 0x28u, &raw28[i], 4);
+        (void)uc_mem_read(MTK, rec + 0x36u, &raw36[i], 4);
+        (void)uc_mem_read(MTK, rec + 0x44u, &raw44[i], 4);
+    }
+
+    ++s_encounterTableTraceCount;
+    vm_net_trace("trace_encounter_table_records label=%s table=%08x"
+                 " ids=%u,%u,%u,%u"
+                 " raw0=%08x,%08x,%08x,%08x"
+                 " raw20=%08x,%08x,%08x,%08x"
+                 " raw28=%08x,%08x,%08x,%08x"
+                 " raw36=%08x,%08x,%08x,%08x"
+                 " raw44=%08x,%08x,%08x,%08x"
+                 " activeScreen=%08x currentThis=%08x count=%u evidence=main:sub_1010228_scene_table,Battle.cbm:sub_66A4_enemy_lookup_record_plus_0x24\n",
+                 label ? label : "unknown",
+                 tableBase,
+                 ids[0], ids[1], ids[2], ids[3],
+                 raw0[0], raw0[1], raw0[2], raw0[3],
+                 raw20[0], raw20[1], raw20[2], raw20[3],
+                 raw28[0], raw28[1], raw28[2], raw28[3],
+                 raw36[0], raw36[1], raw36[2], raw36[3],
+                 raw44[0], raw44[1], raw44[2], raw44[3],
+                 vmAddedScreen,
+                 g_currentScreenThis,
+                 s_encounterTableTraceCount);
+}
+
+static void vm_net_trace_challenge_request_source(const char *label, u32 pc)
+{
+    static u32 s_challengeSourceTraceCount = 0;
+    u32 lr = 0;
+    u32 r0 = 0;
+    u32 r1 = 0;
+    u32 r2 = 0;
+    u32 r3 = 0;
+    u32 record = 0;
+    u32 offset = 0;
+    u32 base = 0;
+    u32 index = 0;
+    u32 raw00 = 0;
+    u32 raw04 = 0;
+    u32 raw08 = 0;
+    u32 raw0c = 0;
+    u32 raw10 = 0;
+    u32 raw14 = 0;
+    u32 raw20 = 0;
+    u32 raw38 = 0;
+    u32 raw44 = 0;
+    u32 raw48 = 0;
+    u32 raw54 = 0;
+    u32 raw64 = 0;
+    char recName[96];
+    char uiName[96];
+
+    if (s_challengeSourceTraceCount >= 160)
+        return;
+
+    recName[0] = 0;
+    uiName[0] = 0;
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+    uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+    uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+
+    /*
+     * sub_1037ED4 source path:
+     *   record = tableBase + selectedIndex * 0x74
+     *   id     = *(record + 0x48)
+     * At 0x01037ECC, R0 already holds record and R1 holds the byte offset.
+     * At 0x01037ED4, R2 holds the id after the packet field name is loaded.
+     */
+    if (pc == 0x01037ECC || pc == 0x01037ECE)
+    {
+        record = r0;
+        offset = r1;
+    }
+    else if (pc == 0x01037ED4)
+    {
+        /*
+         * The record pointer is no longer in a stable register here, but the
+         * just-written id is in R2. Keep the register dump to tie the outgoing
+         * field write to the preceding 0x01037ECC record trace.
+         */
+        record = 0;
+        offset = 0;
+    }
+
+    if (record != 0 && offset % 0x74u == 0)
+    {
+        index = offset / 0x74u;
+        base = record - offset;
+        (void)uc_mem_read(MTK, record + 0x00u, &raw00, 4);
+        (void)uc_mem_read(MTK, record + 0x04u, &raw04, 4);
+        (void)uc_mem_read(MTK, record + 0x08u, &raw08, 4);
+        (void)uc_mem_read(MTK, record + 0x0cu, &raw0c, 4);
+        (void)uc_mem_read(MTK, record + 0x10u, &raw10, 4);
+        (void)uc_mem_read(MTK, record + 0x14u, &raw14, 4);
+        (void)uc_mem_read(MTK, record + 0x20u, &raw20, 4);
+        (void)uc_mem_read(MTK, record + 0x38u, &raw38, 4);
+        (void)uc_mem_read(MTK, record + 0x44u, &raw44, 4);
+        (void)uc_mem_read(MTK, record + 0x48u, &raw48, 4);
+        (void)uc_mem_read(MTK, record + 0x54u, &raw54, 4);
+        (void)uc_mem_read(MTK, record + 0x64u, &raw64, 4);
+        vm_net_read_guest_best_effort_label(record + 0x0cu, recName, sizeof(recName));
+    }
+    vm_net_read_active_ui_name_best_effort(uiName, sizeof(uiName));
+
+    ++s_challengeSourceTraceCount;
+    vm_net_trace("trace_challenge_request_source label=%s pc=%08x lr=%08x last=%08x tick=%u"
+                 " regs=%08x,%08x,%08x,%08x"
+                 " table=%08x record=%08x selectedIndex=%u offset=%08x requestId=%u"
+                 " raw00=%08x raw04=%08x raw08=%08x raw0c=%08x raw10=%08x raw14=%08x"
+                 " raw20=%08x raw38=%08x raw44=%08x raw48=%08x raw54=%08x raw64=%08x"
+                 " recName=%s uiName=%s activeScreen=%08x currentThis=%08x count=%u"
+                 " evidence=IDA:sub_1037ED4_4_1_id_from_record_plus_0x48\n",
+                 label ? label : "unknown",
+                 pc,
+                 lr,
+                 lastAddress,
+                 g_schedulerTick,
+                 r0,
+                 r1,
+                 r2,
+                 r3,
+                 base,
+                 record,
+                 index,
+                 offset,
+                 (pc == 0x01037ED4) ? r2 : raw48,
+                 raw00,
+                 raw04,
+                 raw08,
+                 raw0c,
+                 raw10,
+                 raw14,
+                 raw20,
+                 raw38,
+                 raw44,
+                 raw48,
+                 raw54,
+                 raw64,
+                 recName,
+                 uiName,
+                 vmAddedScreen,
+                 g_currentScreenThis,
+                 s_challengeSourceTraceCount);
+}
+
+static void vm_net_trace_outgoing_field_callsite(const char *label, u32 pc)
+{
+    static u32 s_outgoingFieldTraceCount = 0;
+    u32 lr = 0;
+    u32 r0 = 0;
+    u32 r1 = 0;
+    u32 r2 = 0;
+    u32 r3 = 0;
+    u32 r4 = 0;
+    u32 r5 = 0;
+    u32 r6 = 0;
+    u32 r7 = 0;
+    u32 eventObj = 0;
+    u32 eventCount = 0;
+    u32 eventCap = 0;
+    u32 eventBase = 0;
+    u8 eventByte5 = 0;
+    char fieldName[64];
+    char uiName[96];
+
+    if (s_outgoingFieldTraceCount >= 420)
+        return;
+
+    fieldName[0] = 0;
+    uiName[0] = 0;
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+    uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+    uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+    uc_reg_read(MTK, UC_ARM_REG_R4, &r4);
+    uc_reg_read(MTK, UC_ARM_REG_R5, &r5);
+    uc_reg_read(MTK, UC_ARM_REG_R6, &r6);
+    uc_reg_read(MTK, UC_ARM_REG_R7, &r7);
+
+    vm_net_read_guest_ascii_label(r1, fieldName, sizeof(fieldName));
+    vm_net_read_active_ui_name_best_effort(uiName, sizeof(uiName));
+    if (Global_R9)
+    {
+        (void)uc_mem_read(MTK, Global_R9 + 0x5540, &eventObj, 4);
+        if (eventObj)
+        {
+            (void)uc_mem_read(MTK, eventObj + 0x05, &eventByte5, 1);
+            (void)uc_mem_read(MTK, eventObj + 0x10, &eventCount, 4);
+            (void)uc_mem_read(MTK, eventObj + 0x14, &eventCap, 4);
+            (void)uc_mem_read(MTK, eventObj + 0x18, &eventBase, 4);
+        }
+    }
+
+    ++s_outgoingFieldTraceCount;
+    vm_net_trace("trace_outgoing_field_callsite label=%s pc=%08x lr=%08x last=%08x tick=%u"
+                 " packetObj=%08x fieldPtr=%08x field=%s value=%u valueHex=%08x writerCb=%08x"
+                 " regs4=%08x,%08x,%08x,%08x eventObj=%08x byte5=%u count=%u cap=%u base=%08x"
+                 " uiName=%s activeScreen=%08x currentThis=%08x countTrace=%u"
+                 " evidence=IDA:sub_1037C9C_or_sub_1037F6E_packet_field_writer_callsite\n",
+                 label ? label : "unknown",
+                 pc,
+                 lr,
+                 lastAddress,
+                 g_schedulerTick,
+                 r0,
+                 r1,
+                 fieldName,
+                 r2,
+                 r2,
+                 r3,
+                 r4,
+                 r5,
+                 r6,
+                 r7,
+                 eventObj,
+                 eventByte5,
+                 eventCount,
+                 eventCap,
+                 eventBase,
+                 uiName,
+                 vmAddedScreen,
+                 g_currentScreenThis,
+                 s_outgoingFieldTraceCount);
+}
+
 static void vm_net_trace_sub_1010228_entry(u32 pc, u32 lr)
 {
     u32 srcObj = 0;
@@ -3100,6 +3499,8 @@ static void vm_net_trace_sub_1010228_entry(u32 pc, u32 lr)
     vm_net_read_active_ui_name(uiName, sizeof(uiName));
     vm_net_trace("trace_sub_1010228_entry pc=%08x lr=%08x last=%08x tick=%u srcObj=%08x dstObj=%08x copiedName=%s field36=%08x flagsBefore=%u,%u uiName=%s activeScreen=%08x currentThis=%08x\n",
                  pc, lr, lastAddress, g_schedulerTick, srcObj, dstObj, copiedName, field68, flag5c74, flag5c79, uiName, vmAddedScreen, g_currentScreenThis);
+    vm_net_trace_encounter_table_records("sub_1010228_entry_src", srcObj);
+    vm_net_trace_encounter_table_records("sub_1010228_entry_dst", dstObj);
 }
 
 static void vm_net_trace_sub_1010228_callsite(const char *label, u32 pc)
@@ -3144,6 +3545,8 @@ static void vm_net_trace_sub_1010228_callsite(const char *label, u32 pc)
                  uiName,
                  vmAddedScreen,
                  g_currentScreenThis);
+    vm_net_trace_encounter_table_records("sub_1010228_callsite_src", srcObj);
+    vm_net_trace_encounter_table_records("sub_1010228_callsite_dst", dstObj);
 }
 
 static void vm_net_trace_title_screen_callback(const char *label, u32 pc)
@@ -4434,6 +4837,83 @@ void vm_net_trace_battle_module_data_write(uint64_t address, uint32_t size, int6
                  s_battleDataWriteTraceCount);
 }
 
+void vm_net_trace_battle_main_gate_write(uint64_t address, uint32_t size, int64_t value)
+{
+    static u32 s_battleMainGateWriteTraceCount = 0;
+    u32 writeStart = (u32)address;
+    u32 writeEnd = writeStart + size;
+    u32 battleR9 = 0;
+    u32 mainObj = 0;
+    u32 gateBase = 0;
+    u32 gateEnd = 0;
+    u32 pc = 0, lr = 0;
+    u32 r0 = 0, r1 = 0, r2 = 0, r3 = 0;
+    u8 gate0 = 0, gate1 = 0, gate2 = 0, gate3 = 0, gate4 = 0;
+    u8 newByte = 0xff;
+
+    if (size == 0 || writeEnd < writeStart || s_battleMainGateWriteTraceCount >= 160)
+        return;
+
+    battleR9 = vm_screen_stack_lookup_module_base(vmAddedScreen);
+    if (battleR9 == 0)
+    {
+        u32 inferredCodeBase = 0;
+        (void)vm_infer_battle_module_from_screen(vmAddedScreen, &inferredCodeBase, &battleR9);
+    }
+    if (battleR9 == 0)
+        return;
+    (void)vm_net_trace_read_u32(battleR9 + 0x2050u, &mainObj);
+    if (mainObj == 0)
+        return;
+
+    gateBase = mainObj + 0x470u;
+    gateEnd = gateBase + 5u;
+    if (writeEnd <= gateBase || writeStart >= gateEnd)
+        return;
+
+    (void)vm_net_trace_read_u8(gateBase + 0u, &gate0);
+    (void)vm_net_trace_read_u8(gateBase + 1u, &gate1);
+    (void)vm_net_trace_read_u8(gateBase + 2u, &gate2);
+    (void)vm_net_trace_read_u8(gateBase + 3u, &gate3);
+    (void)vm_net_trace_read_u8(gateBase + 4u, &gate4);
+    if (writeStart <= gateBase + 4u && writeEnd > gateBase + 4u)
+        newByte = (u8)(((u64)value >> ((gateBase + 4u - writeStart) * 8u)) & 0xffu);
+    else if (writeStart >= gateBase && writeStart < gateEnd)
+        newByte = (u8)(value & 0xffu);
+
+    uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+    uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+    uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+
+    ++s_battleMainGateWriteTraceCount;
+    vm_net_trace("trace_battle_main_gate_write mainObj=%08x gateBase=%08x oldBytes=%u,%u,%u,%u,%u writeAddr=%08x writeSize=%u raw=%08x newByte=%u pc=%08x lr=%08x last=%08x tick=%u regs=%08x,%08x,%08x,%08x activeScreen=%08x currentThis=%08x count=%u evidence=runtime:Battle.cbm_sub_7BD0_result1_gate_reads_mainObj_0x470_0x474\n",
+                 mainObj,
+                 gateBase,
+                 (unsigned int)gate0,
+                 (unsigned int)gate1,
+                 (unsigned int)gate2,
+                 (unsigned int)gate3,
+                 (unsigned int)gate4,
+                 writeStart,
+                 size,
+                 (u32)value,
+                 (unsigned int)newByte,
+                 pc,
+                 lr,
+                 lastAddress,
+                 g_schedulerTick,
+                 r0,
+                 r1,
+                 r2,
+                 r3,
+                 vmAddedScreen,
+                 g_currentScreenThis,
+                 s_battleMainGateWriteTraceCount);
+}
+
 static void vm_net_trace_status_tile_slots_if_needed(u32 pc)
 {
     static u32 s_prevTileInfoBase = 0xffffffffu;
@@ -5261,6 +5741,120 @@ static void vm_trace_scene_status_text_write(const char *fieldName, u32 pc)
                  vmAddedScreen,
                  g_currentScreenThis,
                  s_sceneStatusTextWriteTraceCount);
+}
+
+static void vm_net_trace_prompt_hotspot_candidate(const char *label, u32 pc)
+{
+    static u32 s_promptHotspotTraceCount = 0;
+    u32 lr = 0, sp = 0;
+    u32 r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0, r5 = 0, r6 = 0, r7 = 0;
+    u32 hudState = 0;
+    u32 table = 0;
+    u32 currentNode = 0;
+    u32 promptNamePtr = 0;
+    u32 statusTextPtr = 0;
+    u32 record = 0;
+    u32 recordFromIndex = 0;
+    u32 recordId = 0;
+    u32 recordPtr40 = 0;
+    u32 recordPtr44 = 0;
+    u32 recordD130 = 0;
+    u8 recordB13b = 0;
+    u8 recordB13f = 0;
+    u8 recordB13c = 0;
+    u8 recordB140 = 0;
+    u32 recordWords[8] = {0};
+    char promptName[96];
+    char statusText[96];
+    char recordLabel[96];
+    u32 ids[8] = {0};
+    u8 flags13b[8] = {0};
+    u8 flags13f[8] = {0};
+
+    if (!Global_R9 || s_promptHotspotTraceCount >= 160)
+        return;
+
+    memset(promptName, 0, sizeof(promptName));
+    memset(statusText, 0, sizeof(statusText));
+    memset(recordLabel, 0, sizeof(recordLabel));
+    hudState = Global_R9 + 0x5C64u;
+
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+    uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+    uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+    uc_reg_read(MTK, UC_ARM_REG_R4, &r4);
+    uc_reg_read(MTK, UC_ARM_REG_R5, &r5);
+    uc_reg_read(MTK, UC_ARM_REG_R6, &r6);
+    uc_reg_read(MTK, UC_ARM_REG_R7, &r7);
+
+    (void)uc_mem_read(MTK, hudState + 0x40u, &currentNode, 4);
+    (void)uc_mem_read(MTK, hudState + 0x4Cu, &table, 4);
+    (void)uc_mem_read(MTK, hudState + 0x74u, &promptNamePtr, 4);
+    (void)uc_mem_read(MTK, hudState + 0x78u, &statusTextPtr, 4);
+    vm_net_read_guest_best_effort_label(promptNamePtr, promptName, sizeof(promptName));
+    vm_net_read_guest_best_effort_label(statusTextPtr, statusText, sizeof(statusText));
+
+    if (table && r4 < 25)
+        recordFromIndex = table + r4 * 0x154u;
+    if (r1 >= 0x01000000u && r1 < 0x08000000u)
+        record = r1;
+    else
+        record = recordFromIndex;
+
+    if (record)
+    {
+        (void)uc_mem_read(MTK, record + 0x18u, recordWords, sizeof(recordWords));
+        (void)uc_mem_read(MTK, record + 0x40u, &recordPtr40, 4);
+        (void)uc_mem_read(MTK, record + 0x44u, &recordPtr44, 4);
+        (void)uc_mem_read(MTK, record + 0x64u, &recordId, 4);
+        (void)uc_mem_read(MTK, record + 0x130u, &recordD130, 4);
+        (void)uc_mem_read(MTK, record + 0x13Bu, &recordB13b, 1);
+        (void)uc_mem_read(MTK, record + 0x13Cu, &recordB13c, 1);
+        (void)uc_mem_read(MTK, record + 0x13Fu, &recordB13f, 1);
+        (void)uc_mem_read(MTK, record + 0x140u, &recordB140, 1);
+        vm_net_read_guest_best_effort_label(recordPtr44, recordLabel, sizeof(recordLabel));
+    }
+    if (table)
+    {
+        for (u32 i = 0; i < 8; ++i)
+        {
+            u32 entry = table + i * 0x154u;
+            (void)uc_mem_read(MTK, entry + 0x64u, &ids[i], 4);
+            (void)uc_mem_read(MTK, entry + 0x13Bu, &flags13b[i], 1);
+            (void)uc_mem_read(MTK, entry + 0x13Fu, &flags13f[i], 1);
+        }
+    }
+
+    ++s_promptHotspotTraceCount;
+    vm_net_trace("trace_prompt_hotspot_candidate label=%s pc=%08x lr=%08x caller=%08x last=%08x tick=%u"
+                 " regs=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x sp=%08x hud=%08x table=%08x currentNode=%08x"
+                 " prompt=%08x:%s status=%08x:%s record=%08x recordFromIndex=%08x index=%u recordId=%u"
+                 " recPtrs=%08x,%08x recLabel=%s rec18=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x rec130=%08x flags=%u,%u,%u,%u"
+                 " ids=%u,%u,%u,%u,%u,%u,%u,%u flags13b=%u,%u,%u,%u,%u,%u,%u,%u flags13f=%u,%u,%u,%u,%u,%u,%u,%u"
+                 " activeScreen=%08x currentThis=%08x count=%u evidence=main:sub_10183A0_prompt_hotspot_selector\n",
+                 label ? label : "unknown", pc, lr, lr & ~1u, lastAddress, g_schedulerTick,
+                 r0, r1, r2, r3, r4, r5, r6, r7, sp, hudState, table, currentNode,
+                 promptNamePtr, promptName, statusTextPtr, statusText, record, recordFromIndex,
+                 (unsigned int)r4, recordId,
+                 recordPtr40, recordPtr44, recordLabel,
+                 recordWords[0], recordWords[1], recordWords[2], recordWords[3],
+                 recordWords[4], recordWords[5], recordWords[6], recordWords[7],
+                 recordD130,
+                 (unsigned int)recordB13b, (unsigned int)recordB13c,
+                 (unsigned int)recordB13f, (unsigned int)recordB140,
+                 ids[0], ids[1], ids[2], ids[3], ids[4], ids[5], ids[6], ids[7],
+                 (unsigned int)flags13b[0], (unsigned int)flags13b[1],
+                 (unsigned int)flags13b[2], (unsigned int)flags13b[3],
+                 (unsigned int)flags13b[4], (unsigned int)flags13b[5],
+                 (unsigned int)flags13b[6], (unsigned int)flags13b[7],
+                 (unsigned int)flags13f[0], (unsigned int)flags13f[1],
+                 (unsigned int)flags13f[2], (unsigned int)flags13f[3],
+                 (unsigned int)flags13f[4], (unsigned int)flags13f[5],
+                 (unsigned int)flags13f[6], (unsigned int)flags13f[7],
+                 vmAddedScreen, g_currentScreenThis, s_promptHotspotTraceCount);
 }
 
 static void vm_trace_actor_move_entry_parser_entry(u32 pc)
@@ -6196,6 +6790,139 @@ static bool vm_net_trace_read_u8(u32 addr, u8 *value)
     return uc_mem_read(MTK, addr, value, 1) == UC_ERR_OK;
 }
 
+static void vm_net_trace_battle_outgoing_request_source(const char *label, u32 pc, u32 moduleBase)
+{
+    static u32 s_battleOutgoingSourceTraceCount = 0;
+    u32 lr = 0, sp = 0, r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r9 = 0;
+    u32 battleBase = 0;
+    u32 enemyTable = 0;
+    u32 enemyIds[4] = {0};
+    u16 ownCount = 0, enemyCount = 0, subtype = 0, parseOk = 0;
+
+    if (s_battleOutgoingSourceTraceCount >= 80)
+        return;
+
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+    uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+    uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+    uc_reg_read(MTK, UC_ARM_REG_R4, &r4);
+    uc_reg_read(MTK, UC_ARM_REG_R5, &r5);
+    uc_reg_read(MTK, UC_ARM_REG_R6, &r6);
+    uc_reg_read(MTK, UC_ARM_REG_R7, &r7);
+    uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+
+    battleBase = r9 + 0x3450u;
+    (void)vm_net_trace_read_u16(battleBase + 0x1Au, &ownCount);
+    (void)vm_net_trace_read_u16(battleBase + 0x1Cu, &enemyCount);
+    (void)vm_net_trace_read_u16(battleBase + 0x20u, &subtype);
+    (void)vm_net_trace_read_u16(battleBase + 0x22u, &parseOk);
+    (void)vm_net_trace_read_u32(battleBase + 0x50u, &enemyTable);
+    if (enemyTable)
+    {
+        for (u32 i = 0; i < 4; ++i)
+            (void)vm_net_trace_read_u32(enemyTable + i * 0x4Cu + 0x24u, &enemyIds[i]);
+    }
+
+    ++s_battleOutgoingSourceTraceCount;
+    vm_net_trace("trace_battle_outgoing_request_source label=%s pc=%08x off=%04x lr=%08x caller=%08x last=%08x tick=%u"
+                 " regs=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x sp=%08x r9=%08x"
+                 " counts=%u,%u subtype=%u parseOk=%u enemyTable=%08x enemyIds=%u,%u,%u,%u"
+                 " activeScreen=%08x currentThis=%08x count=%u evidence=Battle.cbm:outgoing_request_builder_entry\n",
+                 label ? label : "unknown", pc, moduleBase ? (pc - moduleBase) : 0, lr, lr & ~1u,
+                 lastAddress, g_schedulerTick, r0, r1, r2, r3, r4, r5, r6, r7, sp, r9,
+                 (unsigned int)ownCount, (unsigned int)enemyCount, (unsigned int)subtype, (unsigned int)parseOk,
+                 enemyTable, enemyIds[0], enemyIds[1], enemyIds[2], enemyIds[3],
+                 vmAddedScreen, g_currentScreenThis, s_battleOutgoingSourceTraceCount);
+}
+
+static void vm_net_trace_battle_challenge_source_branch(const char *label, u32 pc, u32 moduleBase)
+{
+    static u32 s_battleChallengeBranchTraceCount = 0;
+    u32 lr = 0, sp = 0, r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r9 = 0;
+    u32 globalObj = 0;
+    u32 method6c = 0;
+    u32 stack90 = 0;
+    u32 stack8c = 0;
+    u32 directWord0 = 0;
+    u32 directWord1 = 0;
+    u16 directId = 0;
+    u16 directIndex = 0;
+    u8 sentFlag = 0;
+    u8 gateFlag9 = 0;
+    u8 gateFlag10 = 0;
+    u32 fallbackRecord = 0;
+    u32 fallbackId24 = 0;
+    u32 fallbackId48 = 0;
+    u32 fallbackPosX = 0;
+    u32 fallbackPosY = 0;
+    u32 battleBase = 0;
+    u32 enemyTable = 0;
+    u32 enemyIds[4] = {0};
+
+    if (s_battleChallengeBranchTraceCount >= 96)
+        return;
+
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+    uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+    uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+    uc_reg_read(MTK, UC_ARM_REG_R4, &r4);
+    uc_reg_read(MTK, UC_ARM_REG_R5, &r5);
+    uc_reg_read(MTK, UC_ARM_REG_R6, &r6);
+    uc_reg_read(MTK, UC_ARM_REG_R7, &r7);
+    uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+
+    (void)vm_net_trace_read_u32(r6, &globalObj);
+    if (globalObj)
+    {
+        (void)vm_net_trace_read_u32(globalObj + 0x6Cu, &method6c);
+        (void)vm_net_trace_read_u16(globalObj + 0x3B4u, &directId);
+        (void)vm_net_trace_read_u16(globalObj + 0x3B6u, &directIndex);
+        (void)vm_net_trace_read_u32(globalObj + 0x3B4u, &directWord0);
+        (void)vm_net_trace_read_u32(globalObj + 0x3B8u, &directWord1);
+        (void)vm_net_trace_read_u8(globalObj + r7, &sentFlag);
+        (void)vm_net_trace_read_u8(globalObj + 0x399u, &gateFlag9);
+        (void)vm_net_trace_read_u8(globalObj + 0x39Au, &gateFlag10);
+    }
+    (void)vm_net_trace_read_u32(sp + 0x90u, &stack90);
+    (void)vm_net_trace_read_u32(sp + 0x8Cu, &stack8c);
+    if (stack8c < 16)
+    {
+        fallbackRecord = r6 + 0xC0u + stack8c * 0x154u;
+        (void)vm_net_trace_read_u32(fallbackRecord + 0x24u, &fallbackId24);
+        (void)vm_net_trace_read_u32(fallbackRecord + 0x48u, &fallbackId48);
+        (void)vm_net_trace_read_u32(fallbackRecord + 0x30u, &fallbackPosX);
+        (void)vm_net_trace_read_u32(fallbackRecord + 0x34u, &fallbackPosY);
+    }
+
+    battleBase = r9 + 0x3450u;
+    (void)vm_net_trace_read_u32(battleBase + 0x50u, &enemyTable);
+    if (enemyTable)
+    {
+        for (u32 i = 0; i < 4; ++i)
+            (void)vm_net_trace_read_u32(enemyTable + i * 0x4Cu + 0x24u, &enemyIds[i]);
+    }
+
+    ++s_battleChallengeBranchTraceCount;
+    vm_net_trace("trace_battle_challenge_source_branch label=%s pc=%08x off=%04x lr=%08x caller=%08x last=%08x tick=%u"
+                 " regs=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x sp=%08x r9=%08x"
+                 " global=%08x method6c=%08x stack90=%u stack8c=%u direct=%u,%u directWords=%08x,%08x"
+                 " flags=%u,%u,%u record=%08x recIds=%u,%u recPos=%u,%u enemyTable=%08x enemyIds=%u,%u,%u,%u"
+                 " activeScreen=%08x currentThis=%08x count=%u evidence=Battle.cbm:0x05182940_fallback_challenge_source\n",
+                 label ? label : "unknown", pc, moduleBase ? (pc - moduleBase) : 0, lr, lr & ~1u,
+                 lastAddress, g_schedulerTick, r0, r1, r2, r3, r4, r5, r6, r7, sp, r9,
+                 globalObj, method6c, stack90, stack8c, directId, directIndex, directWord0, directWord1,
+                 (unsigned int)sentFlag, (unsigned int)gateFlag9, (unsigned int)gateFlag10,
+                 fallbackRecord, fallbackId24, fallbackId48, fallbackPosX, fallbackPosY,
+                 enemyTable, enemyIds[0], enemyIds[1], enemyIds[2], enemyIds[3],
+                 vmAddedScreen, g_currentScreenThis, s_battleChallengeBranchTraceCount);
+}
+
 static void vm_net_trace_battle_pool_probe(const char *label, u32 pc, u32 moduleBase)
 {
     static u32 s_battlePoolProbeCount = 0;
@@ -6244,10 +6971,15 @@ static void vm_net_trace_battle_pool_probe(const char *label, u32 pc, u32 module
     u32 sp65c = 0;
     u32 sp680 = 0;
     u32 sp72c = 0;
+    u32 sp08 = 0;
     u32 sp0c = 0;
     u32 sp24 = 0;
     u32 sp3c = 0;
     u32 sp40 = 0;
+    u32 infoPtr = 0;
+    u32 infoLen = 0;
+    u8 infoBytes[16] = {0};
+    u32 infoDumpLen = 0;
     u32 r9_2038 = 0;
     u32 r9_2044 = 0;
     u32 r9_2048 = 0;
@@ -6273,7 +7005,7 @@ static void vm_net_trace_battle_pool_probe(const char *label, u32 pc, u32 module
     u8 fighterFrameMul = 0;
     u8 fighterFrameSignedRaw = 0;
 
-    if (s_battlePoolProbeCount >= 480)
+    if (s_battlePoolProbeCount >= 1200)
         return;
 
     uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
@@ -6360,6 +7092,7 @@ static void vm_net_trace_battle_pool_probe(const char *label, u32 pc, u32 module
     (void)vm_net_trace_read_u8(r6 + 0x5C7u, &fighterFrameMul);
     (void)vm_net_trace_read_u8(r6 + 0x5C8u, &fighterFrameSignedRaw);
 
+    (void)vm_net_trace_read_u32(sp + 0x08, &sp08);
     (void)vm_net_trace_read_u32(sp + 0x0C, &sp0c);
     (void)vm_net_trace_read_u32(sp + 0x24, &sp24);
     (void)vm_net_trace_read_u32(sp + 0x3C, &sp3c);
@@ -6372,6 +7105,14 @@ static void vm_net_trace_battle_pool_probe(const char *label, u32 pc, u32 module
     if (sp72c)
         (void)vm_net_trace_read_u8(sp72c + 0x0Au, &sp72cByteA);
     (void)vm_net_trace_read_u32(r4 + 0x400u, &streamBase);
+    infoPtr = sp08;
+    infoLen = r7;
+    if (infoPtr != 0 && infoLen != 0)
+    {
+        infoDumpLen = infoLen < sizeof(infoBytes) ? infoLen : (u32)sizeof(infoBytes);
+        if (uc_mem_read(MTK, infoPtr, infoBytes, infoDumpLen) != UC_ERR_OK)
+            infoDumpLen = 0;
+    }
 
     ++s_battlePoolProbeCount;
     vm_net_trace("trace_battle_pool_probe label=%s pc=%08x off=%04x lr=%08x caller=%08x last=%08x tick=%u"
@@ -6379,7 +7120,8 @@ static void vm_net_trace_battle_pool_probe(const char *label, u32 pc, u32 module
                  " objA=%08x kind=%u subtype=%u cbA=%08x,%08x,%08x,%08x,%08x"
                  " objB=%08x kind=%u subtype=%u cbB=%08x,%08x,%08x,%08x,%08x"
                  " streamMgr=%08x streamCbs=%08x,%08x,%08x,%08x,%08x streamBase=%08x"
-                 " bridge=%08x cb14=%08x cb18=%08x draw=%08x draw24=%08x stack=%08x,%08x,%08x,%08x,%08x,%08x,%08x,b%u"
+                 " bridge=%08x cb14=%08x cb18=%08x draw=%08x draw24=%08x stack=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,b%u"
+                 " info=%08x,%u,%02x%02x%02x%02x,%02x%02x%02x%02x,%02x%02x%02x%02x,%02x%02x%02x%02x"
                  " r9slots=%08x,%08x,%08x,%08x,%08x"
                  " fighterSlot=%08x active544=%08x cb584=%08x,%08x,%08x frame=%u,%d"
                  " counts=%u,%u subtypeState=%u parseOk=%u status=%u,%u,%u hpmp=%u,%u item=%u,%u"
@@ -6397,7 +7139,25 @@ static void vm_net_trace_battle_pool_probe(const char *label, u32 pc, u32 module
                  objB, objBKind, objBSubtype, objBRawGet, objBStringGet, objBU32Get, objBU8Get, objBLenGet,
                  streamMgr, streamInit, streamU32, streamU8, streamString, streamSkip, streamBase,
                  bridgeObj, bridgeCb14, bridgeCb18, drawObj, drawCb24,
-                 sp0c, sp24, sp3c, sp40, sp65c, sp680, sp72c, (unsigned int)sp72cByteA,
+                 sp08, sp0c, sp24, sp3c, sp40, sp65c, sp680, sp72c, (unsigned int)sp72cByteA,
+                 infoPtr,
+                 infoLen,
+                 infoDumpLen > 0 ? infoBytes[0] : 0,
+                 infoDumpLen > 1 ? infoBytes[1] : 0,
+                 infoDumpLen > 2 ? infoBytes[2] : 0,
+                 infoDumpLen > 3 ? infoBytes[3] : 0,
+                 infoDumpLen > 4 ? infoBytes[4] : 0,
+                 infoDumpLen > 5 ? infoBytes[5] : 0,
+                 infoDumpLen > 6 ? infoBytes[6] : 0,
+                 infoDumpLen > 7 ? infoBytes[7] : 0,
+                 infoDumpLen > 8 ? infoBytes[8] : 0,
+                 infoDumpLen > 9 ? infoBytes[9] : 0,
+                 infoDumpLen > 10 ? infoBytes[10] : 0,
+                 infoDumpLen > 11 ? infoBytes[11] : 0,
+                 infoDumpLen > 12 ? infoBytes[12] : 0,
+                 infoDumpLen > 13 ? infoBytes[13] : 0,
+                 infoDumpLen > 14 ? infoBytes[14] : 0,
+                 infoDumpLen > 15 ? infoBytes[15] : 0,
                  r9_2038, r9_2044, r9_2048, r9_204c, r9_2080,
                  r6, fighterActive, fighterCb4, fighterCb8, fighterCbC,
                  (unsigned int)fighterFrameMul,
@@ -7428,6 +8188,18 @@ static void vm_trace_lcd_text_call(const char *apiName, u32 idx, u32 strPtr, u32
 
 static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
 {
+    static u32 s_battleSub17acFlowCount = 0;
+    static u8 s_battleSub17acFlowActive = 0;
+    static u32 s_battleSub17acFlowPacket = 0;
+    static u32 s_battleSub17acFlowTick = 0;
+    static u32 s_battleKind4Subtype2FlowCount = 0;
+    static u8 s_battleKind4Subtype2FlowActive = 0;
+    static u32 s_battleKind4Subtype2FlowPacket = 0;
+    static u32 s_battleKind4Subtype2FlowTick = 0;
+    static u32 s_battleKind4Subtype9FlowCount = 0;
+    static u8 s_battleKind4Subtype9FlowActive = 0;
+    static u32 s_battleKind4Subtype9FlowPacket = 0;
+    static u32 s_battleKind4Subtype9FlowTick = 0;
     (void)size;
     (void)user_data;
 
@@ -7490,8 +8262,187 @@ static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t
         uc_reg_write(uc, UC_ARM_REG_R9, &moduleR9);
     }
 
+    if (traceOff == 0x17AC)
+    {
+        u32 r0 = 0;
+        u8 hdr[11] = {0};
+        uc_reg_read(uc, UC_ARM_REG_R0, &r0);
+        s_battleSub17acFlowActive = 0;
+        s_battleSub17acFlowPacket = 0;
+        s_battleSub17acFlowTick = 0;
+        s_battleSub17acFlowCount = 0;
+        if (r0 != 0 &&
+            uc_mem_read(uc, r0, hdr, sizeof(hdr)) == UC_ERR_OK &&
+            hdr[0] == 'W' && hdr[1] == 'T' &&
+            hdr[4] >= 1 &&
+            hdr[5] == 1 &&
+            hdr[6] == 25 &&
+            hdr[7] == 2)
+        {
+            s_battleSub17acFlowActive = 1;
+            s_battleSub17acFlowPacket = r0;
+            s_battleSub17acFlowTick = g_schedulerTick;
+            vm_net_trace("trace_battle_sub17ac_flow_start packet=%08x len=%u objectCount=%u kind=25 subtype=2 tick=%u evidence=Battle.cbm:sub_17AC_event7_dispatch_window\n",
+                         r0,
+                         ((u32)hdr[2] << 8) | (u32)hdr[3],
+                         (unsigned int)hdr[4],
+                         g_schedulerTick);
+        }
+    }
+    else if (traceOff < 0x17AC || traceOff >= 0x1850)
+    {
+        s_battleSub17acFlowActive = 0;
+    }
+
+    if (s_battleSub17acFlowActive && traceOff >= 0x17AC && traceOff < 0x1850 && s_battleSub17acFlowCount < 240)
+    {
+        u32 r0 = 0, r1 = 0, r2 = 0, r3 = 0, lr = 0;
+        uc_reg_read(uc, UC_ARM_REG_R0, &r0);
+        uc_reg_read(uc, UC_ARM_REG_R1, &r1);
+        uc_reg_read(uc, UC_ARM_REG_R2, &r2);
+        uc_reg_read(uc, UC_ARM_REG_R3, &r3);
+        uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+        vm_net_trace("trace_battle_sub17ac_flow pc=%08x off=%04x lr=%08x last=%08x tick=%u packet=%08x packetTick=%u regs=%08x,%08x,%08x,%08x count=%u evidence=Battle.cbm:sub_17AC_event7_dispatch_window_kind25_subtype2\n",
+                     tracePc, traceOff, lr, lastAddress, g_schedulerTick,
+                     s_battleSub17acFlowPacket, s_battleSub17acFlowTick,
+                     r0, r1, r2, r3, s_battleSub17acFlowCount);
+        ++s_battleSub17acFlowCount;
+    }
+
+    if (traceOff == 0x7BD0)
+    {
+        u32 r1 = 0;
+        u32 kind = 0;
+        u32 subtype = 0;
+        uc_reg_read(uc, UC_ARM_REG_R1, &r1);
+        s_battleKind4Subtype2FlowActive = 0;
+        s_battleKind4Subtype2FlowPacket = 0;
+        s_battleKind4Subtype2FlowTick = 0;
+        s_battleKind4Subtype2FlowCount = 0;
+        s_battleKind4Subtype9FlowActive = 0;
+        s_battleKind4Subtype9FlowPacket = 0;
+        s_battleKind4Subtype9FlowTick = 0;
+        s_battleKind4Subtype9FlowCount = 0;
+        (void)vm_net_trace_read_u32(r1 + 4, &kind);
+        (void)vm_net_trace_read_u32(r1 + 8, &subtype);
+        if (kind == 4 && subtype == 2)
+        {
+            s_battleKind4Subtype2FlowActive = 1;
+            s_battleKind4Subtype2FlowPacket = r1;
+            s_battleKind4Subtype2FlowTick = g_schedulerTick;
+            vm_net_trace("trace_battle_kind4_subtype2_flow_start packet=%08x tick=%u evidence=Battle.cbm:sub_7BD0_kind4_subtype2_result_dispatch\n",
+                         r1,
+                         g_schedulerTick);
+        }
+        else if (kind == 4 && subtype == 9)
+        {
+            s_battleKind4Subtype9FlowActive = 1;
+            s_battleKind4Subtype9FlowPacket = r1;
+            s_battleKind4Subtype9FlowTick = g_schedulerTick;
+            vm_net_trace("trace_battle_kind4_subtype9_flow_start packet=%08x tick=%u evidence=Battle.cbm:sub_7BD0_top_kind4_table_subtype9_result_parser_05189bd2\n",
+                         r1,
+                         g_schedulerTick);
+        }
+    }
+    else if (traceOff < 0x7BD0 || traceOff >= 0x7D60)
+    {
+        s_battleKind4Subtype2FlowActive = 0;
+    }
+    if (traceOff < 0x7BD0 || traceOff >= 0x8000)
+    {
+        s_battleKind4Subtype9FlowActive = 0;
+    }
+
+    if (s_battleKind4Subtype2FlowActive && traceOff >= 0x7BD0 && traceOff < 0x7D60 && s_battleKind4Subtype2FlowCount < 180)
+    {
+        u32 r0 = 0, r1 = 0, r2 = 0, r3 = 0, lr = 0;
+        uc_reg_read(uc, UC_ARM_REG_R0, &r0);
+        uc_reg_read(uc, UC_ARM_REG_R1, &r1);
+        uc_reg_read(uc, UC_ARM_REG_R2, &r2);
+        uc_reg_read(uc, UC_ARM_REG_R3, &r3);
+        uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+        vm_net_trace("trace_battle_kind4_subtype2_flow pc=%08x off=%04x lr=%08x last=%08x tick=%u packet=%08x packetTick=%u regs=%08x,%08x,%08x,%08x count=%u evidence=Battle.cbm:sub_7BD0_kind4_subtype2_result_dispatch\n",
+                     tracePc,
+                     traceOff,
+                     lr,
+                     lastAddress,
+                     g_schedulerTick,
+                     s_battleKind4Subtype2FlowPacket,
+                     s_battleKind4Subtype2FlowTick,
+                     r0, r1, r2, r3,
+                     s_battleKind4Subtype2FlowCount);
+        ++s_battleKind4Subtype2FlowCount;
+    }
+
+    if (s_battleKind4Subtype9FlowActive && traceOff >= 0x7BD0 && traceOff < 0x8000 && s_battleKind4Subtype9FlowCount < 260)
+    {
+        u32 r0 = 0, r1 = 0, r2 = 0, r3 = 0, r5 = 0, lr = 0;
+        u32 battleObj = 0;
+        u32 gateBase = 0;
+        u8 gate0 = 0, gate1 = 0, gate2 = 0, gate3 = 0, gate4 = 0;
+        uc_reg_read(uc, UC_ARM_REG_R0, &r0);
+        uc_reg_read(uc, UC_ARM_REG_R1, &r1);
+        uc_reg_read(uc, UC_ARM_REG_R2, &r2);
+        uc_reg_read(uc, UC_ARM_REG_R3, &r3);
+        uc_reg_read(uc, UC_ARM_REG_R5, &r5);
+        uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+        (void)vm_net_trace_read_u32(r5, &battleObj);
+        if (battleObj != 0)
+        {
+            gateBase = battleObj + 0x470u;
+            (void)vm_net_trace_read_u8(gateBase + 0u, &gate0);
+            (void)vm_net_trace_read_u8(gateBase + 1u, &gate1);
+            (void)vm_net_trace_read_u8(gateBase + 2u, &gate2);
+            (void)vm_net_trace_read_u8(gateBase + 3u, &gate3);
+            (void)vm_net_trace_read_u8(gateBase + 4u, &gate4);
+        }
+        vm_net_trace("trace_battle_kind4_subtype9_flow pc=%08x off=%04x lr=%08x last=%08x tick=%u packet=%08x packetTick=%u regs=%08x,%08x,%08x,%08x r5=%08x battleObj=%08x gateBase=%08x gateBytes=%u,%u,%u,%u,%u count=%u evidence=Battle.cbm:sub_7BD0_subtype9_result1_gate_05189bf0\n",
+                     tracePc,
+                     traceOff,
+                     lr,
+                     lastAddress,
+                     g_schedulerTick,
+                     s_battleKind4Subtype9FlowPacket,
+                     s_battleKind4Subtype9FlowTick,
+                     r0, r1, r2, r3,
+                     r5,
+                     battleObj,
+                     gateBase,
+                     (unsigned int)gate0,
+                     (unsigned int)gate1,
+                     (unsigned int)gate2,
+                     (unsigned int)gate3,
+                     (unsigned int)gate4,
+                     s_battleKind4Subtype9FlowCount);
+        ++s_battleKind4Subtype9FlowCount;
+    }
+
     switch (traceOff)
     {
+    case 0x04FE:
+        vm_net_trace_battle_outgoing_request_source("battle_send_challenge_4_1_entry", tracePc, traceCodeBase);
+        break;
+    case 0x0A04:
+        vm_net_trace_battle_challenge_source_branch("challenge_direct_id_index_load", tracePc, traceCodeBase);
+        break;
+    case 0x0A0C:
+        vm_net_trace_battle_challenge_source_branch("challenge_direct_call_4_1", tracePc, traceCodeBase);
+        break;
+    case 0x0A20:
+        vm_net_trace_battle_challenge_source_branch("challenge_fallback_method_before", tracePc, traceCodeBase);
+        break;
+    case 0x0A2A:
+        vm_net_trace_battle_challenge_source_branch("challenge_fallback_method_after", tracePc, traceCodeBase);
+        break;
+    case 0x0A38:
+        vm_net_trace_battle_challenge_source_branch("challenge_fallback_outparams_loaded", tracePc, traceCodeBase);
+        break;
+    case 0x0A3C:
+        vm_net_trace_battle_challenge_source_branch("challenge_fallback_call_4_1", tracePc, traceCodeBase);
+        break;
+    case 0x2B50:
+        vm_net_trace_battle_outgoing_request_source("battle_send_operate_4_2_entry", tracePc, traceCodeBase);
+        break;
     case 0x57A6:
         vm_net_trace_battle_pool_probe("battle_render_fighter_active_addr_57A6", tracePc, traceCodeBase);
         break;
@@ -7679,6 +8630,61 @@ static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t
         break;
     case 0x7BF6:
         vm_net_trace_battle_pool_probe("sub_7BD0_subtype_switch", tracePc, traceCodeBase);
+        break;
+    case 0x6EB0:
+        vm_net_trace_battle_pool_probe("sub_actioninfo_parser_entry", tracePc, traceCodeBase);
+        break;
+    case 0x6ED8:
+        vm_net_trace_battle_pool_probe("sub_actioninfo_parser_actioninfo_read", tracePc, traceCodeBase);
+        break;
+    case 0x6EFA:
+        vm_net_trace_battle_pool_probe("sub_actioninfo_parser_actionnum_read", tracePc, traceCodeBase);
+        break;
+    case 0x7CD0:
+        vm_net_trace_battle_pool_probe("sub_7BD0_4_2_result1_gate", tracePc, traceCodeBase);
+        break;
+    case 0x7CE8:
+        vm_net_trace_battle_pool_probe("sub_7BD0_4_2_result2_message", tracePc, traceCodeBase);
+        break;
+    case 0x7CFA:
+        vm_net_trace_battle_pool_probe("sub_7BD0_4_2_result4_message", tracePc, traceCodeBase);
+        break;
+    case 0x7D0C:
+        vm_net_trace_battle_pool_probe("sub_7BD0_4_2_result5_message", tracePc, traceCodeBase);
+        break;
+    case 0x7D1E:
+        vm_net_trace_battle_pool_probe("sub_7BD0_4_2_result3_message", tracePc, traceCodeBase);
+        break;
+    case 0x7D30:
+        vm_net_trace_battle_pool_probe("sub_7BD0_4_2_result7_message", tracePc, traceCodeBase);
+        break;
+    case 0x7D48:
+        vm_net_trace_battle_pool_probe("sub_7BD0_4_2_result0_or_6_or_ge8_cleanup", tracePc, traceCodeBase);
+        break;
+    case 0x7E12:
+        vm_net_trace_battle_pool_probe("sub_7BD0_4_2_success_info_ptr_read", tracePc, traceCodeBase);
+        break;
+    case 0x7E1A:
+        vm_net_trace_battle_pool_probe("sub_7BD0_4_2_success_info_ptr_stored", tracePc, traceCodeBase);
+        break;
+    case 0x7E1C:
+        vm_net_trace_battle_pool_probe("sub_7BD0_4_2_success_info_len_read", tracePc, traceCodeBase);
+        break;
+    case 0x7E28:
+        vm_net_trace_battle_pool_probe("sub_7BD0_4_2_success_info_len_ready", tracePc, traceCodeBase);
+        break;
+    case 0x7E58:
+        vm_net_trace_battle_pool_probe("sub_7BD0_4_2_success_info_copy_call", tracePc, traceCodeBase);
+        break;
+    case 0x7E62:
+        vm_net_trace_battle_pool_probe("sub_7BD0_4_2_success_state_clear_call", tracePc, traceCodeBase);
+        break;
+    case 0x7E94:
+        vm_net_trace_battle_pool_probe("sub_7BD0_4_2_success_apply_call", tracePc, traceCodeBase);
+        break;
+    case 0x2C50:
+        vm_net_trace_battle_pool_probe("sub_4B70_battle_apply_entry", tracePc, traceCodeBase);
+        vm_net_trace_battle_module_state("sub_4B70_battle_apply_entry", tracePc);
         break;
     case 0x7DF0:
         vm_net_trace_battle_pool_probe("sub_7BD0_before_4_10_parser", tracePc, traceCodeBase);
@@ -9229,6 +10235,8 @@ static bool vm_net_mock_append_actor_other_empty10_object(u8 *out, u32 outCap, u
     return true;
 }
 
+static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *pos);
+
 static bool vm_net_mock_is_actor_other_only10_request(const u8 *request, u32 requestLen)
 {
     u32 offset = 4;
@@ -9288,6 +10296,15 @@ static u32 vm_net_mock_build_actor_other_only10_response(const u8 *request, u32 
                      target->scene,
                      (unsigned int)target->x,
                      (unsigned int)target->y,
+                     pos);
+        return pos;
+    }
+    if (hasType && requestType == 100)
+    {
+        if (!vm_net_mock_append_actor_other_empty10_object(out, outCap, &pos))
+            return 0;
+        vm_net_mock_finish_wt_packet(out, pos, 1);
+        vm_net_trace("mock_actor_other_type100_empty10_response requestType=100 othernum=0 len=%u evidence=runtime:4_7_status7_crash_pc_05189178_lastPc_05189178,Battle.cbm:sub_743C_iteminfo_stream_path hypothesis=Type100_contract_unresolved\n",
                      pos);
         return pos;
     }
@@ -9921,6 +10938,7 @@ static u32 vm_net_mock_resolve_battle_enemy_id(u32 requestedId, u32 *tableBaseOu
         return requestedId;
     if (tableBaseOut)
         *tableBaseOut = enemyTable;
+    vm_net_trace_encounter_table_records("battle_resolve_enemy_table", enemyTable);
 
     for (u32 i = 0; i < 4; ++i)
     {
@@ -9935,6 +10953,72 @@ static u32 vm_net_mock_resolve_battle_enemy_id(u32 requestedId, u32 *tableBaseOu
     }
 
     return firstNonzero ? firstNonzero : requestedId;
+}
+
+static bool vm_net_mock_is_battle_operate_request(const u8 *request, u32 requestLen)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+
+    if (request == NULL || requestLen < 9)
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        return false;
+    return offset == requestLen &&
+           object.major == 1 &&
+           object.kind == 4 &&
+           object.subtype == 2 &&
+           vm_net_mock_request_contains(request, requestLen, "index") &&
+           vm_net_mock_request_contains(request, requestLen, "Operate");
+}
+
+static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requestLen,
+                                                     u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u32 index = 0;
+    u32 operate = 0;
+    u8 index8 = 0;
+    u8 operate8 = 0;
+
+    if (outCap < pos || !vm_net_mock_is_battle_operate_request(request, requestLen))
+        return 0;
+    if (!vm_net_mock_get_object_u32_field(request, requestLen, "index", &index) &&
+        vm_net_mock_get_object_u8_field(request, requestLen, "index", &index8))
+        index = index8;
+    if (!vm_net_mock_get_object_u32_field(request, requestLen, "Operate", &operate) &&
+        vm_net_mock_get_object_u8_field(request, requestLen, "Operate", &operate8))
+        operate = operate8;
+
+    if (vm_net_mock_env_u32("CBE_BATTLE_OPERATE_EXPERIMENT_4_8", 0) != 0)
+    {
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 4, 8, &objectStart))
+            return 0;
+        if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
+            return 0;
+        if (!vm_net_mock_put_object_raw(out, outCap, &pos, "info", NULL, 0))
+            return 0;
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        vm_net_mock_finish_wt_packet(out, pos, 1);
+        vm_net_trace("mock_battle_operate_response response=4/8 result=1 infoLen=0 index=%u operate=%u len=%u evidence=Battle.cbm:sub_7BD0_top_kind4_table_subtype8_info_branch_05189d16_calls_05184b70 hypothesis=negative_empty_info_falls_to_escape_path\n",
+                     (unsigned int)index,
+                     (unsigned int)operate,
+                     pos);
+        return pos;
+    }
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 4, 9, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    vm_net_trace("mock_battle_operate_response response=4/9 result=1 index=%u operate=%u len=%u evidence=Battle.cbm:sub_7BD0_top_kind4_table_subtype9_result_parser_05189bd2 confirmed_negative=no_action_but_safe_no_escape\n",
+                 (unsigned int)index,
+                 (unsigned int)operate,
+                 pos);
+    return pos;
 }
 
 static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *pos)
@@ -9971,7 +11055,15 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
         return false;
     if (!vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo", NULL, 0))
         return false;
+    if (!vm_net_mock_put_object_raw(out, outCap, pos, "combatinfo", NULL, 0))
+        return false;
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "autorevive", 0))
+        return false;
+    if (!vm_net_mock_put_object_string(out, outCap, pos, "info", ""))
+        return false;
+    if (!vm_net_mock_put_object_raw(out, outCap, pos, "fbs", NULL, 0))
+        return false;
+    if (!vm_net_mock_put_object_raw(out, outCap, pos, "fdata", NULL, 0))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
     return true;
@@ -10020,7 +11112,7 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
     if (hasMoveinfo && !vm_net_mock_append_actor_moveinfo_empty_ack_object(out, outCap, &pos))
         return 0;
     vm_net_mock_finish_wt_packet(out, pos, hasMoveinfo ? 2 : 1);
-    vm_net_trace("mock_challenge_interaction_response response=4/10 side=1 battleinfoEncoding=raw-typed-stream battleinfoLen=%u requestEnemyId=%u enemyWireId=%u enemyTable=%08x enemyTableIds=%u,%u,%u,%u index=%u pos=%u,%u status7=0 moveinfoAck=%u moveinfoLen=%u first=%02x,%02x,%02x,%02x len=%u evidence=Battle.cbm:sub_7BD0/sub_66CC,sub_66A4_enemy_lookup hypothesis=enemy_id_must_match_client_template_table runtime_negative=4_10_only_render_null_callback_pending\n",
+    vm_net_trace("mock_challenge_interaction_response response=4/10 side=1 battleinfoEncoding=raw-typed-stream battleinfoLen=%u requestEnemyId=%u enemyWireId=%u enemyTable=%08x enemyTableIds=%u,%u,%u,%u index=%u pos=%u,%u status7=0 moveinfoAck=%u moveinfoLen=%u first=%02x,%02x,%02x,%02x len=%u evidence=Battle.cbm:sub_7BD0/sub_66CC,sub_66A4_enemy_lookup hypothesis=enemy_id_must_match_client_template_table runtime_negative=%s\n",
                  (unsigned int)battleInfoLen,
                  (unsigned int)id,
                  (unsigned int)enemyWireId,
@@ -10038,7 +11130,10 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
                  hasMoveinfo && moveInfoLen > 1 ? moveInfo[1] : 0,
                  hasMoveinfo && moveInfoLen > 2 ? moveInfo[2] : 0,
                  hasMoveinfo && moveInfoLen > 3 ? moveInfo[3] : 0,
-                 pos);
+                 pos,
+                 (enemyWireId == 10001 && id != 10001) ?
+                     "enemy_template_fallback_is_player_character" :
+                     "4_10_only_render_null_callback_pending");
     return pos;
 }
 
@@ -11572,6 +12667,14 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_battle_operate_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_trace("mock_default source=builtin-battle-operate len=%u\n", hookedLen);
+        vm_net_log_handled_packet("builtin-battle-operate", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
     hookedLen = vm_net_mock_build_challenge_interaction_response(request, requestLen, out, outCap);
     if (hookedLen)
     {
@@ -11751,6 +12854,7 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
     u32 readLen = dataLen < sizeof(request) ? dataLen : sizeof(request);
     uc_mem_read(MTK, dataPtr, request, readLen);
     vm_net_trace("send connect=%u dataPtr=%08x dataLen=%u readLen=%u\n", connectId, dataPtr, dataLen, readLen);
+    vm_net_trace_outgoing_wt_send_context(request, readLen, connectId, dataPtr, dataLen);
     bool closeAfterData = vm_net_mock_request_contains(request, readLen, "version") &&
                           !vm_net_mock_request_contains(request, readLen, "start") &&
                           vm_net_mock_has_installed_update();
@@ -18644,6 +19748,29 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         vm_trace_scene_status_text_write("promptName_0x12_R9_5CD8", (u32)address);
     if (address == 0x100F68A)
         vm_trace_scene_status_text_write("statusText_0x16_R9_5CDC", (u32)address);
+    if (address == 0x10183A0 || address == 0x10184A8 || address == 0x10184BE ||
+        address == 0x10184D8 || address == 0x10184F8 || address == 0x10184FA ||
+        address == 0x1018502 || address == 0x1018504)
+    {
+        const char *label = "unknown";
+        if (address == 0x10183A0)
+            label = "selector_entry";
+        else if (address == 0x10184A8)
+            label = "selector_loop_record";
+        else if (address == 0x10184BE)
+            label = "selector_active_type_check";
+        else if (address == 0x10184D8)
+            label = "selector_rect_hit";
+        else if (address == 0x10184F8)
+            label = "selector_before_id_load";
+        else if (address == 0x10184FA)
+            label = "selector_id_loaded";
+        else if (address == 0x1018502)
+            label = "selector_index_store";
+        else if (address == 0x1018504)
+            label = "selector_success_return";
+        vm_net_trace_prompt_hotspot_candidate(label, (u32)address);
+    }
     if (address == 0x100F7DC)
         vm_net_trace_scene_current_node_publish((u32)address);
     if (address == 0x100F8F6 || address == 0x10368C4)
@@ -18865,6 +19992,28 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     if (address == 0x10124AA)
     {
         vm_net_trace_sub_1010228_callsite("net_handle_group_info", (u32)address);
+    }
+    if (address == 0x1037ECC || address == 0x1037ECE || address == 0x1037ED4)
+    {
+        const char *label = "unknown";
+        if (address == 0x1037ECC)
+            label = "before_4_1_id_load";
+        else if (address == 0x1037ECE)
+            label = "after_4_1_id_load";
+        else if (address == 0x1037ED4)
+            label = "write_4_1_id_field";
+        vm_net_trace_challenge_request_source(label, (u32)address);
+    }
+    if (address == 0x1037D20 || address == 0x1037D38 || address == 0x1037D42 ||
+        address == 0x1037D84 || address == 0x1037DA0 || address == 0x1037DAA ||
+        address == 0x1037DC0 || address == 0x1037DCC || address == 0x1037DD6 ||
+        address == 0x1037E48 || address == 0x1037E70 || address == 0x1037E7A ||
+        address == 0x1037E86 || address == 0x1037EB6 || address == 0x1037ED4 ||
+        address == 0x1037EEC || address == 0x1037F06 || address == 0x1037F1A ||
+        address == 0x1037F28 || address == 0x1037F38 || address == 0x1037FC4 ||
+        address == 0x1037FCE || address == 0x1037FD8 || address == 0x1037FE2)
+    {
+        vm_net_trace_outgoing_field_callsite("scene_menu_packet_field", (u32)address);
     }
     if (address == 0x1012E4C)
         vm_net_trace_business_dispatch_state("entry", (u32)address);

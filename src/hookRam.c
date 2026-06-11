@@ -54,6 +54,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         vm_net_trace_scene_dispatch_gate_write(address, size, value);
         vm_net_trace_scene_loading_owner_write(address, size, value);
         vm_net_trace_battle_module_data_write(address, size, value);
+        vm_net_trace_battle_main_gate_write(address, size, value);
     }
 }
 bool hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data)
