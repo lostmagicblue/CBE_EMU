@@ -15,4 +15,5 @@ typedef struct VMBlock
 void InitVmMalloc();
 void vm_free(u32 addr);
 u32 vm_malloc(u32 size);
+int vm_malloc_reserve_range(u32 addr, u32 size);
 u32 vm_malloc_user_size(u32 addr);

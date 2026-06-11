@@ -992,10 +992,22 @@ int vm_cbfs_vm_file_open(int openMode, int namePtr, int rwPtr)
 // ok
 int vm_cbfs_vm_file_read(int bufferPtr, int size, int handle)
 {
+    u32 pc = 0;
+    u32 lr = 0;
+    u32 r0 = 0;
+    u32 r1 = 0;
+    u32 r2 = 0;
+    u32 r3 = 0;
     if (handle < 0 || handle >= 16 || openFileList[handle] == NULL || size <= 0)
         return vm_set_call_result(-1);
     if (openFileList[handle] == VM_PSEUDO_DIR_HANDLE)
         return vm_set_call_result(0);
+    uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+    uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+    uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
     char *tmp = SDL_malloc(size);
     int readed = fread(tmp, 1, size, openFileList[handle]);
 
@@ -1003,10 +1015,34 @@ int vm_cbfs_vm_file_read(int bufferPtr, int size, int handle)
     {
         uc_mem_write(MTK, bufferPtr, tmp, readed);
         vm_fileio_trace_bytes("file_read", handle, openFileNames[handle], tmp, readed);
+        if (strstr(openFileNames[handle], ".cbm") != NULL || strstr(openFileNames[handle], ".CBM") != NULL)
+        {
+            vm_fileio_trace("file_read_guest_write handle=%d path=%s buffer=%08x requested=%d read=%d pc=%08x lr=%08x last=%08x regs=%08x,%08x,%08x,%08x\n",
+                            handle,
+                            openFileNames[handle],
+                            (u32)bufferPtr,
+                            size,
+                            readed,
+                            pc,
+                            lr,
+                            lastAddress,
+                            r0,
+                            r1,
+                            r2,
+                            r3);
+        }
     }
     else
     {
-        vm_fileio_trace("file_read handle=%d path=%s size=%d result=%d\n", handle, openFileNames[handle], size, readed);
+        vm_fileio_trace("file_read handle=%d path=%s buffer=%08x size=%d result=%d pc=%08x lr=%08x last=%08x\n",
+                        handle,
+                        openFileNames[handle],
+                        (u32)bufferPtr,
+                        size,
+                        readed,
+                        pc,
+                        lr,
+                        lastAddress);
     }
     SDL_free(tmp);
     return vm_set_call_result(readed);
@@ -1405,17 +1441,17 @@ int vm_DF_ReadInt(int a1, int a2)
 
     offset += 4;
     vm_set_var(a2, offset);
-    if ((lastAddress >= 0x0100d560 && lastAddress <= 0x0100de90) ||
-        (lastAddress >= 0x0100d780 && lastAddress <= 0x0100d8c0))
-    {
-        vm_fileio_trace("df_read_int base=%08x off=%u raw=%02x%02x%02x%02x ret=%d next=%u last=%08x\n",
-                        a1,
-                        offset - 4,
-                        arr[0], arr[1], arr[2], arr[3],
-                        result,
-                        offset,
-                        lastAddress);
-    }
+    // if ((lastAddress >= 0x0100d560 && lastAddress <= 0x0100de90) ||
+    //     (lastAddress >= 0x0100d780 && lastAddress <= 0x0100d8c0))
+    // {
+    //     vm_fileio_trace("df_read_int base=%08x off=%u raw=%02x%02x%02x%02x ret=%d next=%u last=%08x\n",
+    //                     a1,
+    //                     offset - 4,
+    //                     arr[0], arr[1], arr[2], arr[3],
+    //                     result,
+    //                     offset,
+    //                     lastAddress);
+    // }
     return vm_set_call_result(result);
 }
 void vm_DF_WriteInt(a1, a2, value)

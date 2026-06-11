@@ -12,6 +12,248 @@ Suggested entry format:
 - next:
 ```
 
+## 2026-06-11 Battle.cbm `4/10`-only rerun still crashes at render callback
+
+- evidence:
+  - newest `net_packets.log` encounter request is still `WT len=60 hdr=4/1 objs=1/4/1(id=3)`, with decoded fields `id=3,index=3,posx=173,posy=272`.
+  - newest mock response is now one object only: `source=builtin-challenge-interaction responseLen=117`, `1/4/10 { side=1, battleinfo=<raw typed stream> }`; no `4/7` object is sent.
+  - `net_trace.log` confirms Battle.cbm consumes only `kind=4 subtype=10`, writes player/enemy fighter tables under loader data base `01050bd0`, and then allocates the outgoing `2/10 Type=100` event before the crash.
+  - `storage_trace.log` shows Battle.cbm code copied to guest buffer `05181f20` (`requested=0x13544`) and BSS/data copied to `01050bd0`.
+  - `stdout_trace.log` still ends with `pc=0`, `lr=051876D5`, `lastPc=051876D2`, `r9=01050bd0`.
+  - corrected static mapping: using the actual code-read buffer base (`tools/disasm_thumb.py --file bin/JHOnlineData/mmBattleMstarWqvga.cbm 0xA1 0x05181f20 0x05187670 180`), `lastPc=051876D2` maps to offset `0x57B2`, a `BLX R3` in the Battle.cbm fighter render loop, not to post-code padding.
+- conclusion:
+  - confirmed correction: removing same-window `4/7` does not by itself fix battle entry. The previous “4/7 causes the death/crash path” wording was too strong.
+  - confirmed: current crash shape is an active fighter-slot render path calling a null callback loaded near `[fighter+0x584]`; the next missing contract is likely battle actor/effect initialization or a missing Battle.cbm follow-up response, not another placeholder `4/14`.
+  - hypothesis: death-resource opens (`f_death.actor`, `siwang1.gif`) may be normal Battle init assets or may still reflect a bad status/visual field, but they are no longer proven to be caused by `4/7`.
+- changed:
+  - trace-only: `hook_vm_pool_code_callback()` now recognizes the latest actual Battle.cbm code buffer window `05181f20..05195464` for executed-code offsets while preserving loader R9.
+  - trace-only: added probes for actual offsets `0x57A6/0x57A8/0x57BE/0x57CE/0x57D2/0x57DC/0x57DE` and `0x68F8/0x68FE/0x6900`.
+  - trace-only: `trace_battle_pool_probe` now logs render-slot fields from current `R6`: `active544`, callbacks at `cb584/cb588/cb58c`, and frame bytes at `R6+0x5C7/+0x5C8`.
+  - corrected mock trace marker from `runtime_negative=4/7_same_window_death_path` to `runtime_negative=4_10_only_render_null_callback_pending`.
+- validation:
+  - `make` passed.
+- next:
+  - rerun manually and inspect `trace_battle_pool_probe ... battle_render_fighter_cb4_call_57D2` for `active544 != 0` with `cb584=00000000`, then trace back whether the missing callback should be created by visual bytes, Battle.cbm resource init, or the pending `2/10 Type=100` response.
+
+## 2026-06-11 Battle.cbm enemy lookup miss explains the null enemy callback
+
+- evidence:
+  - newest trace confirms the own/player fighter slot is initialized enough to render: `battle_render_fighter_frame_bytes_57BE` shows `fighterSlot=010534e8 active544=1 cb584=01004e9d,01004e63,01004e11`.
+  - the next slot (`r7=1`, enemy) is active but has no callbacks: `battle_render_fighter_active_load_57A8 ... fighterSlot=010535ac active544=1 cb584=00000000,00000000,00000000`, followed by `stdout_trace.log` `pc=0`, `lastPc=051876D2`.
+  - Battle.cbm `sub_66A4()` lookup fails before that: `sub_66A4_enemy_lookup_compare` compares requested enemy id `3` against local table ids `10001,0,0,0`, then `sub_66A4_enemy_lookup_miss` returns `-1`.
+  - static disassembly of `sub_66A4()` at actual code buffer base `05181f20` shows it loops four entries at `battleState+0x50`, comparing `[enemyTable + i*0x4c + 0x24]` against the requested id; failure branches to `sub_66CC_enemy_lookup_failed_path` at `0x6B26`.
+- conclusion:
+  - confirmed: the current crash is caused by an unresolved enemy id in the `4/10.battleinfo` enemy record. `sub_66CC()` still marks the enemy slot active, but the failed lookup skips the visual/callback setup, leaving the render callback null.
+  - hypothesis: until the real server/source of the enemy template table is recovered, the parser-safe battleinfo enemy id must match one of the four ids already present in the client table.
+- changed:
+  - `vm_net_mock_build_challenge_interaction_response()` now resolves the enemy id through the current Battle.cbm enemy template table before writing `battleinfo`.
+  - if the request id is not present, it uses the first nonzero table id and logs both `requestEnemyId` and `enemyWireId`, plus `enemyTableIds`.
+  - this is a mock-server response correction only; it does not write Battle.cbm globals or patch client parser/render logic.
+- validation:
+  - `make` passed.
+- next:
+  - rerun manually and check whether `sub_66A4_enemy_lookup_miss` disappears and whether the enemy slot gains nonzero `cb584/cb588` before the first render.
+
+## 2026-06-11 Battle.cbm loader-R9 rerun exposes unsafe same-window `4/7`
+
+- evidence:
+  - latest `storage_trace.log` shows Battle.cbm code copied to `buffer=05181f20` and BSS copied to `buffer=01050bd0`; latest probes now run with Battle loader R9 `01050bd0`.
+  - latest `net_packets.log` still sends `WT len=60 hdr=4/1 objs=1/4/1(id=3)` and receives the two-object mock response `4/10 + 4/7` (`responseLen=320`).
+  - `net_trace.log` confirms both objects were consumed: `kind=4 subtype=10` followed by `kind=4 subtype=7`, then Battle.cbm populated fighter tables under data base `01050bd0`.
+  - storage then opens `JHOnlineData/f_death.actor` and `siwang1.gif`, matching the user-visible dead-character battle state.
+  - final crash is now `stdout_trace.log`: `pc=0`, `lr=051876D5`, `lastPc=051876D2`, `r9=01050bd0`. With `codeBase=05174000`, `lastPc` is offset `0x136D2`, past Battle.cbm `codeLen=0x13544` in zero padding.
+- conclusion:
+  - confirmed negative: the same-window minimal `1/4/7` status object is not a safe battle-start response. With correct loader R9 it still drives Battle.cbm into a death/status path and then a null/post-code callback failure.
+  - confirmed: the newest crash is no longer the old `R9=05188000` instruction-shaped data-slot failure.
+- changed:
+  - `vm_net_mock_build_challenge_interaction_response()` now sends only `1/4/10 { side=1, battleinfo=<raw typed stream> }` by default, plus the existing optional empty `1/2/1` ack for composite movement packets.
+  - the response marker is now `mock_challenge_interaction_response response=4/10 ... status7=0 ... runtime_negative=4/7_same_window_death_path`.
+- validation:
+  - rebuild required.
+- next:
+  - rerun manually and check whether the client emits the earlier `2/10 Type=100` follow-up again, or another Battle.cbm response family, instead of immediately opening death resources.
+
+## 2026-06-11 Battle.cbm shifted-screen crash at offset `0x10110`
+
+- evidence:
+  - latest runtime trace confirms screen-table inference now finds the shifted Battle.cbm module: `screen_manager idx=4 infer_battle_module screen=01053f78 codeBase=05174000 r9=01050bd0 -> 05188000`, and `pool_r9_fix_inferred_battle` fires through offsets `0x100F2..0x10108`.
+  - latest crash is no longer the older `pc=0` / post-code-padding shape. `stdout_trace.log` reports `地址无法访问:47901c30`, `pc=05184110`, `lr=05184109`, `r9=05188000`, and `r0=47901c30`.
+  - static disassembly with `tools/disasm_thumb.py --file bin/JHOnlineData/mmBattleMstarWqvga.cbm 0xA1 0x05174000 0x051840E0 96` maps `pc=05184110` to Battle.cbm offset `0x00010110`. That instruction is only `ldr r0, [sp,#0xc]`; the nearby block calls `*(R9+0x2044)->+0x18` twice, computes layout coordinates, then loads a draw callback around `0x00010122..0x00010136`.
+  - the new layout-window trace shows this is not caused by the second callback return alone. At `battle_render_layout_cb18_first_call`, `R9+0x204C` is already `47901c30`, and neighboring R9 slots are instruction-shaped garbage (`a1456d62`, `44481c29`, `f0081c30`, `30ff6800`).
+  - local header/file check gives `headerInt2=0x14000`, `headerInt4=0x4600`, `codeLen=0x13544`, `BssDataLen=0x2000`, and `RwDataLen=0x0A2F`. With `R9=codeBase+0x14000`, `R9+0x204C` should point into RW data, but the runtime bytes look like code halfwords instead.
+  - `.cbm` read-buffer trace now identifies the mismatch directly: Battle.cbm code is read to guest `buffer=05181f20` (`requested=0x13544`), but BSS is read to `buffer=01050bd0` (`requested=0x2000`). The screen table's virtual `codeBase=05174000` is useful for offsets, not for deriving R9.
+- changed:
+  - extended `trace_battle_pool_probe` to include `SP+0x0C`, `SP+0x24`, `SP+0x3C`, `SP+0x40`, and Battle.cbm R9 slots `+0x2038/+0x2044/+0x2048/+0x204C/+0x2080`.
+  - added trace-only probe points for Battle.cbm offsets `0x100D8`, `0x100E6`, `0x100EC`, `0x100F2`, `0x100F4`, `0x100FA`, `0x10100`, `0x10108`, `0x10110`, `0x10122`, `0x1012A`, and `0x10136`.
+  - added `.cbm` file-read guest-buffer tracing in `vm_cbfs_vm_file_read()` so the next run records where the Battle.cbm code, BSS, and RW reads are actually copied.
+  - changed Battle.cbm screen-table inference to preserve the dynamic loader's R9 instead of forcing `R9=codeBase+0x14000`. The inferred code base is still used for IDA offset mapping and trace labels.
+  - changed VM-pool Battle R9 repair to restore the loader/screen-stack R9 (`01050bd0` in this run) and log `pool_r9_fix_battle_loader_r9`.
+- status:
+  - confirmed: Battle.cbm screen-table inference identifies the shifted code base, but `codeBase+0x14000` is not the correct module R9 for this loader path.
+  - confirmed: the invalid pointer is already present in the module-data slots before the layout callbacks return.
+  - hypothesis pending rerun: preserving loader R9 should move the crash past the current `R9+0x204C == 47901c30` failure; if it still crashes, inspect the new `pool_r9_fix_battle_loader_r9` and `trace_battle_pool_probe` values.
+- validation:
+  - `make` passed after the trace-only instrumentation and again after preserving loader R9.
+
+## 2026-06-10 Battle.cbm raw `battleinfo` exposes subtype-7 status boundary
+
+- evidence:
+  - follow-up rerun with the appended `4/7` object still crashes on battle entry. `net_packets.log` shows the mock response is now `responseLen=320` with two objects, `1/4/10` followed by `1/4/7`.
+  - `net_trace.log` confirms the main dispatcher consumes both objects: `trace_business_dispatch_item ... kind=4 subtype=10` and then `kind=4 subtype=7` at the same tick.
+  - `stdout_trace.log` still reports `地址无法访问:0 type:0 size:21 value:4`, `pc=0`, `lr=0x0508760D`, `lastPc=0x0508760A`.
+  - corrected address evidence: Battle.cbm runtime addresses in this run use base `0x05080000`, so `0x0508760A` maps to IDA offset `0x0000760A` in `sub_743C()`, and `0x0508440E` maps to IDA offset `0x0000440E` in `sub_31FA()`.
+  - negative trace evidence: the earlier `trace_battle_module_state` hooks did not fire in this rerun because Battle.cbm executes from the VM memory-pool code hook, not the normal `hookCodeCallBack()` branch where those absolute `0x05087xxx` checks were placed.
+  - follow-up negative trace evidence: after moving probes to the VM-pool hook, the latest rerun still produced no `trace_battle_pool_probe` lines. The same log records `runtime_state ... module=00000000` while business dispatch has `fallbackCb=05083605`, so `hook_vm_pool_code_callback()` returned early before tracing because `g_currentScreenModuleBase` had not yet been set.
+  - latest trace finally hit the Battle.cbm probes. During the `4/10+4/7` challenge response, `trace_battle_pool_probe ... battle_screen_callback_3604` still showed `r9=01050bd0` while executing `pc=05083604` with inferred module base `05080000`.
+  - the same run later showed Battle.cbm state `ownCount=1`, `enemyCount=1`, `subtypeState=10`, `parseOk=1`, so the raw `battleinfo` stream is being accepted as one player and one enemy.
+  - crash-adjacent probes showed the wrong-R9 fallout: at `pc=05087592` (`sub_743C` iteminfo getter callsite), the register callback state was invalid (`R2=00000001` before `BLX R2`), and the process still crashed with `pc=0`, `lr=0508760D`, `lastPc=0508760A`.
+  - IDA evidence: Battle.cbm `sub_31FA()` and `sub_743C()` use module-local `R9+0x2050`, `R9+0x204C`, `R9+0x3D6C`, and related offsets for screen objects, stream managers, and battle state. Running these functions with main-CBE `R9=01050bd0` therefore reads the wrong tables.
+  - after enabling inferred Battle.cbm R9 repair, the crash moved to the return side: `stdout_trace.log` reports `地址无法访问:bd302018`, `pc=0100067E`, `lr=05081ED5`, and `r9=05080000`.
+  - IDA main CBE `sub_1000674()` (`0x01000674`) reads `R9+0x4D5C` then dereferences callback slot `+0x18` at `0x0100067E`; with R9 still equal to Battle.cbm base, this main-CBE lookup becomes invalid.
+  - after adding `main_r9_restore`, the latest rerun confirms the return-side repair fires: `net_trace.log` shows `main_r9_restore pc=0100068c`, `pc=01000674`, `pc=010006ee`, `pc=0100070e`, and `pc=0100072e` interleaved with Battle.cbm pool execution.
+  - the crash then moves back into Battle.cbm initialization: `stdout_trace.log` reports `地址无法访问:11082040`, `pc=05081F5C`, `lr=05081F2D`, `r9=05080000`.
+  - IDA Battle.cbm `sub_1F24()` (`0x00001F24`) reads module-local manager tables through `R9+0x204C` and `R9+0x2050`; using `0x05080000` as R9 makes `R9+0x204C` land in the module's code/header area and yields the bad pointer `0x1108203c`.
+  - `storage_trace.log` confirms the module file is `JHOnlineData/mmBattleMstarWqvga.cbm`. Parsing its header gives `headerInt2=0x14000`, `headerInt4=0x4600`, and `codeLen=0x13544`; with code base `0x05080000`, the correct Battle.cbm module R9/data base is `0x05094000`.
+  - after correcting Battle.cbm R9 to `0x05094000`, the latest rerun progresses further. The log shows `pool_r9_fix_inferred_battle ... -> 05094000 ... evidence=Battle.cbm_headerInt2_0x14000`.
+  - the new crash is Battle.cbm `sub_31FA()` at runtime `pc=05083DDE` / IDA offset `0x3DDE`, with `r9=05094000`, `r0=0`, and invalid access `地址无法访问:1c`.
+  - this run does not reach encounter `4/1`; `net_packets.log` only contains startup packets (`1/6`, `5/10+7/7`, `7/7 type=2`, `7/7 type=3`), so the new crash is dynamic Battle screen initialization, not a challenge response parser result.
+  - screen-manager evidence: `screen_manager idx=4 add r0=050973a8 ... moduleBase=05094000` and `screen_manager idx=4 module_context this=05097390 r9=05094000`, followed later by `screen_func_table screen=050973a8 this=00000000 init=05083d7d ...`.
+  - conclusion: the emulator's main scheduler failed to compute the dynamic screen owner (`screen-0x18`) even though the screen stack already recorded it, so Battle.cbm init was called with `R0=0`.
+  - latest follow-up evidence confirms that correction now fires: `net_trace.log` shows `screen_func_dynamic_this screen=050973a8 this=05097390 moduleBase=05094000`, followed by `screen_func_table screen=050973a8 this=05097390 init=05083d7d ...`.
+  - the crash still remains in the Battle.cbm init window: `stdout_trace.log` reports `地址无法访问:1c type:0 size:19 value:4`, `pc=05083DDE`, `lr=0103498B`, `r9=05094000`.
+  - storage evidence shows this run opens `JHOnlineData/mmBattleMstarWqvga.cbm` before any `4/1` encounter request appears. A directory/header check shows `JHOnlineData/MMORPGTempcbm` is still the same size/header family as `mmGameMstarWqvga.cbm`, not Battle.cbm, so the immediate explanation is not a stale temp-CBM cache containing Battle.
+  - IDA Battle.cbm `sub_31FA()` (`0x000031FA`) maps that runtime PC to offset `0x00003DDE`. The nearby block calls the main-CBE bridge through `*(R9+0x2018)->+0x18` at `0x00003DC0` and `0x00003DD4`, then reads stack-derived values at `0x00003DDC..0x00003DE4`; because `0x00003DDE` itself is not a memory-read instruction, the current working hypothesis is a cross-module callback/return-context issue rather than a new server packet field.
+  - the new `sub_31FA` probes now narrow that further. Before the second bridge call, `sub_31FA_bridge_second_r0_zero_3DD2` still reports sane module data (`bridge=0a001400 cb18=0c001018`, `streamMgr=0105617c`). After returning to `0x00003DDC`, the same slots are corrupted (`bridge=00000000`, `streamMgr=01670167`, `counts=7187,7187`, `subtypeState=1469`).
+  - IDA/runtime evidence connects that window to main scene init: the return LR is `0103498B` inside `sub_103496C()` (`0x0103496C`), and the call window includes `scene_runtime_init_and_sync()` (`0x01012FB4`) queuing the initial `1/7/42` sync near `0x010138B4`.
+  - latest data-write evidence identifies the writer: `trace_battle_module_data_write` records main CBE code at `pc=0104D328/0104D32C` clearing from `writeAddr=05094000` upward while the active screen is still `0105a814/currentThis=010561ec`. The register snapshot begins at `r0=05093ff8`, `r1=00001e40`, which overlaps Battle.cbm's `R9=05094000` data base.
+  - allocator evidence: `src/config.h` defines `vm_malloc` pool `0x05000000..0x05400000`, while the Battle.cbm header evidence already places code/data at `0x05080000..0x05098600`; without a reservation, ordinary VM heap allocations can reuse the dynamic module window.
+  - after reserving the first Battle.cbm window, the crash moves again. `stdout_trace.log` now reports `pc=0`, `lr=050A76D5`, `lastPc=050A76D2`, and `r9=01050bd0`.
+  - runtime evidence ties this to the dynamic Battle screen: `screen_func_table screen=01053f78 this=01053f60 init=050A3E45 destroy=050A2E0F logic=050A2D0B render=050A251B ...`, registered from `last=050A40E8`, but `screen_manager idx=4 ... moduleBase=01050bd0`.
+  - file/static evidence: disassembling `mmBattleMstarWqvga.cbm` with code base `0x05094000` maps `0x050A3E45` to Battle.cbm offset `0x0000FE45`, while `0x050A76D2` maps to `0x000136D2`, just past the code payload (`codeLen=0x13544`) into zero padding/post-code bytes.
+  - conclusion: the Battle.cbm loader window shifted to `codeBase=0x05094000`, so the correct module R9 shifted to `0x050A8000` (`codeBase + headerInt2 0x14000`). The previous inferred repair only handled the old `0x05080000 -> R9=0x05094000` window.
+  - the next shifted-window rerun confirms this should not be solved with more fixed windows. `stdout_trace.log` now reports the same shape at `pc=0`, `lr=050C76D5`, `lastPc=050C76D2`, `r9=01050bd0`.
+  - runtime screen-table evidence: `screen_func_table screen=01053f78 ... init=050C3E45 destroy=050C2E0F logic=050C2D0B render=050C251B pause=050C23E1 resume=050C2375`, while `screen_manager idx=4 add ... moduleBase=01050bd0 last=050C40E8`.
+  - file/static evidence: disassembling `mmBattleMstarWqvga.cbm` with `codeBase=0x050B4000` maps `0x050C3E45` to the same screen-init function and `0x050C76D2` to the same post-code zero-padding offset as before.
+  - latest rerun after raw `battleinfo` now sends `mock_challenge_interaction_response response=4/10 side=1 battleinfoEncoding=raw-typed-stream ... len=117`.
+  - `net_packets.log` confirms the wire shape changed from double-wrapped `battleinfo` to raw field value: `... 0a626174746c65696e666f 0053 000101 ...`.
+  - the client crashes immediately after the battle transition. `stdout_trace.log` reports `地址无法访问:0 type:0 size:21 value:4`, `pc=0`, `lr=0x0508760D`, `lastPc=0x0508760A`.
+  - IDA maps `0x0508760A` to Battle.cbm `sub_743C()` around `0x0000760A`; `sub_743C()` is called from `sub_7BD0()` subtype `7` at `0x0000806C`.
+  - `sub_743C()` reads battle-screen status fields including `lastexp/curexp/persentexp/energy/energymax/gold/level/result/bagstatus/hp/mp/itemnum/iteminfo`, plus optional `combatinfo/autorevive/info/fbs`.
+- changed:
+  - `vm_net_mock_build_challenge_interaction_response()` now appends a minimal `1/4/7` status object after `1/4/10`.
+  - the new status object seeds nonzero player `hp/mp`, `level=1`, `energy=energymax=100`, `result=1`, `bagstatus=0`, `itemnum=0`, empty raw `iteminfo`, and `autorevive=0`.
+  - moved the Battle.cbm read-only probes into `hook_vm_pool_code_callback()` and added `trace_battle_pool_probe` for `sub_17AC`, `sub_66CC`, `sub_66A4`, `sub_7BD0`, `sub_743C`, `sub_7794`, `sub_8996`, and the crash-adjacent offsets.
+  - adjusted the VM-pool probe gate so that, for trace-only Battle.cbm logging, addresses in the observed `0x05080000..0x050A0000` range use inferred base `0x05080000` even when `g_currentScreenModuleBase` is still zero. R9 repair remains gated on a real nonzero `g_currentScreenModuleBase`.
+  - extended the existing VM-pool R9 ABI repair to the confirmed Battle.cbm fallback window: if code executes in the observed `0x05080000..0x050A0000` Battle.cbm range while `g_currentScreenModuleBase` is still zero, the hook now writes `R9=0x05080000` and logs `pool_r9_fix_inferred_battle`.
+  - added the matching main-ROM side of the ABI repair: when normal CBE ROM code runs at `0x01000000..0x02000000` with a non-main R9, the hook restores `R9=Global_R9` and logs `main_r9_restore`.
+  - corrected the Battle.cbm VM-pool repair after header evidence: the hook now treats `0x05080000` as the code base for IDA offsets but restores `R9=0x05094000`, logging `evidence=Battle.cbm_headerInt2_0x14000`.
+  - corrected dynamic screen scheduling: when `VM_SCREEN_nextSubTScreen` points to a screen function table present in the screen stack with a nonzero module base, the scheduler now computes `this=screen-0x18`, restores the module context for screen calls, and logs `screen_func_dynamic_this`.
+  - extended the read-only Battle.cbm pool probe for the current `sub_31FA()` crash window (`0x00003D92..0x00003E10`), including bridge callbacks at `R9+0x2018`, draw callback at `R9+0x2040`, and stack slots `SP+0x65C`, `SP+0x680`, and `SP+0x72C`.
+  - added trace-only `trace_battle_module_data_write` for Battle.cbm data range `0x05094000..0x05098600`, especially `R9+0x2018`, `R9+0x2040`, `R9+0x204C`, `R9+0x2050`, `R9+0x3450`, `R9+0x374C`, and `R9+0x4058`, to identify the writer that corrupts module data during the next rerun.
+  - added `vm_malloc_reserve_range()` and reserved `0x05080000..0x050A0000` during `InitVmMalloc()` so the confirmed Battle.cbm dynamic code/data window is not handed out later as an ordinary VM heap block.
+  - narrowed `trace_battle_module_data_write` to named Battle.cbm slots/ranges only, so broad clears cannot consume the trace cap before key module-local fields are reached.
+  - extended the inferred Battle.cbm R9 repair to the shifted window: `0x05094000..0x050A8000 -> R9=0x050A8000`, while preserving the old `0x05080000..0x05094000 -> R9=0x05094000` case.
+  - expanded the VM heap reservation to `0x05080000..0x050C0000` and taught `trace_battle_module_data_write` to watch the shifted data range `0x050A8000..0x050AC600`.
+  - replaced the fixed-window-only Battle module inference with screen-table inference. If a screen function table matches the recovered Battle offsets (`init +0xFE44`, `destroy +0xEE0E`, `logic +0xED0A`, `render +0xE51A`, `pause +0xE3E0`, `resume +0xE374`), the emulator infers `codeBase=init-0xFE44` and `moduleR9=codeBase+0x14000`.
+  - applied that inference in `screen_manager idx=4` before recording screen-stack module context, in the VM-pool code hook for R9 repair, and in the Battle data-write trace for shifted `moduleR9..moduleR9+0x4600` writes.
+  - expanded the VM heap reservation again to `0x05080000..0x05180000` so the observed shifted Battle.cbm code/data windows are not reused as ordinary `vm_malloc` blocks.
+- status:
+  - confirmed: raw `battleinfo` is now on the wire and the crash has moved to a later Battle.cbm status/init path.
+  - confirmed negative: appending the current minimal `4/7` object does not by itself make battle entry stable when Battle.cbm is running with the wrong R9.
+  - confirmed: the next missing contract is at least partly emulator platform ABI, not another guessed server field. The dynamic CBM fallback callback must run with Battle.cbm's module R9, and the dynamic Battle screen must be called with `this=05097390`.
+  - hypothesis pending rerun: the next run should show `screen_manager idx=4 infer_battle_module ... r9=01050bd0 -> <codeBase+0x14000>` and then record the Battle screen with the inferred module base. If it still crashes, decode the PC/LR using `codeBase=init-0xFE44` from the current screen table rather than a fixed address.
+- validation:
+  - `make` passed after adding the VM-pool Battle.cbm probes, after adding the inferred `0x05080000` Battle.cbm base, after extending the R9 ABI repair to this fallback window, after adding main-ROM `Global_R9` restore, after correcting Battle.cbm R9 to `0x05094000`, after adding dynamic-screen `this` recovery, after adding the `sub_31FA` crash-window trace, after adding the Battle.cbm data-write trace, after reserving the Battle.cbm dynamic module window from `vm_malloc`, after extending the repair to the shifted `0x05094000` Battle.cbm window, and after replacing fixed shifted-window repair with Battle screen-table inference.
+
+## 2026-06-10 Battle.cbm raw `battleinfo` correction
+
+- evidence:
+  - latest manual rerun reaches the battle screen, but the user observes the message `人物已死亡` / `你已经死亡不能使用` and no player/monster sprites.
+  - `net_packets.log` shows the old `4/10` response encoded `battleinfo` as `... 0a626174746c65696e666f 0055 0053 ...`, meaning the field value had an extra inner `u16 dataLen=0x53` before the typed stream.
+  - IDA Battle.cbm `sub_66CC()` reads `battleinfo` at `0x00006704`, initializes a stream directly over that returned pointer at `0x00006714`, and reads `ownCount` at `0x00006722`; it does not skip a generic blob length prefix.
+  - runtime trace confirms the parser entered but built no units: `trace_battle_module_state ... side=1 ownCount=0 enemyCount=0 subtype=10 parseOk=1 ... ownHead=00000000... enemyHead=00000000...`.
+  - the follow-up request encodes `Type=100` as u8 (`04547970650003000164`), while the mock log printed `requestType=<absent>` because it was reading that field as u32.
+- changed:
+  - changed `vm_net_mock_build_challenge_interaction_response()` to encode `battleinfo` with `vm_net_mock_put_object_raw()` and log `battleinfoEncoding=raw-typed-stream`.
+  - changed `vm_net_mock_build_actor_other_only10_response()` to read request field `Type` as u8, preserving the current parser-safe empty `2/10` response.
+- status:
+  - confirmed: battle UI entry uses the Battle.cbm `4/10 side+battleinfo` path, but the previous double-wrapped `battleinfo` left both fighter counts at zero.
+  - hypothesis pending rerun: raw `battleinfo` should let `sub_66CC()` read `ownCount=1` / `enemyCount=1`; if the monster is still missing, inspect enemy-id resolution through `sub_66A4()` and the runtime `enemyTable`.
+- validation:
+  - `make` passed after the raw `battleinfo` / u8 `Type` correction.
+
+## 2026-06-10 Battle.cbm `Type=100` follow-up trace
+
+- evidence:
+  - latest manual monster touch now reaches the generic challenge path: `net_packets.log` shows `source=builtin-challenge-interaction responseLen=119 WT len=60 hdr=4/1 objs=1/4/1(id=3)`.
+  - response payload is the intended `1/4/10 { side=1, battleinfo=<83 bytes> }`; `net_trace.log` logs `mock_challenge_interaction_response response=4/10 side=1 battleinfoLen=83 enemyId=3 index=4 pos=299,237`.
+  - the response is consumed as `trace_business_dispatch_item ... kind=4 subtype=10` at tick `164`, then the client sends `WT len=19 hdr=2/10` with `Type=100`.
+  - current mock answers that follow-up as `builtin-actor-other-only10` with empty `othernum=0/otherinfo`; later touch logs `trace_scene_message_request ... text=你已经死亡不能使用`, and no battle UI appears.
+  - IDA Battle.cbm `sub_8996()` (`0x00008996`) handles response `25/2` by reading `result,type`; its `result=1,type=1` branch calls the main bridge with value `100`, making the `Type=100` follow-up a likely battle state-machine sync point rather than a generic actor-other refresh.
+- changed:
+  - added trace-only Battle.cbm state snapshots at runtime addresses `0x050866CC`, `0x05086BEC`, `0x05087DF4`, `0x05088996`, and `0x050889F0`.
+  - `mock_actor_other_only10_response` now logs the request `Type` field, preserving the same empty response behavior.
+- status:
+  - confirmed: `4/10 battleinfo` reaches Battle.cbm and triggers a `2/10 Type=100` follow-up.
+  - confirmed negative: empty `2/10` is not enough to enter a stable battle screen.
+  - hypothesis: the next missing contract is either corrected `battleinfo` semantics or a Battle.cbm-specific response family for `Type=100` (`25/*`, `4/8 combatinfo`, etc.).
+- validation:
+  - `make` passed after adding trace/logging instrumentation.
+
+## 2026-06-10 `4/1 id=3` special-scene branch withdrawn
+
+- evidence:
+  - newest manual monster touch still emitted `WT len=60 hdr=4/1 objs=1/4/1(id=3) count=1` with fields `id=3,index=4,posx=299,posy=237`.
+  - because `vm_net_mock_build_special_scene_interaction_response()` ran before generic challenge handling, the request was answered as `source=builtin-special-scene-interaction responseLen=54`.
+  - the response was `1/30/1 { scene=01桃花岛_03.sce, posinfo=(40,70) }`; runtime then showed progress/loading-strip activity and `kind=30 subtype=1` consumption, but no battle screen.
+  - there was no `mock_challenge_interaction_response response=4/10` marker, so Battle.cbm `sub_7BD0/sub_66CC` was never exercised by this touch.
+- changed:
+  - removed the `01桃花岛_02.sce` `4/1 id=3,index=4 -> 30/1 scene` special-scene branch.
+  - this lets the same request fall through to generic `builtin-challenge-interaction`, which now returns `1/4/10 { side=1, battleinfo=<minimal subtype-10 stream> }`.
+- status:
+  - confirmed negative: the `id=3` special-scene mapping masked the encounter/battle path.
+  - hypothesis pending rerun: the next monster touch should log `mock_challenge_interaction_response response=4/10` and then show whether the Battle.cbm parser accepts the seeded `battleinfo`.
+- validation:
+  - `make` passed after withdrawing the branch.
+
+## 2026-06-10 Battle.cbm `4/10 battleinfo` challenge response
+
+- evidence:
+  - IDA Battle.cbm instance `mwn9` is `bin/JHOnlineData/mmBattleMstarWqvga.cbm`.
+  - Battle.cbm `sub_17AC()` (`0x000017AC`) dispatches event-7 kind `4` responses to `sub_7BD0()` (`0x00007BD0`).
+  - `sub_7BD0()` sends subtype `5` and `10` through `sub_66CC()` (`0x000066CC`), whose parser reads fields `side` and `battleinfo`.
+  - `sub_66CC()` subtype `10` reads a raw stream as `ownCount`, own fighter records (`id`, four u32-like fields, `name`, two visual bytes), then `enemyCount` and enemy records (`id`, four u32-like fields). `sub_66A4()` (`0x000066A4`) resolves enemy ids through the local four-entry encounter table.
+  - main CBE `net_handle_login_or_name_result()` (`0x0101258A`) still makes `4/14 result` a failure/no-popup family, not a confirmed battle-start response.
+- changed:
+  - generic `vm_net_mock_build_challenge_interaction_response()` now returns `1/4/10 { side=1, battleinfo=<minimal subtype-10 stream> }` instead of the temporary `4/14 result=3` placeholder.
+  - the mock keeps same-packet `2/1 moveinfo` handling by appending the existing empty moveinfo ack.
+  - known Taohuadao special-scene `4/1` branches still run before the generic battle response.
+- status:
+  - confirmed: Battle.cbm parser field names and stream order.
+  - hypothesis: `side=1`, seeded stat values, and immediate generic `4/1 -> 4/10` timing still need a manual runtime trace to confirm actual battle-screen entry.
+- validation:
+  - `make` passed after the code change.
+
+## 2026-06-10 Taohuadao `4/1 id=3` encounter/hotspot response
+
+- evidence:
+  - latest `bin/logs/net_trace.log` shows `WT len=60 hdr=4/1 objs=1/4/1(id=3) count=1` after the actor is active on `01桃花岛_02.sce`.
+  - the current generic response is `mock_challenge_interaction_response response=4/14 result=3`, which is parser-shaped but does not provide the needed scene/battle continuation for this interaction.
+  - earlier protocol notes already tie the same area to the local `.sce` east portal `01桃花岛_02.sce -> 01桃花岛_03.sce`, target spawn `(40,70)`.
+- changed:
+  - added a narrow `vm_net_mock_build_special_scene_interaction_response()` branch for `01桃花岛_02.sce` request `id=3,index=4`.
+  - response is `1/30/1 { scene=01桃花岛_03.sce, posinfo=(40,70) }`; unknown `4/1` requests still fall through to `4/14 result=3`.
+  - the target scene save is marked pending, not immediate, until runtime confirms the client consumes the completion.
+- validation:
+  - rebuild/rerun required.
+
+## 2026-06-10
+- changed: adjusted actor-other portal completion for same-class Taohuadao edge transitions in `src/main.c`.
+- changed: in `vm_net_mock_build_actor_other_portal_response()`, when `pendingScene` already matches the local fallback target and no pending-scene save is active, the response now emits a split `30/2 { result=1,type=2,scene=<target> }` with no `posinfo`, and records this target as `g_vm_net_mock_last_scene_change_target` with `g_vm_net_mock_last_scene_change_from_actor_other_portal=true`.
+- changed: in `vm_net_mock_build_scene_default_event_response()`, the actor-other completion branch now uses a trailing `30/1 scene+posinfo` (`scene_enter`) object instead of `30/2` for the same target, while preserving the same task/other/info-banner subset and pending save timing.
+- hypothesis: this avoids closing the scene dispatch gate on the first countdown sync request and aligns actor-other portal completion with the existing immediate short-25/5 continuation window observed in logs.
+- next: rerun `01桃花岛_02.sce` east-edge and `01桃花岛_03.sce` bottom-portal traces, then confirm whether `mock_actor_other_local_table_split_scene_ack` is followed by `mock_scene_default_event_actor_other_portal_completion` and `trace_scene_enter_apply` without immediate `early_gate_off`.
+
 ## 2026-06-07
 - changed: removed the active runtime skip/suppress guards from `src/main.c` that changed guest parser/draw/state-machine control flow to force scene progress. This includes the portal move-entry append skip, scene loading/strip suppressions, selector null-table/draw bypasses, portrait null-callback bypass, and scene-bootstrap loading-overlay suppression. Trace-only hooks remain allowed.
 - changed: added a project rule to `AGENTS.md`: do not add runtime guards, hook branches, or emulator shims that skip the game's own parser, scene, draw, or state-machine logic to force progress; fix the upstream platform/server/resource contract instead.

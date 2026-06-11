@@ -2,6 +2,101 @@
 
 VMBlock *vm_head;
 
+static VMBlock *vm_malloc_new_block(u32 addr, u32 size, int used)
+{
+    VMBlock *block = (VMBlock *)SDL_malloc(sizeof(VMBlock));
+    block->addr = addr;
+    block->size = size;
+    block->req_size = size;
+    block->used = used;
+    block->next = NULL;
+    return block;
+}
+
+int vm_malloc_reserve_range(u32 addr, u32 size)
+{
+    VMBlock *cur = vm_head;
+    int reserved = 0;
+    u32 reserveStart;
+    u32 reserveEnd;
+
+    if (!cur || size == 0)
+        return 0;
+
+    reserveStart = addr & ~7u;
+    reserveEnd = (addr + size + 7u) & ~7u;
+    if (reserveEnd <= reserveStart)
+        return 0;
+
+    while (cur)
+    {
+        u32 blockStart = cur->addr;
+        u32 blockEnd = cur->addr + cur->size;
+        u32 overlapStart;
+        u32 overlapEnd;
+
+        if (cur->used || reserveStart >= blockEnd || reserveEnd <= blockStart)
+        {
+            cur = cur->next;
+            continue;
+        }
+
+        overlapStart = reserveStart > blockStart ? reserveStart : blockStart;
+        overlapEnd = reserveEnd < blockEnd ? reserveEnd : blockEnd;
+
+        if (overlapStart == blockStart && overlapEnd == blockEnd)
+        {
+            cur->used = 1;
+            cur->req_size = cur->size;
+            reserved = 1;
+            cur = cur->next;
+            continue;
+        }
+
+        if (overlapStart == blockStart)
+        {
+            VMBlock *after = NULL;
+            if (overlapEnd < blockEnd)
+                after = vm_malloc_new_block(overlapEnd, blockEnd - overlapEnd, 0);
+            if (after)
+                after->next = cur->next;
+            cur->size = overlapEnd - blockStart;
+            cur->req_size = cur->size;
+            cur->used = 1;
+            cur->next = after;
+            reserved = 1;
+            cur = after;
+            continue;
+        }
+
+        if (overlapEnd == blockEnd)
+        {
+            VMBlock *reservedBlock = vm_malloc_new_block(overlapStart, overlapEnd - overlapStart, 1);
+            reservedBlock->next = cur->next;
+            cur->size = overlapStart - blockStart;
+            cur->req_size = cur->size;
+            cur->next = reservedBlock;
+            reserved = 1;
+            cur = reservedBlock->next;
+            continue;
+        }
+
+        {
+            VMBlock *reservedBlock = vm_malloc_new_block(overlapStart, overlapEnd - overlapStart, 1);
+            VMBlock *after = vm_malloc_new_block(overlapEnd, blockEnd - overlapEnd, 0);
+            after->next = cur->next;
+            reservedBlock->next = after;
+            cur->size = overlapStart - blockStart;
+            cur->req_size = cur->size;
+            cur->next = reservedBlock;
+            reserved = 1;
+            cur = after->next;
+        }
+    }
+
+    return reserved;
+}
+
 void InitVmMalloc()
 {
     vm_head = (VMBlock *)SDL_malloc(sizeof(VMBlock));
@@ -10,6 +105,13 @@ void InitVmMalloc()
     vm_head->req_size = VM_MemoryBlock_SIZE;
     vm_head->used = 0;
     vm_head->next = NULL;
+
+    /*
+     * Battle.cbm is loaded into this VM pool window by the dynamic-CBM loader.
+     * Keep ordinary vm_malloc callers from later handing the same bytes to CBE code
+     * as a scratch block and clearing the module-local R9 data.
+     */
+    vm_malloc_reserve_range(0x05080000u, 0x00100000u);
 }
 // ok
 u32 vm_malloc(u32 size)
