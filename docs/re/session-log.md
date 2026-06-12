@@ -12,7 +12,1614 @@ Suggested entry format:
 - next:
 ```
 
+## 2026-06-12 Battle operate repeat-counterattack gating correction
+
+- verified:
+  - latest user-visible state is “第一次请求攻击确实有回击了，但是第二次攻击没有回击”。
+  - packet evidence matches that symptom exactly:
+    - first live battle operate request returns `responseLen=129`, `actionnum=2`
+    - later requests in the same battle regress to `responseLen=84`, `actionnum=1`
+  - the live request family does not change between those turns; all observed attacks are still `4/2 index=0 operate=0`.
+  - evidence:
+    - `bin/logs/net_packets.log` battle ticks `190`, `226`, `252`, `271`
+    - `bin/logs/net_trace.log` `mock_battle_operate_response ... actionnum=2 ... turn=1 bundleWholeRound=1`
+    - `bin/logs/net_trace.log` later `mock_battle_operate_response ... actionnum=1 ... turn=2/3 bundleWholeRound=0`
+- conclusion:
+  - `confirmed`: the no-counterattack-on-second-attack regression is caused by mock-side gating, not by a changed client request shape.
+  - `hypothesis`: bundling the same parser-safe second record on every armed `Operate=0` attack request is the narrowest next step toward stable full-round battle flow.
+- changed:
+  - `src/main.c` `vm_net_mock_build_battle_operate_response()` and fallback now gate `bundleWholeRound` on `battle session armed && Operate==0`, instead of `turnCounter==0`.
+  - kept the current safe two-record tagged-seq subtype-6 record shapes unchanged; only the bundle trigger changed.
+- validation:
+  - rebuild required via `make`.
+- next:
+  - rerun manual battle and check whether ticks after the first attack also stay on `responseLen=129 actionnum=2`.
+  - then confirm whether repeated attacks keep monster回击 without reintroducing the old crash paths.
+
+## 2026-06-12 Battle short-followup subtype-5 no-op correction
+
+- follow-up after confirming the latest live path is still “只有对怪物的伤害，没有回击”:
+  - verified:
+    - the previously added `actionnum=2` experiment was not actually exercised on the newest runs.
+    - newest packet evidence shows every live `4/2` operate request in battle still decodes as `index=0, Operate=0`.
+    - paired replies stay on the single-record path: `responseLen=84`, `actionnum=1`.
+    - evidence:
+      - `bin/logs/net_packets.log` latest fresh sessions at `tick=170/189/208/247/265`
+      - `bin/logs/net_trace.log` `trace_outgoing_wt_send_context first=4/2 ... index=0 operate=0`
+  - changed:
+    - moved the round-bundle discriminator out of the request field and into mock-side battle session state in `src/main.c`.
+    - `vm_net_mock_build_challenge_interaction_response()` now arms `mock_battle_operate_session` when it emits `1/4/10`.
+    - the first live `4/2` request of that armed session now emits `1/4/6 { actionnum=2 }` regardless of wire `index`.
+    - bundled record layout is the old intended two-step pair:
+      - record 0 uses the previously verified player-hit-safe wire shape (`raw actor byte 1`, child flag `0`)
+      - record 1 uses the previously verified non-crashing auto-turn-safe wire shape (`raw actor byte 2`, child flag `1`)
+    - later `4/2` requests in the same session return to the old single-record baseline.
+  - validation:
+    - `make` passed after the phase-tracking change.
+  - next:
+    - rerun one manual attack on this build.
+    - first checks:
+      - `mock_battle_operate_session arm=1 serial=... turnCounter=0`
+      - first operate reply logs `bundleWholeRound=1 actionnum=2`
+      - `net_packets.log` first battle operate response grows beyond `responseLen=84`
+      - Battle logs two `trace_battle_actioninfo_materialize_detail` record sequences from one packet, and we can finally see whether record 1 becomes a real monster回击 or still stalls in `0x05186B44..0x05186C08`.
+
+- follow-up after the first phase-tracked bundle build crashed on attack:
+  - verified:
+    - the new session-phase switch did work: first live battle operate reply is now `responseLen=129`, `actionnum=2`, `bundleWholeRound=1`.
+    - crash is not random; it reproduces the previously known subtype-6 owner-null branch.
+    - evidence:
+      - `bin/logs/net_trace.log`: `mock_battle_operate_session arm=1 serial=1 turnCounter=0`
+      - `bin/logs/net_trace.log`: `mock_battle_operate_response ... actionnum=2 ... wireMapped=1_to_0 ... bundleWholeRound=1`
+      - Battle materializes bundled record 0 as `record=2,1,1 valueA=12 valueB=0`
+      - immediately afterward Battle reaches `pc=05188FD0`
+      - `bin/logs/stdout_trace.log`: `地址无法访问:0 ... lr:100de83 pc:5188fd0`
+  - conclusion:
+    - `confirmed negative`: the old `wireMapped=1_to_0` player-hit wire shape is not safe anymore when reused as bundled record 0 on the live `index=0` battle flow.
+    - the live no-crash baseline is still the current `record=2,2,1` shape.
+  - changed:
+    - corrected bundled record 0 in `src/main.c` to stay on the current live baseline (`mappedActorWireSlot=2`, `childFlag=1` on the observed `index=0` path).
+    - bundled record 1 remains the second-step experiment target for now.
+  - validation:
+    - rebuild required after restoring bundled record 0 to the no-crash baseline.
+  - next:
+    - rerun one manual attack.
+    - first checks:
+      - first operate reply still logs `actionnum=2 bundleWholeRound=1`
+      - record 0 now materializes as `record=2,2,1`, not `record=2,1,1`
+      - no `pc=05188FD0` crash
+      - then inspect how record 1 materializes and whether it finally drives monster回击 or still stalls.
+
+- follow-up after the stable two-record rerun still showed “只有对怪物的伤害，没有回击”:
+  - verified:
+    - the corrected phase-tracked build now survives and really imports two records from one `4/6` packet.
+    - evidence:
+      - `bin/logs/net_packets.log`: first battle-operate reply is `responseLen=129`
+      - `bin/logs/net_trace.log`: `mock_battle_operate_response ... actionnum=2 ... wireMapped=2_to_0 ... bundleWholeRound=1`
+      - record 0 materializes at `recordBase=010534f4`
+      - record 1 materializes at `recordBase=01053558`
+    - `confirmed negative`: the two records are still semantically identical on the Battle side.
+      - record 0: `trace_battle_actioninfo_materialize_detail ... record=2,2,1 valueA=12 valueB=0`
+      - record 1: `trace_battle_actioninfo_materialize_detail ... record=2,2,1 valueA=12 valueB=0`
+      - after that, Battle still loops in `trace_battle_state4_detail label=state4_store_target/state4_target_copy_store`
+      - no `trace_battle_damage_dispatch_detail` appears
+  - changed:
+    - kept bundled record 0 on the stable no-crash baseline.
+    - changed only bundled record 1 target-side wire byte in `src/main.c` from `0` to `1`.
+    - rationale:
+      - earlier single-record experiments proved `wireMapped=2_to_1` regresses to self-hit but does not crash.
+      - that makes it the narrowest reusable candidate for “second half hits player” ownership when scoped only to bundled record 1.
+  - validation:
+    - rebuild required after the bundled-record-1 target tweak.
+  - next:
+    - rerun one manual attack.
+    - first checks:
+      - first operate reply remains `responseLen=129 actionnum=2`
+      - record 0 stays `record=2,2,1`
+      - record 1 changes away from the current identical `record=2,2,1`
+      - visible result becomes “先打怪，再打自己/玩家受击”, or at least logs a different second-half ownership/state path.
+
+- latest static/server-side follow-up after confirming “现在是只有对怪物的伤害了，没有回击”:
+  - verified:
+    - subtype-6 does have a real outer multi-record loop keyed by `actionnum`.
+      - static: Battle.cbm `0x05189018..0x05189022` increments `[sp+0x2c]`, compares against `[sp+0x30]`, and branches back to `0x05188E30`.
+      - command: `python tools/disasm_thumb.py --file bin/JHOnlineData/mmBattleMstarWqvga.cbm 0xA1 0x05181F20 0x05189018 40`
+    - the current standalone auto-turn record is still the only confirmed non-crashing opposing-side import shape we have in logs:
+      - runtime: `mock_battle_operate_response ... index=0 ... response=4/6 actionnum=1`
+      - runtime: `trace_battle_actioninfo_materialize_detail ... record=2,2,1 valueA=12 valueB=0`
+      - runtime negative: it still stalls in `trace_battle_pool_probe label=battle_action_state_machine_state4_store_target`
+  - changed:
+    - added helper `vm_net_mock_append_battle_actioninfo_record()` in `src/main.c` to reuse the current tagged-seq type-2 record grammar exactly.
+    - changed `vm_net_mock_build_battle_operate_response()` and fallback so:
+      - `index=1` now sends `1/4/6 { actionnum=2, actioninfo=<two tagged records> }`
+      - record 0 stays the current visible player-hit safe shape
+      - record 1 reuses the current standalone safe auto-turn wire shape (`actor=2`, `target=0`, `childFlag=1`, `valueA=12`, `valueB=0`)
+      - `index=0` remains on the prior single-record baseline for now
+  - validation:
+    - `make` passed on the new build.
+  - evidence:
+    - static: Battle.cbm `0x05189018..0x05189022`
+    - source: `src/main.c` battle operate builders
+  - next:
+    - rerun one manual attack on this build.
+    - first checks:
+      - `mock_battle_operate_response response=4/6 actionnum=2 ... index=1`
+      - two successive `trace_battle_actioninfo_materialize_detail` records from one packet
+      - whether the second bundled record still falls into `state4_store_target`, or finally creates a visible monster回击 / hurt-dispatch path.
+
+- follow-up after the newest stable rerun where player damage lands on monster but still no counterattack:
+  - verified:
+    - the auto monster-turn request still fires as real `4/2 index=0 operate=0`.
+      - runtime: `trace_outgoing_wt_send_context first=4/2 ... index=0 operate=0` at ticks `244` and `264` in `bin/logs/net_trace.log`
+    - the current reply still imports as the same parser-safe type-2 record:
+      - runtime: `mock_battle_operate_response ... response=4/6 ... wireMapped=2_to_0 index=0 operate=0 damageValue=12`
+      - runtime: `trace_battle_actioninfo_materialize_detail ... record=2,2,1 valueA=12 valueB=0` at `0x05188F96/0x05188FAA/0x05188FBC`
+    - `confirmed negative`: the client still never reaches hurt-dispatch.
+      - runtime: no `trace_battle_damage_dispatch_detail` markers appear
+      - runtime: Battle instead repeats `trace_battle_pool_probe label=battle_action_state_machine_state4_store_target pc=05186b0c`
+      - runtime: paired local state stays `localState=255,0,1,0,0,0,2` and `activeAction=17,39,0,0 valueAB=0,80 targetId=1`
+    - static Battle.cbm now narrows the exact branch that is looping:
+      - `0x05186B44..0x05186B80`: when current block `+0x4CC == 0`, it decrements the local record byte `[r4+0x0E]`; if that countdown is still positive it calls callback `[* (currentBlock+0x52C)](..., 8)`, otherwise it stores mode `7` and falls onward.
+      - `0x05186BBC..0x05186C08`: when current block `+0x4CC == 2`, it checks `currentBlock+0x52A/+0x52B` and `currentBlock+0x544`, then copies target/coord fields and exits.
+      - evidence:
+        - static: `python tools/disasm_thumb.py --file bin/JHOnlineData/mmBattleMstarWqvga.cbm 0xA1 0x05181F20 0x05186B44 100`
+        - static: `python tools/disasm_thumb.py --file bin/JHOnlineData/mmBattleMstarWqvga.cbm 0xA1 0x05181F20 0x05186C3A 60`
+  - changed:
+    - trace-only: added `trace_battle_state4_detail` in `src/main.c`.
+    - new probe points:
+      - `0x05186B5C` state4 `+0x4CC` gate
+      - `0x05186B72` local record `[r4+0x0E]` countdown result
+      - `0x05186B7E` callback-8 call site
+      - `0x05186BB0` callback-8 positive-countdown tick path
+      - `0x05186BBC` state4 `+0x4CC==2` gate
+      - `0x05186BCC` `currentBlock+0x52A` flag check
+      - `0x05186BD4` `currentBlock+0x544` target pointer check
+      - `0x05186BE0` / `0x05186BF0` target-copy prepare/store
+    - the helper logs:
+      - local record bytes `[r4+0x0D]` and `[r4+0x0E]`
+      - current fighter block `+0x4CC`
+      - current action block `+0x52A/+0x52B/+0x52C`
+      - local record `+0x44` target pointer source
+  - next:
+    - rerun one attack on this build.
+    - first checks:
+      - whether `state4cc` is staying at `0` or flipping to `2`
+      - whether `[r4+0x0E]` counts down toward callback-8 or stays pinned
+      - whether `flag52a/flag52b` or `copiedTarget44` explain the “只存目标，不回击” branch.
+  - narrowed experiment now applied after reading those traces:
+    - `confirmed`: the same `type=2` record family that produces visible player damage also immediately falls into the same `state4_store_target -> target_copy_store` path, so the current subtype-6 shell is acting more like an effect/target-sync record than a full turn-resolution record.
+    - changed:
+      - keep `4/6 actionnum=1`, `type=2`, `mappedActorWireSlot`, `damageValue=12`, and all tail fields unchanged.
+      - vary only the single child flag byte read at Battle.cbm `0x05188EA6`:
+        - `index=1` stays `childFlag=0`
+        - `index=0` now tries `childFlag=1`
+    - rationale:
+      - this is the narrowest remaining parser-visible field inside the current safe single-record grammar.
+      - unlike retrying `type=1` or reintroducing a second record, this does not reopen the confirmed crash paths at `0x05188FD0` / `0x05186C98`.
+    - next:
+      - rerun one attack on this build.
+      - first checks:
+        - `mock_battle_operate_response ... index=0 ... childFlag=1`
+        - `trace_battle_actioninfo_stream_read ... child_flag_read ... r0=00000001`
+        - whether `state4_target_copy_store` still repeats unchanged or the branch finally moves toward callback/damage-dispatch.
+
+- follow-up after the latest “player can damage monster, but no counterattack” rerun:
+  - verified:
+    - the current stable one-record `4/6` path does reach the auto follow-up request window again: `trace_outgoing_wt_send_context first=4/2 ... index=0 operate=0`.
+    - the mock is already varying the child target byte between the two turns, but that alone is not enough to create a real opposing turn.
+      - player turn (`index=1`) raw payload begins `00 01 02 00 01 01 00 01 01 ...`
+      - monster auto-turn (`index=0`) raw payload begins `00 01 02 00 01 00 00 01 01 ...`
+      - Battle later materializes the corresponding local records as:
+        - player turn: `01 02 00 01 ... 00 01 00 00 0c 00 00 00 ...`
+        - auto turn: `01 02 00 01 ... 00 00 00 00 0c 00 00 00 ...`
+    - `confirmed negative`: even with that child-target difference, the Battle-side local action state still stays on the same visible owner path and no monster retaliation appears.
+    - newest rerun after the actor-byte-only experiment:
+      - `confirmed`: `index=0` no longer materializes as the old player-turn-equivalent record.
+        - mock: `mock_battle_operate_response ... index=0 wireMapped=2_to_0`
+        - Battle: `trace_battle_actioninfo_materialize_detail ... record=2,2,1 valueA=12 valueB=0`
+      - `confirmed`: local state also changes with that actor-byte shift:
+        - old auto-turn state tail was `localState=...,0,0`
+        - new auto-turn state tail becomes `localState=...,0,2`
+      - `confirmed negative`: despite that real semantic movement, there is still no visible monster counterattack.
+  - changed:
+    - kept the parser-safe one-record `1/4/6` family, `damageValue=12`, and the current target-side bytes unchanged.
+    - changed only the raw header actor byte for the auto monster-turn window in `src/main.c`:
+      - `index=1` still uses `mappedActorWireSlot = actorSlot`
+      - `index=0` now tries `mappedActorWireSlot = 2`
+    - rationale:
+      - current runtime shows the player-turn raw actor byte `1` still lands on Battle materialized actor byte `0`.
+      - next narrow hypothesis is therefore that the opposing semantic actor may require a one-step higher raw actor id on the follow-up `index=0` request.
+    - next refinement now applied:
+      - keep that successful `index=0 -> mappedActorWireSlot=2` actor-side change.
+      - change only the auto-turn child target byte from `0` to `1`.
+      - rationale:
+        - static Battle.cbm `sub_6EB0` `0x05188F68..0x05188F86` stores child target at `record+0x15`.
+        - the current actor-only experiment changes semantic actor ownership, but the materialized target-side bytes are still too close to the old no-counterattack shape.
+    - latest rerun on that `wireMapped=2_to_1` build:
+      - `confirmed`: the actor-byte discovery remains real even after the target-byte tweak.
+        - mock: `mock_battle_operate_response ... index=0 wireMapped=2_to_1`
+        - Battle: `trace_battle_actioninfo_materialize_detail ... record=2,2,1 valueA=12 valueB=0`
+        - local state: `trace_battle_local_action_state ... localState=...,0,2`
+      - `confirmed negative`: user-visible behavior regresses back to self-hit only.
+      - conclusion:
+        - the child target byte at `record+0x15` is not the missing monster-counterattack discriminator.
+        - keep `index=0 -> mappedActorWireSlot=2`, but revert the child target byte to the old safe `wireMapped=2_to_0` baseline.
+    - newest narrowed follow-up now applied on that restored baseline:
+      - changed only the record `type` for the auto-turn request window:
+        - `index=1` keeps `type=2`
+        - `index=0` now tries `type=1`
+      - rationale:
+        - static Battle.cbm `sub_4582()` at `0x05184582` splits the post-import local action kinds.
+        - `type==2` only runs the effect-placement helper `sub_44CA()` (`0x45AC..0x45E4`).
+        - `type==1` is the branch that reads fighter value fields `+1484/+1488` and emits popup-number style output (`0x45EE..0x4684`).
+      - hypothesis:
+        - current auto-turn `record=2,2,1 valueA=12` may already be importer-valid but still effect-only.
+        - this is the narrowest parser-faithful test for “still no monster retaliation because auto-turn is landing on the wrong local action kind”.
+    - latest rerun on that `index=0 -> type=1` build:
+      - `confirmed`: the client does enter the type-1 arm.
+        - `trace_battle_actioninfo_materialize_detail ... label=type1_before_template_copy ... record=1,2,1 valueA=12 valueB=0`
+        - `trace_battle_actioninfo_materialize_detail ... label=type1_before_callback ... record=1,2,1 valueA=12 valueB=0`
+      - `confirmed negative`: this branch is crash-unsafe under the current server contract.
+        - after callback, traced `recordBase` drifts from the local action table into callback/code memory:
+          - `trace_battle_actioninfo_materialize_detail ... label=type1_after_callback ... recordBase=01044ef7 record=4,28,29 valueA=2314360 valueB=2453889897`
+          - paired dump: `trace_battle_actioninfo_materialize_record ptr=01044ef7 ... hex=b5041c1d1cfff750...`
+        - user-visible result is an immediate crash.
+        - crash evidence:
+          - `bin/logs/stdout_trace.log`: `地址无法访问:0 type:0 size:21 value:4`
+          - registers: `lr=05186c9b`, `lastPc=05186c98`
+      - conclusion:
+        - revert `index=0 -> type=1`.
+        - keep `type=2` as the current non-crashing baseline for the auto-turn window.
+    - newest narrowed follow-up now applied on that restored type-2 baseline:
+      - changed only auto-turn second child `u32` seed:
+        - `index=1` keeps `valueBSeed=0`
+        - `index=0` now tries `valueBSeed=1`
+      - rationale:
+        - this field sits in the current mock right after `valueA`, so it was the narrowest remaining nonzero scalar to test without disturbing actor/target bytes or retrying the crash-prone `type=1` branch.
+      - latest rerun on that `valueBSeed=1` build:
+        - `confirmed negative`: this field is not the effect-template selector we wanted.
+        - mock/runtime evidence:
+          - `mock_battle_operate_response ... index=0 ... valueBSeed=1 ...`
+          - `trace_battle_actioninfo_stream_read ... child_valueB_read ... r0=00000001`
+          - `trace_battle_actioninfo_materialize_detail ... record=2,2,1 valueA=12 valueB=1 blobId=0`
+          - `trace_battle_actioninfo_materialize_effect_template ... ascii=f_blood1.actor......f_blood2.act`
+          - `trace_battle_actioninfo_materialize_scratch ... ascii=f_blood1.actor..................`
+          - `trace_resource_open_helper ... name=f_blood1.actor`
+        - user-visible result remains “只有对怪物伤害，没有回击”.
+      - corrected policy:
+        - revert the second child `u32` to the old safe baseline `valueBSeed=0`.
+        - keep `type=2`, `mappedActorWireSlot=2`, and `wireMapped=2_to_0`.
+      - trace-only follow-up now added:
+        - new Battle probes at `0x05186C94/0x05186C98` and `0x05186CE6/0x05186CEA` log the real damage-dispatch callback preparation/call windows as `trace_battle_damage_dispatch_detail`.
+        - goal: next rerun should distinguish “monster auto-turn never reaches the player-hurt callback window” from “it reaches the window but the callback/state slot is wrong”.
+      - newest rerun on that build:
+        - `confirmed negative`: the new `trace_battle_damage_dispatch_detail` markers still do not appear.
+        - runtime instead repeatedly lands at:
+          - `trace_battle_local_action_state label=sub_45ba_action_state_tick_entry ... caller=05186c58`
+          - with stable auto-turn record `record=2,2,1 valueA=12 valueB=0`
+        - static Battle.cbm `0x05186C3A..0x05186C58` explains this intermediate stall:
+          - it decrements `[r6+0x0D]`
+          - when still `> 0`, it calls `sub_45BA()` at `0x05186C54`
+          - only later branches at `0x05186C74..0x05186CEA` can reach the actual hurt callbacks
+      - next trace-only follow-up now added:
+        - new probes around `sub_6A58()` state machine:
+          - `0x05186A58` entry
+          - `0x05186A6C` state-4 pre-apply path
+          - `0x05186ACC` state-4 apply call into `sub_4B70`
+          - nearby follow-up/store windows `0x05186BAC` / `0x05186BEC`
+        - goal: determine which local action state (`+0x0D`) is cycling after auto-turn materialization and why it never matures into the later damage-dispatch branch.
+  - evidence:
+    - runtime:
+      - `bin/logs/net_trace.log`
+      - `mock_battle_operate_actioninfo_payload`
+      - `trace_battle_actioninfo_materialize_record`
+      - `trace_outgoing_wt_send_context first=4/2 ... index=0 operate=0`
+    - static/IDA:
+      - Battle.cbm `sub_6EB0` at `0x05188DD0..0x05189024`
+  - validation:
+    - rebuild required after reverting the failed child-target refinement.
+  - next:
+    - rerun one battle on the restored `valueBSeed=0` build.
+    - first expected checks:
+      - `mock_battle_operate_response ... index=0 ... recordType=2 ... valueBSeed=0 ... wireMapped=2_to_0`
+      - `trace_battle_damage_dispatch_detail label=type6_prepare/type6_call` or `type4_prepare/type4_call`
+      - if those new traces do not appear, the missing contract is still upstream of player-hurt dispatch.
+      - if they do appear, inspect callback/state fields there before changing subtype-6 record grammar again.
+
+- follow-up after the latest no-crash-but-zero-damage rerun:
+  - verified:
+    - the newest stable attack run is no longer blocked at dispatch or by the old `0x05188FD0` crash branch.
+    - runtime still shows the one-record subtype-6 payload materializing as `record=2,0,1 valueA=0 valueB=0` at `0x05188F96/0x05188FAA/0x05188FBC`.
+    - new local action-state traces prove the parsed record is reaching a real per-fighter action block:
+      - `trace_battle_local_action_state ... tick=212 ... activeSlot=1 activeBlock=010535ac activeActionBlock=01053acc activeAction=17,39,0,0 valueAB=0,80 targetId=1`
+      - paired dump: `trace_battle_local_action_active_action_block ptr=01053acc ... hex=00000000112700000001000100000000500000005000000014000000140000000000000001000000...`
+    - static Battle.cbm now explains one important slot-mapping fact:
+      - `sub_6CE8()` at `0x05188C08` remaps incoming subtype-6 slot ids whenever `side==1`.
+      - with current one-vs-one `4/10 side=1` battle setup, that helper swaps `0 <-> 1`.
+    - static Battle.cbm `sub_4582()` at `0x05184582` further narrows the zero-damage symptom:
+      - `type==2` only drives effect placement via `sub_44CA()`.
+      - `type==1` is the branch that reads `fighter+0x5CC/+0x5D0` for popup-number style output.
+  - changed:
+    - kept the only confirmed no-crash single-record `4/6` shape.
+    - changed only the first child `u32` in `src/main.c` battle-operate builders from `0` to trial damage value `12`, in both the primary and fallback paths.
+    - added `damageValue=%u` to the `mock_battle_operate_response` / fallback trace markers so the next rerun can prove which build is active.
+  - evidence:
+    - runtime:
+      - `bin/logs/net_trace.log` tick `212/219`
+      - `trace_battle_actioninfo_materialize_detail ... record=2,0,1 valueA=0 valueB=0`
+      - `trace_battle_local_action_state ... activeAction=17,39,0,0 valueAB=0,80 targetId=1`
+    - static/IDA:
+      - Battle.cbm `sub_6CE8` at `0x05188C08`
+      - Battle.cbm `sub_4582` at `0x05184582`
+  - validation:
+    - rebuild required after changing the trial damage field.
+  - next:
+    - rerun one attack on this build.
+    - first expected checks:
+      - `mock_battle_operate_response ... damageValue=12`
+      - `trace_battle_actioninfo_materialize_detail ... valueA=12` at `0x05188EAE/0x05188F96`
+      - whether the current visible `0` changes into a real damage popup without reintroducing the owner crash.
+
+- follow-up after the next rerun confirmed self-hit for 12:
+  - verified:
+    - the value-only subtype-6 experiment worked exactly at the damage-field layer:
+      - `mock_battle_operate_response ... damageValue=12`
+      - `trace_battle_actioninfo_stream_read ... child_valueA_read ... r0=0000000c`
+      - `trace_battle_actioninfo_materialize_detail ... record=2,0,1 valueA=12 valueB=0`
+    - the visible symptom also confirms the same thing from the UI side: the client now shows `12` damage instead of `0`.
+    - `confirmed negative`: target ownership is still wrong on the same build.
+      - latest action-state traces still show `targetId=1`
+      - visible result is still self-hit, now for 12 points
+  - changed:
+    - left the confirmed `4/6` one-record shape and `damageValue=12` unchanged.
+    - changed only `vm_net_mock_build_challenge_interaction_response()` `4/10.side` from `1` to `0`.
+    - rationale: static Battle.cbm `sub_6CE8()` remaps subtype-6 slot ids when `side==1`, and current one-vs-one evidence already matches the observed `0 <-> 1` swap.
+  - evidence:
+    - runtime:
+      - `bin/logs/net_trace.log` latest attack window around ticks `181` and `206`
+      - `trace_battle_actioninfo_stream_read ... child_valueA_read ... r0=0000000c`
+      - `trace_battle_actioninfo_materialize_detail ... record=2,0,1 valueA=12 valueB=0`
+      - `trace_battle_local_action_state ... activeAction=17,39,0,0 valueAB=0,80 targetId=1`
+    - static/IDA:
+      - Battle.cbm `sub_6CE8` at `0x05188C08`
+  - validation:
+    - rebuild required after side-only change.
+  - next:
+    - rerun one attack on the `side=0` build.
+    - first expected checks:
+      - `mock_challenge_interaction_response response=4/10 side=0`
+      - whether `record=2,0,1` changes to a different local target shape
+      - whether visible damage stops landing on the player.
+
+- follow-up after the `side=0` rerun fixed player attack target ownership:
+  - verified:
+    - changing only `4/10.side` from `1` to `0` is enough to make the first visible `12` land on the monster instead of the player.
+    - the client then emits another real battle-operate request on its own:
+      - `trace_outgoing_wt_send_context first=4/2 ... index=0 operate=0`
+      - observed again at ticks `187`, `219`, and `240`
+    - this strongly narrows the monster-turn contract:
+      - `hypothesis`: `4/2 index=0 operate=0` is the auto monster-turn request window
+    - `confirmed negative`: current mock still answers both `index=1` and `index=0` with the same target-side semantics, and Battle local action traces still stay on `targetId=1`.
+  - changed:
+    - kept `side=0`, the confirmed `damageValue=12`, and the same parser-safe one-record `4/6` family.
+    - changed only the one-vs-one child target slot rule in battle-operate builders:
+      - if `index==0`, target the other fighter slot (`1`)
+      - otherwise keep target slot `0`
+  - evidence:
+    - runtime:
+      - `bin/logs/net_trace.log`
+      - first player turn: `trace_outgoing_wt_send_context ... index=1 operate=0`
+      - follow-up turn: `trace_outgoing_wt_send_context ... index=0 operate=0`
+      - both old replies previously still ended at `trace_battle_local_action_state ... targetId=1`
+    - static/behavioral:
+      - no client patching; this is still a server-side packet-shape experiment only
+  - validation:
+    - rebuild required after the child-target-slot change.
+  - next:
+    - rerun one battle on this build.
+    - first expected checks:
+      - `mock_battle_operate_response ... index=0 wireMapped=0_to_1`
+      - whether the second auto-issued `4/2 index=0` now produces a visible monster attack onto the player.
+
+- follow-up after the `index=0 -> targetSlot=1` experiment regressed back to self-hit:
+  - verified:
+    - the new wire marker really changed on the second auto-issued request:
+      - `mock_battle_operate_response ... index=0 wireMapped=0_to_1`
+    - but Battle-side local semantics did not follow that guess:
+      - `trace_battle_actioninfo_stream_read ... child_actor_map ... record=2,0,1`
+      - `trace_battle_local_action_state ... targetId=1`
+    - user-visible result also regressed to self-hit only.
+  - changed:
+    - reverted the `index=0 -> targetSlot=1` experiment in `src/main.c`.
+    - restored the previous safe one-record target-slot rule (`wireMapped=%u_to_0`) so the baseline returns to the last known good first-turn behavior: player hits monster for 12.
+  - evidence:
+    - runtime:
+      - `bin/logs/net_trace.log`
+      - `mock_battle_operate_response ... index=0 wireMapped=0_to_1`
+      - `trace_battle_actioninfo_stream_read ... record=2,0,1`
+      - `trace_battle_local_action_state ... targetId=1`
+    - conclusion:
+      - `confirmed negative`: the monster-turn target semantic is not controlled by that one child target-slot byte alone.
+  - validation:
+    - rebuild required after revert.
+  - next:
+    - rerun once on the reverted build to restore the stable baseline.
+    - then continue tracing the real monster-turn discriminator for `4/2 index=0`, likely outside the single child target-slot field.
+
+- follow-up after the single-record slot-swap crash rerun:
+  - verified:
+    - the newest attack crash is not random regression; it is the direct result of swapping the single subtype-6 record's raw actor/target slot bytes.
+    - `bin/logs/net_packets.log` latest fresh session shows the active reply is still `source=builtin-battle-operate responseLen=84`, i.e. one-record `1/4/6`.
+    - `bin/logs/net_trace.log` now proves the Battle-side materialized record changed from the earlier safe `record=2,0,1` to `record=2,1,1`:
+      - `trace_battle_actioninfo_materialize_detail ... pc=05188FAA ... record=2,1,1 valueA=0 valueB=0`
+      - `trace_battle_actioninfo_materialize_detail ... pc=05188FBC ... record=2,1,1 valueA=0 valueB=0`
+    - static Battle.cbm at `0x05188F9C..0x05188FD0` explains the new crash:
+      - `0x05188F9C..0x05188FA4` compares `[record+2]` against active slot `[R9+0x2918+2]`
+      - equality enters `0x05188FCA..0x05188FD0`
+      - `stdout_trace.log` confirms the resulting null dereference at `pc=05188FD0`, `address=0`
+  - changed:
+    - reverted the temporary raw slot swap in `src/main.c`.
+    - default single-record battle-operate reply returns to the only confirmed no-crash shape while keeping the new trace-only `valueA/valueB` instrumentation.
+  - evidence:
+    - runtime:
+      - `bin/logs/net_packets.log` tick `178` `source=builtin-battle-operate responseLen=84`
+      - `bin/logs/net_trace.log` tick `179` materialize window `0x05188FAA..0x05188FD0`
+      - `bin/logs/stdout_trace.log` invalid access `pc=05188FD0`
+    - static/IDA:
+      - Battle.cbm `sub_6EB0` `0x05188F9C..0x05188FD0`
+  - validation:
+    - rebuild required after revert.
+  - next:
+    - rerun one attack on the reverted no-crash shape.
+    - then use the new `valueA/valueB` and `pendingDelta` traces to recover which child `u32` fields drive real damage instead of `0`.
+
+- follow-up after confirming the live `4/2` claimer is still the old `raw82` tailpath:
+  - verified:
+    - newest `bin/logs/net_packets.log` tail still shows `tick=218/253 source=builtin-battle-operate-raw82 responseLen=81`, so the active battle-operate response is still coming from the tail `raw82` claimer rather than the newer dynamic builder.
+    - that historical `raw82` packet still carries the old bare head bytes `00 02 01 01 00 00 ...`.
+    - static/runtime reader evidence now explains the exact mismatch:
+      - main CBE `stream_reader_init_from_blob()` at `0x01033B16` installs the returned `actioninfo` blob object into the reader.
+      - main CBE `stream_read_i8_tagged()` at `0x01033AAD` reads `*(blob+4) + cursor + 2` and advances cursor by `3`.
+      - therefore a parser-faithful tagged `u8` cell must be `00 01 VV`; the historical bare `raw82` bytes necessarily decode to the already observed wrong header values `1 / 0 / 0`.
+  - changed:
+    - `src/main.c` `vm_net_mock_build_battle_operate_response_raw82()` no longer emits the frozen old 81-byte payload.
+    - the tail `raw82` path now forwards into `vm_net_mock_build_battle_operate_response_fallback()`, so even if `builtin-battle-operate-raw82` remains the live claimer, its `4/6.actioninfo` now uses the current tagged-sequence builder instead of reintroducing the obsolete bare stream.
+    - added failure traces:
+      - `mock_battle_operate_response_fallback reject=packet_build_failed ...`
+      - `mock_battle_operate_response_raw82 reject=fallback_builder_failed ...`
+  - evidence:
+    - runtime: `bin/logs/net_packets.log` latest tail with `builtin-battle-operate-raw82`.
+    - static/IDA:
+      - Battle `sub_6EB0` reader callsites `0x05188F36/0x05188F42/0x05188F58`
+      - main CBE `stream_reader_init_from_blob()` `0x01033B16`
+      - main CBE `stream_read_i8_tagged()` `0x01033AAD`
+  - validation:
+    - `make` passed.
+  - next:
+    - rerun one attack on this build.
+    - first expected proof is `mock_battle_operate_response_raw82 ... mode=tagged_seq_forwarder`.
+    - then verify whether `trace_battle_actioninfo_stream_read` finally changes from `1 / 0 / 0` to `2 / <actorSlot> / 1`.
+
+- follow-up after the next crash-on-attack rerun:
+  - verified:
+    - newest `net_trace.log` no longer shows the old frozen bare payload being emitted; instead the live tailpath reaches `mock_battle_operate_response_raw82 reject=fallback_builder_failed requestLen=36`.
+    - there is still no Battle-side parser crash before dispatch. The immediate failure is mock-side and happens before any `handled_packet source=builtin-battle-operate-*`.
+    - source audit explains the failure:
+      - both battle-operate builders were still using `u8 actionInfo[64]`.
+      - one tagged round record is much larger than the old bare stream because each `u8/u32/string` is emitted with its own tag/length wrapper.
+      - two records do not fit in 64 bytes, so the builder returns `0` before packet assembly and the dispatcher falls through to `unhandled_packet WT len=36 hdr=4/2`.
+  - changed:
+    - expanded both `vm_net_mock_build_battle_operate_response()` and `vm_net_mock_build_battle_operate_response_fallback()` `actionInfo` buffers from `64` to `128`.
+    - added trace `mock_battle_operate_response_fallback reject=actioninfo_build_failed cap=... partialLen=...` so the next rerun can prove whether any later builder failure remains.
+  - evidence:
+    - runtime: `bin/logs/net_trace.log` latest tail at `tick=597` with `mock_battle_operate_response_raw82 reject=fallback_builder_failed`.
+    - source: `src/main.c` battle-operate builders' local `actionInfo` buffers and tagged record construction path.
+  - validation:
+    - `make` passed.
+  - next:
+    - rerun one attack on this build.
+    - first expected improvement is disappearance of `unhandled_packet WT len=36 hdr=4/2`.
+    - then inspect whether the active path logs `mock_battle_operate_response_raw82 ... mode=tagged_seq_forwarder` and whether Battle's header reads finally change from `1 / 0 / 0`.
+
+- follow-up after the first successful tagged-seq dispatch rerun:
+  - verified:
+    - newest `net_packets.log` now shows a real handled attack reply:
+      - `tick=370 source=builtin-battle-operate responseLen=129`
+      - `1/4/6 { actionnum=2, actioninfoLen=0x5A }`
+    - Battle no longer dies in the old `4/2` unhandled path. It enters the real subtype-6 materialize window and reaches:
+      - `0x05188F96` type-2 template copy
+      - `0x05188FAA` before callback
+      - `0x05188FBC` after callback
+    - current crash is deeper and now confirmed client-side:
+      - `stdout_trace.log` reports invalid access at `pc=0x05188FD0`, `lastPc=0x05188FD0`, address `0`.
+      - static disassembly at `0x05188FC8..0x05188FD0` shows:
+        - load battle-global owner pointer from `R9+offset`
+        - `ldr r1, [r0]`
+        - `ldr r0, [r1]`
+      - the null dereference only happens on the branch after `0x05188FBC`, i.e. after a type-2 record whose mapped actor byte equals the local-player byte.
+    - runtime record evidence matches that:
+      - first record materializes as `record=2,0,1`
+      - second record materializes as `record=2,1,1`
+      - the second record is the one that enters the null-owner branch and crashes.
+  - changed:
+    - `src/main.c` battle-operate subtype-6 mock is temporarily narrowed back to a single record:
+      - `actionnum=1`
+      - only the player-attack record remains
+      - the enemy counterattack record is removed for now
+    - rationale:
+      - this is a parser-faithful narrowing, not a guest-state patch.
+      - it avoids the confirmed `0x05188FD0` null-owner branch while preserving the real attack-action importer path.
+  - evidence:
+    - runtime:
+      - `bin/logs/net_packets.log` latest `tick=370`
+      - `bin/logs/net_trace.log` latest subtype-6 materialize window around `0x05188F96..0x05188FBC`
+      - `bin/logs/stdout_trace.log` invalid access at `0x05188FD0`
+    - static/IDA:
+      - Battle `0x05188FBC..0x05188FD0`
+  - validation:
+    - `make` passed.
+  - next:
+    - rerun one attack on this single-record build.
+    - first goal is to confirm no flash crash.
+    - then we can decide whether enemy turn should be modeled as a later follow-up packet family rather than the second record inside the same `4/6`.
+
+- follow-up after the newest crash-on-attack rerun:
+  - verified:
+    - the latest "attack then crash" session is a mock dispatch regression, not a newly confirmed Battle.cbm parser crash.
+    - `bin/logs/net_trace.log` tail ends with `trace_outgoing_wt_send_context first=4/2 ... index=1 operate=0`, followed immediately by `unhandled_packet WT len=36 hdr=4/2 objs=1/4/2 count=1`.
+    - `bin/logs/net_packets.log` tail records the same final request as `主机处理信息 unhandled_packet WT len=36 hdr=4/2 objs=1/4/2 count=1`, then `assert(0)`.
+    - this preserves the already confirmed wire fact that the live attack request is still Battle.cbm-produced `4/2 index=1 Operate=0`; the failure is that current mock dispatch returned no reply.
+  - changed:
+    - `src/main.c` now adds a relaxed battle-operate detector that accepts the top-level one-object `1/4/2` shape even if the stricter field-based detector returns false.
+    - dispatcher now tries `vm_net_mock_build_battle_operate_response_fallback()` before generic `unhandled_packet`, and that fallback emits the same parser-safe `1/4/6 { actionnum=2, actioninfo=<raw tagged-seq> }` family rather than asserting.
+    - added trace `mock_battle_operate_response reject=strict_match_failed` so the next rerun can distinguish strict detector failure from deeper builder failure.
+    - rebuilt with `make`; build passed.
+  - evidence:
+    - runtime: `bin/logs/net_trace.log` latest tail at `tick=204`; `bin/logs/net_packets.log` latest tail with final `assert(0)`.
+    - source: `src/main.c` battle-operate detector/dispatcher around `vm_net_mock_is_battle_operate_request*()` and `vm_net_mock_build_response()`.
+  - next:
+    - rerun one attack on this build.
+    - first confirm the latest session no longer ends with `unhandled_packet WT len=36 hdr=4/2`.
+    - then compare `mock_default source=builtin-battle-operate` vs `builtin-battle-operate-fallback` to see whether the regression is only request classification or a deeper builder failure.
+
+- follow-up after re-checking the current source/binary against the newest `assert(0)` logs:
+  - verified:
+    - current source and current `bin/main.exe` both already contain the earlier fallback markers `builtin-battle-operate-fallback`, `strict_match_failed`, and `mock_battle_operate_response_fallback`.
+    - nevertheless, the newest logs still end at generic `unhandled_packet WT len=36 hdr=4/2 ... assert(0)` with no fallback marker in either `net_trace.log` or `net_packets.log`.
+    - this proves the problem is narrower than "binary not rebuilt": the final `4/2` request reaches `vm_net_mock_build_response()`, but the earlier battle-operate claimers still let it fall through to the unhandled exit.
+  - changed:
+    - added a header-level last-chance guard at the final `vm_net_mock_build_response()` exit: if top-level WT header is still `4/2`, dispatcher now calls `vm_net_mock_build_battle_operate_response_fallback()` immediately before `vm_net_log_unhandled_packet()`.
+    - new marker: `builtin-battle-operate-lastchance-fallback`.
+    - rebuilt with `make`; build passed.
+  - evidence:
+    - runtime: `bin/logs/net_trace.log` latest tail at `tick=175`; `bin/logs/net_packets.log` latest tail with `unhandled_packet WT len=36 hdr=4/2`.
+    - source: `src/main.c` final `vm_net_mock_build_response()` exit path.
+  - next:
+    - rerun one attack on this binary.
+    - first check for `builtin-battle-operate-lastchance-fallback`; if it appears, the immediate crash is solved and we can resume tracing the actual battle-round contract.
+    - if it still does not appear, the remaining explanation is that the user is launching a different executable/working tree than `E:\DevOs\CBE_EMU\bin\main.exe`.
+
+- follow-up after the next `assert(0)` logs and final-exit source audit:
+  - verified:
+    - the latest logs still ended in `unhandled_packet WT len=36 hdr=4/2 ... assert(0)`, even after adding the last-chance dispatcher branch.
+    - source audit explains why: the last-chance branch was calling `vm_net_mock_build_battle_operate_response_fallback()`, but that fallback still rejected the request unless `vm_net_mock_is_battle_operate_request_relaxed()` succeeded.
+    - therefore the true remaining blocker was not the final-exit branch itself; it was the fallback builder's own detector dependency.
+  - changed:
+    - `vm_net_mock_build_battle_operate_response_fallback()` now accepts header-level `WT kind/subtype = 4/2` as sufficient entry evidence when the relaxed object detector still fails.
+    - rebuilt with `make`; build passed, and `bin/main.exe` timestamp/size updated (`2026-06-12 20:18:03`, size `1944543`).
+  - evidence:
+    - runtime: `bin/logs/net_trace.log` latest `tick=417`; `bin/logs/net_packets.log` latest `assert(0)` tail.
+    - source: `src/main.c` fallback builder entry gate and final `vm_net_mock_build_response()` last-chance branch.
+  - next:
+    - rerun one attack on this exact binary.
+    - first confirm that `unhandled_packet WT len=36 hdr=4/2` disappears.
+    - then inspect whether the next marker is `builtin-battle-operate`, `builtin-battle-operate-fallback`, or `builtin-battle-operate-lastchance-fallback`.
+
+- follow-up after auditing the actual link artifact:
+  - verified:
+    - `obj/main.o` was updating, but the old `bin/main.exe` had stayed on the previous hash/content, which is why earlier reruns still lacked the newest marker strings even after successful-looking `make` output.
+    - moving `bin/main.exe` aside and linking again produced a genuinely new executable:
+      - new file: `bin/main.exe`, size `1946693`, timestamp `2026-06-12 20:23:59`
+      - previous file preserved as `bin/main_prev_link_issue.exe`, size `1946693`, timestamp `2026-06-12 20:23:21`
+      - new binary now contains marker strings `builtin-battle-operate-raw82`, `mock_battle_operate_response_raw82`, and `builtin-battle-operate-lastchance-fallback`.
+  - changed:
+    - preserved the pre-relink executable as `bin/main_prev_link_issue.exe` for evidence.
+    - forced a clean relink by renaming `bin/main.exe` away before rerunning `make`.
+  - evidence:
+    - host filesystem: `Get-Item bin/main.exe, bin/main_prev_link_issue.exe`
+    - binary-string check against `bin/main.exe`
+  - next:
+    - rerun one attack with the newly linked `bin/main.exe`.
+    - first expected improvement is disappearance of `unhandled_packet WT len=36 hdr=4/2`.
+
+- follow-up after re-reading the latest subtype-6 runtime with the corrected `sub_6EB0` getter-return PCs:
+  - verified:
+    - the old `sub_actioninfo_parser_actioninfo_read` / `actionnum_read` probes at Battle offsets `0x6ED8` and `0x6EFA` were pre-call markers, not true field-getter returns.
+    - existing runtime still exposes one durable clue from the continuous subtype-6 flow trace:
+      - at `0x05188EE2` (`off=0x6EE2`), immediately after the `actioninfo` getter call, Battle has `r0=05001C18` and `r1=0000000C`.
+      - at `0x05188EFE` (`off=0x6EFE`), immediately after the `actionnum` getter call, Battle has `r0=00000002`.
+    - this means the client is definitely not consuming the outer `actioninfo` value as a naked `42`-byte wire stream in `r0`; there is at least one intermediate object/pointer layer before the later `0x6F38/0x6F44/0x6F5A` byte reads.
+    - newer wrapper-head evidence from the same rerun:
+      - dump at `r0=05001C18` contains `0x0000002B` exactly matching current `actioninfoLen=43`.
+      - the same 96-byte head also ends with readable strings `action` and `task`.
+      - recursive pointer dumps now split the wrapper into two concrete layers:
+        - `head0_ptr=05001CF4` begins with ASCII `actioninfo\0`, followed by byte `01`, then the mock payload bytes.
+        - `head4_ptr=05001D00` begins directly with the payload bytes `00 02 01 01 ...`.
+      - this is strong evidence that the returned object carries both a named-field wrapper view and a payload-start view of the same `actioninfo` body.
+      - newest reader-object trace now resolves which layer Battle actually walks during the later header reads:
+        - at `header_type_read`, `header_actor_map`, and `header_subcount_read`, the live reader object is always `r5=020FFB0C`.
+        - that reader's word at `+0x08` is consistently `05001C18`, i.e. the wrapper root object itself, not `head4_ptr=05001D00`.
+        - the same reader's first dword advances `3 -> 6 -> 9` across the three header reads, while `blobObj/blobPtr` stay unresolved (`blobObj=0x18`, `blobPtr=0`).
+      - conclusion:
+        - `confirmed`: Battle is currently reading the wrapper-object view, not the payload-start view.
+        - therefore the stable `1 / 0 / 0` readback is caused by the wrapper-reader grammar, not by a wrong payload byte offset inside our `43`-byte raw stream.
+      - stronger callback-table recovery from the same reader dump:
+        - reader object `020FFB0C` contains callback slots already identified elsewhere in the repo:
+          - `+0x1C = 01033A87 -> stream_read_cstr_len16`
+          - `+0x20 = 01033A5D -> stream_read_i32_be_tagged`
+          - `+0x24 = 01033A3B -> stream_read_i16_be_tagged`
+          - `+0x28 = 01033AAD -> stream_read_i8_tagged`
+          - `+0x2C = 01033A1F -> stream_peek_i16_be`
+        - this matches subtype-6 static reads in `sub_6EB0` exactly:
+          - type / actor / subCount / child bytes use tagged `u8`
+          - child values and `effectId` use tagged `u32`
+          - the tail blob/string path uses `peek_i16_be` + `read_cstr_len16`
+      - protocol consequence:
+        - the old hand-written raw `43`-byte action stream is structurally wrong even if its logical values are right.
+        - `actioninfo` must be emitted as a tagged sequence stream, not as a bare byte-packed record array.
+      - strongest current interpretation is that `actioninfo` getter returns a callback-driven wrapper/reader object whose head stores payload length plus one or more named child descriptors, not a flat raw buffer.
+  - changed:
+    - `src/main.c` now adds trace-only probes at the true getter-return sites `0x05188EE2` and `0x05188EFE`.
+    - the new helper `vm_net_trace_battle_actioninfo_field_result_detail()` logs registers and dumps memory at both the returned pointer (`r0`) and the parser slot object (`r4`).
+    - `src/main.c` now also recursively dumps the first four pointer-like fields from that returned wrapper head when they point into packet/work memory (`>= 0x05000000`).
+    - `src/main.c` battle-operate subtype-6 builder now switches the inner `actioninfo` payload from the old hand-written raw bytes to the repository's tagged-sequence helpers (`vm_net_mock_seq_put_u8/u32/string`) while keeping the same two-record player/enemy round skeleton.
+    - rebuilt with `make`; build passed.
+  - evidence:
+    - runtime: `bin/logs/net_trace.log` latest subtype-6 flow windows at ticks `167` and `194`, especially PCs `0x05188EE2` / `0x05188EFE`.
+    - static/IDA: `mmBattleMstarWqvga.cbm` `sub_6EB0` at `0x6EDE..0x6EFE`.
+  - next:
+    - rerun one attack on this new tagged-sequence build.
+    - first check whether `header_type_read / header_actor_map / header_subcount_read` move away from the old `1 / 0 / 0` pattern.
+    - if they do, the next gate is whether subtype-6 finally reaches `0x7076 / 0x708A / 0x709C` instead of returning early at `0x6FC8`.
+
+- verified:
+  - latest manual run no longer crashes on attack. `4/7 + 4/8` is active at `tick=168`, and `sub_4B70_battle_apply_entry` is reached at `tick=169`.
+  - user-visible symptom now matches the latest logs: after attack, battle exits immediately and shows a blank prompt box.
+  - runtime confirms the immediate short follow-up request is still Battle-emitted `WT len=9 hdr=25/5`, and the old same-subtype reply is dispatched as `kind=25 subtype=5` before Battle falls back into `0x05182940` challenge/prompt selection.
+  - new static correction in main CBE:
+    - business dispatch jump table at `0x01012F4C` routes `kind=25` to handler `0x01010C5A`.
+    - `0x01010C5A` only has explicit subtype branches for `3`, `6`, and `12`; there is no direct main-CBE local branch for `subtype=5`.
+- changed:
+  - `src/main.c` now answers battle-only short `25/5` requests with `1/25/6 { result=1, count=1, msg="attack" }`.
+  - non-battle short `25/5` paths stay on the older parser-safe `1/25/5 { result=4 }` shell.
+- evidence:
+  - runtime: `bin/logs/net_packets.log` ticks `168..170`, `bin/logs/net_trace.log` ticks `161`, `169..171`.
+  - static: `江湖OL.CBE` `0x01012F4C`, `0x01010C5A..0x01010CCC`; `mmBattleMstarWqvga.cbm` `0x0518371A..0x0518377E`, `0x05182940`.
+- next:
+  - rerun one attack on this build.
+  - first check whether `kind=25 subtype=6` now fires in main dispatch and whether the old immediate `0x05182940` fallback disappears or changes shape.
+  - if battle still exits, keep the `25/6` result and continue narrowing the real post-`sub_4B70` contract versus the earlier `4/8.info` importer gap.
+
+- follow-up after the newest rerun on the `25/6` build:
+  - verified:
+    - the battle-only short reply experiment is active on wire: `bin/logs/net_packets.log` shows `tick=242 source=builtin-scene-default-event responseLen=51` with object `1/25/6 { result=1, count=1, msg="attack" }`.
+    - the queued response is then dispatched by the client as `kind=25 subtype=6` at `tick=243`.
+    - confirmed negative: this still does not keep combat local. Runtime immediately reaches `trace_followup_scan_enter`, `fallback_exit`, Battle fallback entry `0x051836CC`, and the same `trace_battle_challenge_source_branch ... pc=05182940/0518294A`.
+  - conclusion:
+    - `25/6` is parser-valid and reaches the dispatcher, but it is still battle-wrong for the post-attack continuation window.
+    - the current blocker has narrowed again: it is no longer “main CBE ignores 25/5”, but “even a handled `kind=25 subtype=6` object still does not create the battle-local continuation that prevents `0x05182940` fallback”.
+  - changed:
+    - added trace-only handler probes for main-CBE `kind=25` code at `0x010109EA`, `0x01010BE6`, `0x01010C5A`, and `0x01010CC6`, reusing `trace_business_handler`.
+  - evidence:
+    - runtime: `bin/logs/net_packets.log` ticks `242..243`; `bin/logs/net_trace.log` ticks `242..243`.
+    - static: `江湖OL.CBE` `0x010109EA`, `0x01010BE6`, `0x01010C5A`, `0x01010CC6`.
+  - next:
+    - rerun one attack with the new trace-only build.
+    - first confirm whether `kind=25 subtype=6` actually executes `0x01010BE6` or another `kind=25` local branch before fallback.
+    - if the local branch does run and still falls back, move focus back to `4/8.info -> actioninfo/actionnum` materialization rather than spending more iterations on `25/*`.
+
+- follow-up after inspecting the latest subtype-6 logs and trace code:
+  - verified:
+    - current runtime still proves the `4/6` importer front-half is alive:
+      - `mock_battle_operate_response response=4/6 actionnum=2 actioninfoLen=42 recordTypes=2,2 actorSlots=1,0`
+      - `trace_battle_kind4_subtype6_flow_start packet=0500189c`
+      - `trace_battle_actioninfo_parser_detail` then fires at `0x05188DD0`, `0x05188DF8`, `0x05188E1A`, and `0x05188E6E`.
+    - confirmed negative:
+      - in the same runs there is still no later `trace_battle_kind4_subtype6_flow` or `trace_battle_actioninfo_materialize_detail`.
+      - soon after the importer front-half, Battle reaches `sub_4304_clear_action_bytes_entry`, and local `actionBytes` remain `0,0,0,0,0,0`.
+    - static cross-check:
+      - IDA case-6 bridge in `sub_7BD0()` is `0x7F64..0x7F84`, with the actual branch into `sub_6EB0` at `0x7F76`.
+  - changed:
+    - `src/main.c` subtype-6 flow tracing is now kept alive until the next `0x7BD0` packet-family restart instead of being cleared by intermediate callbacks.
+    - added new trace-only marker `trace_battle_kind4_subtype6_bridge` for Battle offsets `0x7F64..0x7F84`.
+  - evidence:
+    - runtime: `bin/logs/net_trace.log` current `tick=201` and `tick=216` runs; `bin/logs/net_packets.log` current `response=4/6 actionnum=2`.
+    - static/IDA: `mmBattleMstarWqvga.cbm` `sub_7BD0` case-6 bridge `0x7F64..0x7F84`, `sub_6EB0` importer `0x6EB0..0x7104`.
+  - next:
+    - rerun one manual attack on this build.
+    - first check whether the new bridge/importer trace now shows `0x7F64 -> 0x7F76 -> 0x6EB0 ...`.
+    - if it still stops before `0x7076/0x708A/0x709C`, use the last observed Battle PC to decide whether the remaining gap is packet semantics (`effectId/blob/tails`) or another importer-side callback contract.
+
+- follow-up after the newest rerun with subtype-6 bridge/importer continuity:
+  - verified:
+    - the `4/6` path is now fully confirmed into `sub_6EB0`, not just into outer case-6.
+    - runtime evidence at `tick=199`:
+      - `trace_battle_kind4_subtype6_bridge pc=05189e96 off=7f76`
+      - importer then runs through `0x05188DD0..0x05188E7E`
+      - early return happens at `0x05188EE8` (`off=0x6FC8`) and control returns to outer `0x05189E9A`
+    - exact early-return reason:
+      - `0x05188E7A` (`off=0x6F5A`) reads `subCount` and gets `R0=0`
+      - `0x05188E7C/0x05188E7E` therefore takes `BLE loc_6FC8`
+      - Battle never reaches the later type-2 materialize region `0x05188F0E..0x0518909A`
+    - local-state consequence:
+      - the temporary local record is only `01 02 01 00 ...`
+      - `sub_45BA -> sub_455E -> sub_4304` then compacts it away and clears `actionBytes` back to all zeroes
+  - changed:
+    - `src/main.c` now switches `4/6.actioninfo` from `blob field` encoding to `raw field` encoding while keeping the same two-record type-2 payload bytes.
+  - evidence:
+    - runtime: `bin/logs/net_trace.log` current `tick=199` bridge/importer window and later `sub_45BA/sub_4304` action-table traces.
+    - static: `mmBattleMstarWqvga.cbm` `sub_6EB0` `0x05188F54..0x05188F62` (`subCount` validity gate) and `0x05188EE8` (`loc_6FC8` early return).
+    - comparative protocol evidence: existing confirmed raw-field requirement for nested stream payloads in `docs/re/protocol.md` (`6/13.tasktypes`).
+  - next:
+    - rerun one manual attack on the new raw-field build.
+    - first check whether `0x6F5A` now reads `subCount=1` instead of `0`.
+    - if yes, continue to `0x702E/0x7076/0x708A`; if not, the remaining mismatch is inside the inner record grammar itself rather than the outer field wrapper.
+
+- follow-up after the next manual run on the raw-field build:
+  - verified:
+    - user-visible progress: pressing attack now produces a real attack animation.
+    - latest packet evidence:
+      - `bin/logs/net_packets.log` battle-operate responses are now `responseLen=81` instead of `83`, which matches removing the old inner blob-length wrapper from `4/6.actioninfo`.
+    - latest runtime evidence:
+      - at `tick=249`, importer trace still enters the same `4/6 -> sub_7BD0 case6 -> sub_6EB0` chain.
+      - the first local action record is now `record=1,1,1,0`, and the shared action table dump begins `01 01 01 00 ...`.
+      - this differs from the old blob-field build, where the first record was `record=1,2,1,0`.
+  - conclusion:
+    - switching `actioninfo` from blob field to raw field was a real protocol fix, not just a parser-side cosmetic change.
+    - the client is now consuming the attack response closely enough to show visible action.
+    - remaining gap has moved forward to full round progression: enemy turn, HP/result application, and death/kill resolution.
+  - evidence:
+    - user report in-thread: “现在有攻击动作了”.
+    - runtime: `bin/logs/net_packets.log` latest `tick=177/216/248`; `bin/logs/net_trace.log` latest `tick=249` subtype-6 and local-action-table traces.
+  - next:
+    - use this raw-field attack-animation build as the new baseline.
+    - on the next rerun, focus on what request/response or local gate is missing immediately after the player attack so the monster turn and battle outcome can proceed.
+
+- follow-up after re-reading the latest attack-animation logs with IDA:
+  - verified:
+    - full round progression is still blocked inside the subtype-6 importer, even though the visible player attack now plays.
+    - runtime evidence from `bin/logs/net_trace.log` latest `tick=218`:
+      - `trace_battle_actioninfo_parser_detail label=type2_branch ... record=1,1,1,0`
+      - importer returns via `0x05188EE8` (`off=0x6FC8`) instead of reaching the later type-1/type-2 materialize callbacks at `0x05188F76/0x05188F8A/0x05188F9C`.
+    - corrected interpretation:
+      - the current mock no longer fails because of outer `blob` vs `raw`.
+      - it now fails because the Battle-visible inner record header still lands as `type=1, arg=1, subCount=0`, which is not enough to keep the round alive.
+  - changed:
+    - added new trace-only `src/main.c` probes at Battle offsets `0x6F38`, `0x6F44`, `0x6F5A`, `0x6F7E`, `0x6F86`, `0x6F8E`, and `0x6F96`.
+    - added `trace_battle_actioninfo_stream_read` to capture each header/child read result plus the live stream object words around `R4`.
+    - added `mock_battle_operate_actioninfo_payload` so the mock-side raw `actioninfo` bytes can be compared directly against the Battle-side stream-read trace.
+  - evidence:
+    - runtime: `bin/logs/net_packets.log` latest `tick=177/216`; `bin/logs/net_trace.log` latest `tick=218`.
+    - static/IDA: `mmBattleMstarWqvga.cbm` `sub_6EB0` offsets `0x6F32..0x6F5A` and `0x6F74..0x6F96`.
+  - next:
+    - rebuild this trace-only version and rerun one attack.
+    - compare `mock_battle_operate_actioninfo_payload` with `trace_battle_actioninfo_stream_read` to decide whether Battle is consuming a one-byte-shifted stream, a hidden wrapper, or simply a different header grammar than the current `{ type, actorSlot, subCount, ... }` hypothesis.
+
+- follow-up after the newest stream-read rerun:
+  - verified:
+    - the new stream-read probes strongly support a one-byte skew between the mock payload head and the bytes Battle treats as the first action-record header.
+    - packet/runtime evidence from the latest session:
+      - wire payload still begins `actioninfo=02 01 01 00 ...`.
+      - `trace_battle_actioninfo_stream_read label=header_type_read` at `tick=220/246` logs `r0=1`.
+      - `trace_battle_actioninfo_stream_read label=header_actor_map` then logs `r0=0`, and `label=header_subcount_read` logs `r0=0`.
+      - the same run still falls out through `0x05188EE8` immediately afterwards.
+    - corrected working model:
+      - Battle is not currently treating byte 0 of the mock `actioninfo` payload as the first record type byte.
+      - the most conservative next experiment is to prepend one inert byte before the existing two-record stream, so the client-visible first record becomes `02/01/01/...` without changing the rest of the payload grammar yet.
+  - changed:
+    - `src/main.c` subtype-6 mock now prepends one leading zero byte before the existing two-record `actioninfo` stream.
+    - `mock_battle_operate_actioninfo_payload` now uses direct host-byte logging instead of `uc_mem_read`, so the next rerun will include the exact bytes actually emitted by the mock builder.
+  - evidence:
+    - runtime: `bin/logs/net_packets.log` latest `tick=219/245`; `bin/logs/net_trace.log` latest `tick=220/246`.
+    - static/IDA: `mmBattleMstarWqvga.cbm` `sub_6EB0` header reads at `0x05188E58`, `0x05188E64`, and `0x05188E7A`.
+  - next:
+    - rebuild and rerun one attack.
+    - first check whether `trace_battle_actioninfo_stream_read` changes from `1/0/0` to `2/1/1`.
+    - if it does, continue into `0x05188F68..0x0518909C`; if it does not, the remaining mismatch is a richer wrapper than a single-byte skew.
+
+- follow-up after the one-byte-pad experiment:
+  - verified:
+    - the one-byte leading-pad experiment is a confirmed negative.
+    - latest wire payload is now `00 02 01 01 ...` (`responseLen=82`, `actioninfoLen=43`), but Battle still reads the same header values:
+      - `trace_battle_actioninfo_stream_read label=header_type_read ... r0=1`
+      - `label=header_actor_map ... r0=0`
+      - `label=header_subcount_read ... r0=0`
+    - the importer still exits through `0x05188EE8` immediately afterwards.
+  - conclusion:
+    - current mismatch is not a trivial byte offset in the emitted raw payload.
+    - the missing contract is upstream of the header bytes themselves: `actioninfo` is being rewrapped or decoded into a different internal reader state before `sub_6EB0` consumes it.
+  - changed:
+    - added trace-only wrapper-state dumps around Battle helper `sub_6D12` at offsets `0x6D12`, `0x6D20`, `0x6D4C`, `0x6D58`, and `0x6D6A`.
+    - new trace `trace_battle_actioninfo_wrapper_detail` records stack-local wrapper state plus reader vtable/function slots so the next rerun can answer what Battle thinks the imported `actioninfo` structure actually is.
+  - evidence:
+    - runtime: latest `bin/logs/net_packets.log` `tick=175/199`; latest `bin/logs/net_trace.log` `tick=176/200`.
+    - static/IDA: `mmBattleMstarWqvga.cbm` `sub_6D12` and `sub_6CE8`.
+  - next:
+    - rebuild and rerun one attack.
+    - inspect the new `trace_battle_actioninfo_wrapper_detail` lines first; only after we know that wrapper shape should we change the emitted `actioninfo` grammar again.
+
+- follow-up after the newest IDA-only static pass:
+  - verified:
+    - Battle.cbm `sub_7BD0()` case `kind=4 subtype=6` is the confirmed `actioninfo/actionnum` importer, not subtype-8.
+    - static evidence:
+      - `0x05189E84..0x05189F84` (`off=0x7F64..0x7F84`) checks `mode==2`, clears the scratch pointer at `R9+0x2868`, then calls `sub_6EB0(a1+0x0C, packetObj, parserObj, fighterIndex)` and finishes with `sub_259A(5)`.
+      - `sub_6EB0` (`0x05188DD0..0x05189038`) resolves outer fields `actioninfo` at `0x05188DF8` and `actionnum` at `0x05188E1A`.
+      - the same parser treats action type bytes `3/4` as the minimal branch: after header bytes at `0x05188E56..0x05188E9A`, kinds `3/4` skip the deeper variable-size payload branches at `0x05188EAA..0x0518900E`.
+    - corrected negative:
+      - the latest manual run with battle-only `25/6` still falls back through `0x05182940`, so `25/*` is no longer the best next target.
+  - changed:
+    - `src/main.c` no longer sends battle-only short `25/6`; short `25/5` is restored to the parser-safe same-subtype `1/25/5 { result=4 }`.
+    - `vm_net_mock_build_battle_operate_response()` is switched to a new minimal subtype-6 experiment:
+      - `1/4/6 { actionnum=1, actioninfo=<2 bytes> }`
+      - current `actioninfo` bytes are `{ type=3, actorSlot=request.index }`
+    - rationale:
+      - this is the narrowest static-path experiment that enters the real Battle action importer without reintroducing the subtype-7 `iteminfo` crash path or relying on the battle-wrong `25/*` continuation family.
+  - evidence:
+    - static/IDA: `mmBattleMstarWqvga.cbm` `0x05189E84..0x05189F84`, `0x05188DD0..0x05189038`.
+    - runtime negative for `25/6`: `bin/logs/net_packets.log` ticks `241..242`; `bin/logs/net_trace.log` ticks `178..179`.
+  - next:
+    - rerun one attack on the new `4/6` build.
+    - first check whether `trace_business_dispatch_item ... kind=4 subtype=6` appears and whether the existing `sub_actioninfo_parser_*` probes at offsets `0x6EB0/0x6ED8/0x6EFA/...` finally fire.
+    - if they do, recover the minimum type-1/type-2 payload needed for visible attack animation; if they do not, verify whether the outer field encoding of `actioninfo` itself is still wrong.
+
+- follow-up after the next manual run on the `4/6` build:
+  - verified:
+    - the new subtype-6 operate response does hit the real Battle action importer.
+    - runtime evidence:
+      - `bin/logs/net_packets.log` tick `215` shows `mock_battle_operate_response response=4/6 actionnum=1 actioninfoLen=2 actionType=3 actorSlot=1 len=43`.
+      - `bin/logs/net_trace.log` tick `216` then shows:
+        - `trace_business_dispatch_item ... kind=4 subtype=6`
+        - `sub_actioninfo_parser_entry` at `0x05188DD0`
+        - `sub_actioninfo_parser_actioninfo_read` at `0x05188DF8`
+        - `sub_actioninfo_parser_actionnum_read` at `0x05188E1A`
+        - `trace_battle_actioninfo_parser_detail label=type2_branch ... record=1,3,1,0`
+        - `sub_4B70_battle_apply_entry` and later `sub_4B70_send25_call`
+    - corrected interpretation:
+      - the importer path is alive now; the remaining problem is semantic, not reachability.
+      - despite using `type=3`, the parser currently still falls into the branch we labeled `type2_branch`, so that probe name is now likely an old offset-label mismatch rather than proof that wire `type=3` was ignored.
+    - new death-prompt evidence:
+      - the same run shows `trace_scene_message_request ... text=您已经死亡，是否进入商城购买复活石?` at tick `216`, immediately after the subtype-6 apply path.
+      - after the user clicks the prompt, the client emits a new short request `WT len=21 hdr=7/14 objs=1/7/14(result=2)`.
+      - before the fix this packet was unhandled and ended in `assert(0)`.
+  - changed:
+    - `src/main.c` now handles short `7/14` as a narrow echo response `builtin-battle-death-prompt-followup`.
+    - this is intentionally transport-only: it avoids server-side `assert(0)` without guessing the real mall / revive business response family yet.
+  - evidence:
+    - runtime: `bin/logs/net_packets.log` ticks `215..223` and trailing `WT len=21 hdr=7/14`; `bin/logs/net_trace.log` ticks `216..217`, especially `trace_scene_message_request` and `sub_actioninfo_parser_*`.
+    - static prompt source: main CBE `sub_103838A()` at `0x0103838A`, result `2` branch at `0x010384B4..0x010384CE`, callback `sub_10108F4()` at `0x010108F4`.
+  - next:
+    - rerun once more and click the same prompt again.
+    - first confirm the new `7/14` echo removes the mock-side assert.
+    - then inspect whether the client ignores the echo, loops the same prompt, or emits a second-stage request that reveals the real shop/revive contract.
+
+- follow-up after the newest rerun past the `7/14` echo:
+  - verified:
+    - the short `7/14(result=2)` prompt-click request is no longer the current blocker; the flow now advances to a second-stage one-object request `WT len=25 hdr=1/14 objs=1/1/14(actorId=0)`.
+    - before the new fix this exact packet was unhandled and ended in mock-side `assert(0)`.
+    - runtime evidence:
+      - `bin/logs/net_packets.log` shows `send_payload len=25 ... hdr=1/14 ... field actorId=0`, immediately followed by `unhandled_packet WT len=25 hdr=1/14 objs=1/1/14 count=1`.
+      - `bin/logs/net_trace.log` shows the send after `trace_scene_loading_callback_gate` at `0x01013BDC..0x01013C05`, with `send_call` / `unhandled_packet` on the same tick.
+    - raw binary evidence:
+      - `rg -a "actorId"` hits `bin/JHOnlineData/mmShopMstarWqvga.cbm`, which matches the preceding user-visible mall/revive prompt better than the main-CBE title/login `actorID` family.
+  - changed:
+    - `src/main.c` now adds a narrow `builtin-shop-actor-query14` handler.
+    - it matches only a single-object `1/1/14` request carrying field `actorId`, then returns a same-packet echo.
+  - evidence:
+    - runtime: `bin/logs/net_packets.log` latest tail; `bin/logs/net_trace.log` latest tail with `trace_scene_loading_callback_gate`.
+    - static/raw: `江湖OL.CBE` callback path `0x01013BDC..0x01013C05`; binary string scan `rg -a "actorId" bin/JHOnlineData/mmShopMstarWqvga.cbm`.
+  - next:
+    - rerun once on this build.
+    - first check whether the new `1/14` echo removes the server-side assert and exposes the next shop/revive request or response consumer.
+    - if the client now stalls or opens another module, switch from transport-only echo to recovering the real `1/14` response shape.
+
+- static follow-up after revisiting subtype-6 record semantics:
+  - verified:
+    - the old `4/6` experiment did prove that Battle.cbm consumes subtype `6`, but its inner `type=3` record is now confirmed to be battle-wrong for real attack flow.
+    - static evidence:
+      - `sub_6EB0()` at `0x05188DD0` compares `type` against `3` and `4` at `0x05188F4A..0x05188F52`.
+      - if `type==3/4`, control jumps straight to `0x0518902C` and skips the deeper callback path used by `type 1/2`.
+      - only non-`3/4` records continue through `0x05188F54..0x0518909A`, where Battle calls the action-materialization callback at `[R9+0x3450+0x24]+0x14`.
+    - runtime cross-check:
+      - the earlier line `trace_battle_actioninfo_parser_detail label=type2_branch ... record=1,3,1,0` was a trace-label mismatch, not a decoded `type=2`.
+      - the probe PC there is `0x05188E6E` / `off=0x6F4E`, which is exactly the `CMP type,#3` site.
+  - changed:
+    - `src/main.c` now replaces the old one-record `type=3` default with a new subtype-6 two-record round experiment.
+    - new default wire shape:
+      - `1/4/6 { actionnum=2, actioninfo=<raw stream> }`
+      - record 0: minimal `type=2` player-action candidate using `actorSlot=request.index`
+      - record 1: minimal `type=2` enemy-counteraction candidate using `actorSlot=0`
+      - both records currently keep one zeroed child tuple, `effectId=0`, zero-length blob, and zero tails to stay parser-safe while forcing the deeper `type 1/2` path.
+  - evidence:
+    - static: `mmBattleMstarWqvga.cbm` `0x05188F4A..0x0518909A`, especially callback site `0x05189028/0x0518909A`.
+    - runtime cross-check from the prior build: `bin/logs/net_trace.log` ticks `180/216`, probe `pc=05188E6E off=6F4E`, record dump `1,3,1,0`.
+  - next:
+    - rerun one battle attack on this build.
+    - first check whether `trace_battle_actioninfo_parser_detail` now shows `record=1,2,...` or equivalent non-`3/4` records and whether `sub_4B70` finally gets a nonzero `activeActionBlock`.
+    - if this still falls back, the next narrowing is no longer record `type`, but the semantics of the child tuple / `effectId` / blob tail for `type=2`.
+
+- follow-up after the newest static+runtime pass on the two-record `type=2` build:
+  - verified:
+    - the current wire format is active exactly as compiled: `bin/logs/net_packets.log` ticks `253`, `266`, and `282` each show `1/4/6 { actionnum=2, actioninfoLen=0x2C }` with two `type=2` records.
+    - Battle.cbm really sees `type=2`, not the old `type=3` short path:
+      - runtime `bin/logs/net_trace.log` tick `283` shows `trace_battle_actioninfo_parser_detail label=type2_branch ... record=1,2,1,0`.
+      - this corrects the older misleading probe label; the parser branch site is the real `CMP type,#3/#4` window at `0x05188E6E`.
+    - current negative remains semantic, not parser reachability:
+      - immediately after subtype-6 import, local action state still reaches `sub_45BA -> sub_455E -> sub_4304` with `actionBytes=0,0,0,0,0,0`, and battle still falls back instead of playing a normal round.
+    - newer IDA recovery narrows why:
+      - Battle.cbm `sub_6EB0` type-1/type-2 materialization paths (`0x05188EF6..0x05188F2A`, `0x05188F2E..0x05188F9A`) copy an effect/template selected by record `+0x5C` from `[R9+0x3450+0x40]` using stride `[R9+0x3450+0x18]`, then call callback `[ *(R9+0x3450+0x24) + 0x14 ]` with the copied 0x20-byte scratch template plus `record+0x10` subtarget bytes.
+  - changed:
+    - added trace-only subtype-6 materialization probes in `src/main.c` at Battle absolute PCs `0x05188F06`, `0x05188F1A`, `0x05188F76`, `0x05188F8A`, and `0x05188F9C`.
+    - new trace `trace_battle_actioninfo_materialize_detail` dumps:
+      - parsed record `type/actor/subCount/blobId/tails`
+      - battle effect stride/table pointer
+      - computed effect-template pointer
+      - callback owner/function
+      - scratch 0x20-byte template buffer and the parsed 0x64-byte record
+  - evidence:
+    - runtime: `bin/logs/net_packets.log` ticks `253/266/282`; `bin/logs/net_trace.log` tick `283` around `0x05188E6E`, `0x0518455E`, `0x051845BA`, `0x05184304`.
+    - static/IDA: `mmBattleMstarWqvga.cbm` `0x05188EF6..0x05188F2A`, `0x05188F2E..0x05188F9A`.
+  - correction after the next rerun:
+    - the first trace-only build did not emit any `trace_battle_actioninfo_materialize_detail` lines even though subtype-6 import still fired normally.
+    - root cause was subtler than the first correction note:
+      - the parser did reach type-2, but the previous probe points were still sitting on the earlier blob-copy stage, not on the later effect-template/callback stage.
+    - corrected runtime offsets are now:
+      - type 1: `0x7006`, `0x701A`, `0x702C`
+      - type 2: `0x7076`, `0x708A`, `0x709C`
+    - same pass also exposed an older probe-label drift:
+      - the previous `fallback_branch` runtime case reused `0x6FFA`, but the real type-not-`1/2` fallback body is at `0x70DA`.
+  - evidence:
+    - runtime negative: newest `bin/logs/net_trace.log` shows subtype-6 parser at ticks `171/186` and the usual `sub_45BA -> sub_4304` clear path, but no `trace_battle_actioninfo_materialize_detail`.
+    - static disassembly: `sub_6EB0` at `0x7032..0x709C` shows type-2 blob copy at `0x7056`, but effect-template copy and callback only begin at `0x7076`, `0x708A`, and `0x709C`; type-1 analog is `0x7006`, `0x701A`, `0x702C`.
+  - changed:
+    - added a continuous subtype-6 flow trace in `src/main.c` for Battle offsets `0x6EB0..0x7104`, keyed only when the current packet is `kind=4 subtype=6`.
+  - next:
+    - rerun once more and inspect `trace_battle_kind4_subtype6_flow`.
+    - goal is no longer “hope a single point fires”, but to prove the exact last PC reached after the parser sees `type=2`.
+  - next:
+    - rerun one attack on this trace-only build.
+    - first read the new `trace_battle_actioninfo_materialize_detail` lines to answer two concrete questions:
+      - whether `effectId=0` currently maps to an all-zero or empty template in the battle effect table
+      - whether the materialization callback leaves any nonzero bytes in the active action block before `sub_45BA/sub_4304` clear stage
+    - only after that, choose the next packet-side experiment for nonzero `effectId` and/or meaningful child tuple bytes.
+
 ## 2026-06-11 Battle operate subtype-8 action-info experiment
+
+- static follow-up after the safe-baseline rerun with no new subtype-7 traces:
+  - verified:
+    - the latest manual run stayed on the compiled safe default: `bin/logs/net_trace.log` shows `tick=200` attack request `WT len=36 hdr=4/2`, answered by `mock_battle_operate_response response=4/8 result=1 autorevive=1 ... len=60`.
+    - no `sub_743C_*` / `sub_7228_*` trace fired in that run, so the new item-loop guard probes were not exercised yet.
+    - deeper IDA reading of `sub_743C` + `sub_7228` narrows the crash precondition further:
+      - `sub_743C` initializes table base `R9+0x3D6C` before the item loop.
+      - `sub_7228` then tests `[tableBase+0x08]` and `[tableBase+0x0C]` before the bad third branch at `0x7258`.
+      - those two fields are computed earlier in `sub_743C` from status7 top-level state deltas, before `iteminfo` record processing reaches `sub_7228`.
+  - conclusion:
+    - the next best experiment is no longer “guess richer iteminfo first”.
+    - a narrower hypothesis is now testable: if subtype-7 top-level status fields make `[tableBase+0x08]` or `[tableBase+0x0C]` positive, Battle.cbm may bypass the `0x7258` crash even with the current minimal `iteminfo` shell.
+  - changed:
+    - `vm_net_mock_append_battle_status7_object()` now sends small positive delta candidates:
+      - `lastexp=1`
+      - `curexp=1`
+      - `persentexp=1`
+      - `gold=1`
+      - `level=2`
+    - `vm_net_mock_build_battle_operate_response()` is switched back to compiled attack-window composite `1/4/7 + 1/4/8`, now logged as `status7=positive_delta_experiment`.
+  - evidence:
+    - runtime baseline/no-subtype7: `bin/logs/net_trace.log` tick `200`.
+    - static/IDA: `sub_743C` at `0x743C`, especially `0x745A..0x754E`; `sub_7228` at `0x7248..0x725C`.
+  - next:
+    - rerun one attack on this build.
+    - first check whether `sub_7228_guard_byte_check` disappears and whether `trace_battle_status7_sub7228_detail` reports positive `[slot+0x08]` or `[slot+0x0C]`.
+
+- static follow-up on the newest attack-window crash:
+  - verified:
+    - the crash-site condition in Battle.cbm is now narrower than “somewhere in iteminfo”.
+    - IDA `sub_7228` at `0x7228` is only called from the subtype-7 path at `sub_7794` / `0x7A0C`.
+    - static guard at `0x7248..0x725C` is:
+      - `if ([slot+0x08] > 0 || [slot+0x0C] > 0 || *((slotIndex << 6) + slot + 0x9E) != 0) continue`
+      - otherwise control falls through `0x7258` and evaluates the third byte gate directly.
+    - the latest crash address from `bin/logs/stdout_trace.log` is still `pc=05189178`, which maps back to Battle.cbm offset `0x7258` using load base `0x05181F20`.
+  - conclusion:
+    - current attack-window subtype-7 failure is consistent with an item-record shell that leaves all three `sub_7228` liveness checks empty.
+    - the next useful rerun should capture which earlier `sub_7794` item-record fields are supposed to materialize `slot+0x08`, `slot+0x0C`, or `slot+0x9E`.
+  - changed:
+    - added trace-only probes around the subtype-7 item loop and guard:
+      - `sub_743C` item-record probes now log `recordDesc`, slot index, slot base, and slot fields around `+0x08/+0x0C/+0x64/+0x68/+0x9E`.
+      - new `sub_7228` probes at `0x7228`, `0x7258`, `0x7344`, and caller site `0x7A0C` log the exact guard-triplet inputs before the crash/no-crash branch.
+  - evidence:
+    - static/IDA: `mmBattleMstarWqvga.cbm` `sub_7228` at `0x7228`, `sub_7794` caller at `0x7A0C`.
+    - runtime crash mapping: `bin/logs/stdout_trace.log` latest session.
+  - next:
+    - rerun one attack with the new trace build.
+    - inspect `trace_battle_status7_item_record_detail` and `trace_battle_status7_sub7228_detail` to recover the minimum parser-surviving `iteminfo` record prefix.
+
+- follow-up after the newest attack-window `4/7+4/8` rerun:
+  - verified:
+    - the composite attack response does re-enter subtype-7 in the correct `mode==2` window, but it still hard-crashes in the `iteminfo` path.
+    - runtime evidence from `bin/logs/net_trace.log`:
+      - `tick=342` reaches `sub_7BD0_status7_result_check pc=05189f7c` with `r0=2`, then `sub_7BD0_before_status7_parser pc=05189f8c`, then `sub_743C_status7_entry pc=0518935c`.
+      - the same dispatch continues through `sub_743C_result_read pc=05189436`, `sub_743C_itemnum_read pc=05189498`, `sub_743C_iteminfo_read pc=051894b2`, `sub_743C_item_stream_init pc=051894c2`, and finally `sub_743C_crash_lastpc_candidate pc=0518952a`, followed by `sub_743C_item_loop_compare pc=051897e6`.
+    - crash evidence from `bin/logs/stdout_trace.log`:
+      - invalid access `地址无法访问:4255de5a`
+      - registers: `lr=5189931 pc=5189178 lastPc=5189178 r6=5001a60 r9=1050bd0`
+      - with Battle.cbm base `0x05181F20`, that maps to crash PC `0x05189178` inside the same subtype-7 `iteminfo` family.
+    - packet evidence from `bin/logs/net_packets.log`:
+      - attack request at `tick=341` is answered by `source=builtin-battle-operate responseLen=299`, i.e. the two-object `4/7 + 4/8` build.
+  - IDA evidence:
+    - `sub_743C` (`0x743C`) always reads `iteminfo` after `itemnum`, even before any `combatinfo` branch.
+    - `0x758C..0x75A2` resolves the `"iteminfo"` field and immediately calls the stream-init callback.
+    - `0x760A` only prepares loop-local pointers and branches to `0x78C6`, so the current crash is still in the early `iteminfo` importer family, not in later `combatinfo/info/fbs/fdata`.
+  - conclusion:
+    - attack-window subtype-7 remains the right research path for future `iteminfo` recovery, but it is not safe enough to ship as the default compiled behavior yet.
+    - default runtime should stay on the non-crashing subtype-8 baseline until we recover a parser-surviving `iteminfo` wrapper.
+  - changed:
+    - reverted `vm_net_mock_build_battle_operate_response()` default from composite `4/7 + 4/8` back to single-object `4/8 { result=1, autorevive=1, info=<12-byte blob> }`.
+  - evidence:
+    - runtime: `bin/logs/net_trace.log` tick `342`.
+    - crash: `bin/logs/stdout_trace.log` latest session.
+    - static/IDA: `mmBattleMstarWqvga.cbm` `sub_743C` at `0x743C`, especially `0x758C..0x75A2` and `0x760A -> 0x78C6`.
+  - next:
+    - keep the safe `4/8` default for manual runs.
+    - continue in IDA on `sub_743C`/`sub_7794` to recover the minimum parser-surviving `iteminfo` outer field before retrying subtype-7.
+
+- follow-up after the newest `tick=204..205` rerun:
+  - verified:
+    - the delayed battle-only `25/5 -> 4/7` experiment is parser-valid but battle-wrong for attack continuation.
+    - `bin/logs/net_trace.log` at `tick=205` shows `trace_battle_pool_probe label=sub_7BD0_status7_result_check pc=05189f7c` with `r0=00000000`, `r1=00000007`.
+    - static disassembly of `0x05189F7C..0x05189F90` shows `cmp r0,#2 ; bne 0x05189EA8 ; ... ; bl 0x0518935C`, so the latest delayed `4/7` never enters `sub_743C`; it returns at `0x05189EA8 -> 0x05189B18`.
+    - the same run then falls back into `trace_battle_challenge_source_branch` / `trace_prompt_hotspot_candidate`, matching the user-visible “退出战斗/空弹窗” family rather than an action importer path.
+  - conclusion:
+    - subtype-7 is only useful while Battle.cbm still has `mode==2`; once `sub_4B70` has already advanced state and the short `25/5` follow-up arrives, the subtype-7 gate sees `mode==0` and becomes a no-op.
+    - this explains the earlier split behavior:
+      - attack-window composite `4/7 + 4/8` could reach `sub_743C` and crash in `iteminfo`.
+      - delayed scene-default `4/7` does not crash, but also cannot progress combat.
+  - changed:
+    - reverted `vm_net_mock_build_scene_default_event_response()` to the safe same-subtype `1/25/5 { result=4 }` shell.
+    - restored `vm_net_mock_build_battle_operate_response()` default to a two-object attack-window experiment: `1/4/7 { ...status7 shell... } + 1/4/8 { result=1, autorevive=1, info=<12-byte blob> }`.
+  - evidence:
+    - runtime: `bin/logs/net_trace.log` ticks `204..205`; `bin/logs/net_packets.log` ticks `203..204`.
+    - static: `python tools/disasm_thumb.py --file bin/JHOnlineData/mmBattleMstarWqvga.cbm 0xA1 0x05181F20 0x05189F7C 32`.
+  - next:
+    - rerun one attack on the new build.
+    - focus on whether attack-window `4/7` now re-enters `sub_743C_itemnum_read/item_stream_init/item_record_*`; if it does, recover the first parser-surviving `iteminfo` record instead of changing `combatinfo` first.
+
+- follow-up after the newest `tick=164..166` rerun:
+  - confirmed runtime:
+    - attack request is still `WT len=36 hdr=4/2`, answered by `1/4/8 { result=1, autorevive=1, info=<12-byte blob> }`, and Battle still reaches `sub_4B70_battle_apply_entry` at `tick=165`.
+    - `sub_4B70` still does not have any populated shared action records: `trace_battle_local_action_state label=sub_4B70_battle_apply_entry ... actionBytes=1,1,0,0,0,0`, while `trace_battle_local_action_table ptr=010534f4` remains all zero bytes.
+    - the immediate follow-up wire request is still the Battle-emitted short `25/5` at `tick=165`, and the parser-safe fallback reply remains same-subtype `1/25/5 { result=4 }`.
+    - on the next dispatch (`tick=166`), Battle.cbm now clearly walks the first parsed shared record, reads `kind=0x19`, falls through the handled set, and then enters the challenge/prompt fallback path instead of a battle-local action path:
+      - `trace_battle_sub17ac_flow ... pc=0518372e ... r1=00000019`
+      - then `trace_battle_challenge_source_branch label=challenge_fallback_method_before/after pc=05182940/0518294A`
+      - followed by `trace_prompt_hotspot_candidate` and `trace_same_class_scene_table`
+    - this is the strongest current evidence that current post-attack `25/5` is battle-wrong semantically even though it is parser-safe globally; it is being interpreted as a scene/prompt continuation after the attack apply step.
+  - confirmed static:
+    - Battle.cbm `0x05183730..0x0518377E` only has explicit first-record handlers for kinds `4`, `0x1E`, `0x1C`, `0x1B`, `0x0E`, and `0x14`.
+    - record `kind=0x19` therefore falls through `0x0518382C -> 0x05183C10`, matching the runtime branch above.
+    - `sub_4B70` (`0x05184B70..0x05184DF4`) merges per-slot action/state blocks around `activeBlock+0x500/+0x520` and later emits `alloc_outgoing_game_event(25,5)` from `0x05184DAA..0x05184DC0`.
+  - changed:
+    - added trace-only helper `trace_battle_apply_detail` in `src/main.c`.
+    - it logs the `sub_4B70` apply/send window state: `localBase`, active slot, `activeBlock+0x500`, `activeBlock+0x520`, and nearby flag bytes (`localBase+0x0A/+0x0D`, `localBase+0x9B0+0x0B/+0x0C`, `activeBlock+0x500+0x0B/+0x0C`).
+    - hooked that helper at:
+      - `sub_4B70_battle_apply_entry` (`off=0x2C50`)
+      - `sub_4B70_send25_prepare` (`off=0x2E94`)
+      - `sub_4B70_send25_call` (`off=0x2EA0`)
+  - evidence:
+    - runtime: `bin/logs/net_packets.log` ticks `164..165`; `bin/logs/net_trace.log` ticks `165..166`.
+    - static: `python tools/disasm_thumb.py --file bin/JHOnlineData/mmBattleMstarWqvga.cbm 0xA1 0x05181F20 0x05183718 180`; `python tools/disasm_thumb.py --file bin/JHOnlineData/mmBattleMstarWqvga.cbm 0xA1 0x05181F20 0x05184B70 220`.
+  - next:
+    - rerun one attack with the new trace-only build.
+    - first inspect `trace_battle_apply_detail` at `sub_4B70_send25_prepare/call` to see whether `activeBlock+0x500/+0x520` is still empty or carries a partially materialized action structure.
+    - if those windows stay empty, continue upstream on `4/8.info`/`actioninfo` materialization instead of changing the post-attack `25/5` shell again.
+
+- follow-up after the next rerun with `trace_battle_apply_detail`:
+  - confirmed runtime:
+    - `sub_4B70_battle_apply_entry` at `tick=2840` still has `actionBytes=1,1,0,0,0,0`, and the old shared action table `010534f4` is still all zero bytes.
+    - however, the new apply traces show Battle-local merge windows are no longer empty:
+      - `trace_battle_apply_detail ... activeStageBlock=01053aac activeActionBlock=01053acc stateWindow=01053e98 flagsState=1,1 flagsStage=0,0`
+      - both `trace_battle_apply_stage_block` and `trace_battle_apply_action_block` contain stable nonzero structured bytes before the send.
+    - by `sub_4B70_send25_prepare/call`, the same `+0x500/+0x520` windows remain populated while `flagsState` drops to `0,0`.
+    - static `0x05184DA0..0x05184DA8` explains the send branch: `sub_4B70` sends `alloc_outgoing_game_event(25,5)` when either `[global+0x3D0+0x0A] == 1` or `[localBase+0x0A] == 1`; otherwise it falls back through `sub_51844BA(7)`.
+  - corrected interpretation:
+    - the current subtype-8 `info` blob is not a total no-op anymore.
+    - it does materialize Battle-local stage/action state, but that state still routes into a short follow-up event whose current same-subtype `kind=25` reply is battle-wrong.
+  - changed:
+    - added a battle-only mock experiment for empty short `25/5`.
+    - when the active screen is confirmed Battle.cbm by `vm_infer_battle_module_from_screen()`, `vm_net_mock_build_scene_default_event_response()` now returns single-object `1/4/7` via the existing battle status helper instead of same-subtype `1/25/5 { result=4 }`.
+    - non-battle `25/5` paths are unchanged.
+  - rationale:
+    - static `sub_17AC()` first-record dispatch explicitly handles `kind=4`, while the current `kind=25` continuation is already confirmed to fall through into `0x05182940` challenge/prompt fallback.
+  - evidence:
+    - runtime: `bin/logs/net_trace.log` tick `2840..2841`.
+    - static: `python tools/disasm_thumb.py --file bin/JHOnlineData/mmBattleMstarWqvga.cbm 0xA1 0x05181F20 0x05184D90 80`.
+  - next:
+    - rerun one attack on this battle-only `25/5 -> 4/7` build.
+    - first verify whether the short follow-up now enters `sub_17AC` as first-record `kind=4` instead of `kind=25`.
+    - if it still no-ops, compare the resulting `sub_743C`/`sub_7BD0` path against the already-populated `+0x500/+0x520` windows.
+
+- follow-up after the latest safe `25/5` rerun:
+  - confirmed runtime:
+    - battle fallback still re-enters `sub_17AC()` on `kind=25 subtype=5`, and the gate trace now shows `r4=010346e1`, `r6=01053408`, `ctx2c=01056150` at `0x0518370E/0x05183710`.
+    - by the compare site `0x05183710`, `r0` is already zero, so the run still takes the zero-return setup path and no visible attack action follows.
+    - the new container dump proves this is not an empty-parser case: `trace_shared_event_container label=battle_sub17ac_ctx2c ptr=01056150 totalLen=23 objectCount=1 entryCount=1 capacity=10 base=05001860`, and entry `0` is `major=1 kind=25 subtype=5 fieldCount=1 fieldBase=05001bd0`.
+    - corrected by the next rerun: `trace_battle_sub17ac_next_pc` proves the live path does continue from `0x05183718` into `0x05183E02`.
+    - the prior missing `trace_battle_sub17ac_loop_gate` was a probe-offset bug: Battle common-loop probes were still using stale offsets like `0x3E02`, while the actual offsets relative to loaded code base `0x05181F20` are `0x1EE2..0x1F23` and tail `0x1A9E`.
+  - confirmed static:
+    - Battle.cbm `0x051836D8..0x051836EE` loads callback `[globalObj+0x14]` and calls it as `callback(r0=[sb-0xCC+0x2C], r1=packetPtr, r2=0x0A, r3=0x12)`.
+    - the later block `0x0518371A..0x0518372E` iterates `0x58`-byte records from `[sb+0x2C]->0x18` and dispatches on `entry+0x04`.
+    - main CBE `0x01034714..0x01034778` is the shared `WT` parser, `0x0103477A..0x010347D2` initializes that parser container, and `0x010346B4..0x01034712` serializes it.
+  - changed:
+    - added trace-only `trace_shared_event_container` in `src/main.c`, triggered from `trace_battle_sub17ac_gate` when `ctx2c` is available.
+    - it logs `ctx2c` container `totalLen/objectCount/entryCount/base` plus the first four `0x58`-byte entries (`major/kind/subtype/fieldCount/fieldBase`) without altering guest memory or control flow.
+    - added another trace-only helper `trace_battle_sub17ac_loop_gate` at Battle offsets `0x05183E02/0x05183E04/0x05183E0A/0x05183E12` to log the common-loop `loopCtx`, `entryCount`, `entryBase`, and stack loop counter `[sp+0x538]`.
+    - added one more trace-only helper `trace_battle_sub17ac_next_pc`, armed at Battle offset `0x05183718`, to log the first actually executed PC after the static `b 0x05183E02` site.
+    - corrected the active trace window and loop-gate probes in `src/main.c` to use real Battle-relative offsets from base `0x05181F20`:
+      - common-loop block `0x1EE2..0x1F23`
+      - tail `0x1A9E`
+      - nonzero-branch gate points `0x18BA/0x18BC`
+  - evidence:
+    - runtime: reruns at ticks `3679` and `3726` show `trace_battle_sub17ac_next_pc from=05183718 next=05183e02 off=1ee2`.
+    - static: `python tools/disasm_thumb.py --file bin/JHOnlineData/mmBattleMstarWqvga.cbm 0xA1 0x05181F20 0x051836C0 80`; `python tools/disasm_thumb.py --file bin/CBE/江湖OL.cbe 0x0 0x01000000 0x01034580 220`.
+  - next:
+    - rerun once and inspect the corrected `trace_battle_sub17ac_loop_gate`.
+    - compare `entryCount` against stack loop counter `[sp+0x538]`.
+    - if `entryCount=1` and `loopIndex=0`, continue into the first record dispatch at `0x0518371A..`.
+
+- follow-up after the latest rerun with widened `25/12` trace:
+  - confirmed runtime negative:
+    - attack path still reaches `sub_4B70_battle_apply_entry` (`tick=230`, `lr=05189DB9`) and Battle.cbm still emits the immediate short `25/5` follow-up from `battle_send_operate_4_2_entry` (`tick=230`, `regs=...,00000019,00000005`).
+    - the mock answers that short request with generic `1/25/12 { result=4 }`, and the main dispatcher consumes it as `kind=25 subtype=12` at `tick=231`.
+    - before fallback even enters Battle.cbm, main runtime state is already `sceneResult=4` (`runtime_state label=pre_data_event ... sceneResult=4` and again `post_data_event ... sceneResult=4` on the same tick).
+    - fallback still re-enters Battle.cbm `sub_17AC()` and reaches `0x05183718`, but no `battle_event7_common_loop_entry_3E02`, `battle_event7_common_finish_3E1A`, `battle_event7_common_post_finish_3E34`, or `battle_event7_common_tail_39BE` marker fires.
+  - evidence:
+    - `bin/logs/net_trace.log` lines around `tick=231`: `trace_business_dispatch_item ... kind=25 subtype=12`, `runtime_state ... sceneResult=4`, `trace_battle_sub17ac_flow ... off=17ac..17f8`, then immediate return to scene/runtime ticks.
+    - static `0x051836F0..0x05183718` disassembly confirms the taken branch was the `r0==0` setup path ending in `b 0x05183E02`, so the absence of any later `0x3E02+` runtime marker means the global scene/info-banner consumer is the more important negative than the Battle.cbm local fallback itself.
+  - changed:
+    - default `builtin-scene-default-event` fallback in `src/main.c` now returns same-subtype `1/25/5 { result=4 }` instead of generic `1/25/12 { result=4 }`.
+  - rationale:
+    - repository evidence already confirms `1/25/5 { result=4 }` is parser-safe on the scene-resource-followup path.
+    - latest battle rerun shows the old `25/12 result=4` shell is battle-wrong because it correlates with main CBE `sceneResult=4` before Battle.cbm can continue local handling.
+  - next:
+    - rerun one attack on this build and verify whether the post-attack short request is now consumed without forcing `sceneResult=4`, and whether Battle.cbm emits another battle-local continuation instead of collapsing back to the scene loop.
+
+- follow-up after the first `1/25/5 { result=4 }` rerun:
+  - confirmed improvement:
+    - post-attack short request is now dispatched as `kind=25 subtype=5` at `tick=178`, not `25/12`.
+    - main runtime stays clean through that dispatch: `runtime_state label=pre_data_event ... sceneResult=0` and `post_data_event ... sceneResult=0`.
+    - this removes the previously confirmed global-clear side effect from generic `25/12 result=4`.
+  - confirmed remaining gap:
+    - despite staying parser-safe at main CBE level, the client still falls back into Battle.cbm `sub_17AC()` right after `kind=25 subtype=5`, then returns to the loading/widget loop without any visible attack action.
+    - evidence: `trace_business_dispatch_state label=fallback_exit ... tick=178`, immediately followed by `battle_event7_dispatch_entry_sub_17AC ... regs=05017bf0,00000017,...`, then only scene/runtime ticks and loading widget draws.
+  - changed:
+    - widened trace-only `trace_battle_sub17ac_flow` activation again so it also records `kind=25 subtype=5`, alongside subtype `2` and `12`.
+  - next:
+    - rerun one attack and inspect the new `trace_battle_sub17ac_flow_start ... kind=25 subtype=5` branch to recover whether Battle.cbm treats `25/5` as a no-op clear, a record loop, or the correct battle continuation family.
+
+- follow-up after the first `kind=25 subtype=5` branch trace:
+  - confirmed negative:
+    - post-attack `25/5` now has a direct Battle.cbm-local branch trace, and it matches the old `25/12` skeleton exactly.
+    - runtime evidence at `tick=174`: `trace_battle_sub17ac_flow_start ... kind=25 subtype=5`, then PCs run only through `0x051836CC..0x05183718`.
+    - there is still no `0x05183E02`, `0x05183E1A`, `0x05183E34`, or `0x051839BE` marker after that.
+  - static + runtime synthesis:
+    - `0x051836EE` is the callback gate. Static disassembly shows `blx r4`, then `cmp r0,#0`; `r0==0` takes the setup path `0x051836F6..0x05183718`, while nonzero would branch to `0x051837DA -> 0x05183E1A`.
+    - current subtype-5 runs always take the zero-return path, so the same-subtype `25/5 { result=4 }` shell is parser-safe but still semantically too empty for battle progress.
+  - changed:
+    - added one narrower trace-only hook in `src/main.c` for `sub_17AC` gate points `0x17EE/0x17F0/0x37DA/0x37DC`, logging callback-return context (`r4/r6/r7/sp` and `[r6+0x2c]`) as `trace_battle_sub17ac_gate`.
+  - next:
+    - rerun once more and inspect `trace_battle_sub17ac_gate` to recover what local callback/context Battle.cbm is using for this branch, then decide whether the missing contract is extra `25/5` fields or an entirely different response family after attack.
+
+- follow-up after static disassembly of the latest `25/12` continuation:
+  - confirmed static path:
+    - `python tools/disasm_thumb.py --file bin/JHOnlineData/mmBattleMstarWqvga.cbm 0xA1 0x05181F20 0x05183DE0 120`
+    - Battle.cbm `sub_17AC()` common worker continues from `0x05183DF2/0x05183DF4` into `0x05183E02`.
+    - `0x05183E02..0x05183E16` compares `[sb+0x2c]->0x10` against loop counter `[sp+0x538]`; if more entries exist it jumps back to `0x0518371A`, otherwise it falls through `0x05183E18 -> 0x05183E34 -> 0x051839BE`.
+    - this proves the currently observed `25/12` continuation does not return to the kind-4 dispatch block at `0x05182020`; it enters the same later record-loop/tail machinery used by the broader event-7 family.
+  - changed:
+    - widened trace-only `trace_battle_sub17ac_flow` coverage in `src/main.c` from only `0x17AC..0x1850` to also keep logging Battle.cbm offsets `0x05183E02..0x05183E43` and tail `0x051839BE`.
+    - added matching `trace_battle_pool_probe` markers for `battle_event7_common_loop_entry_3E02`, `battle_event7_common_finish_3E1A`, `battle_event7_common_post_finish_3E34`, and `battle_event7_common_tail_39BE`.
+  - next:
+    - rerun one attack and confirm whether the generic `25/12 result=4` path reaches `0x05183E18/0x05183E34/0x051839BE` as an empty-list cleanup, or loops back through `0x0518371A` with real records.
+
+- follow-up after the blob-wrapped subtype-8 rerun now visible in `bin/logs/net_trace.log` / `bin/logs/net_packets.log`:
+  - confirmed runtime sequence:
+    - `tick=272` attack request is still `WT len=36 hdr=4/2 objs=1/4/2`.
+    - blob-wrapped response is `tick=272 source=builtin-battle-operate responseLen=60`, raw `1/4/8 { result=1, autorevive=1, info=<blob 12 bytes> }`.
+    - Battle.cbm now returns non-zero `info` length at `0x05189D44..0x05189D48` (`r0=0x0c`, `r7=0x0c`), calls the copy site at `0x05189D78` with `r2=0x0c`, and the new write watcher records real writes into the staging buffer at `05017BD0`.
+    - subtype-8 then reaches `0x05189D82 -> 0x05189DB4`, and `sub_4B70_battle_apply_entry` is called from `lr=05189DB9`.
+  - confirmed copied payload state:
+    - `trace_battle_subtype8_info_dst_write` records three overlapping writes from `0x051929B4`, proving `0x05192930` is acting as the real copy helper on this path.
+    - post-copy destination bytes are still only the minimal payload, and `trace_battle_local_action_state label=sub_4B70_battle_apply_entry` remains `actionBytes=1,1,0,0,0,0`; there is still no `sub_actioninfo_parser_*`.
+  - new follow-up continuation evidence:
+    - immediately after `sub_4B70`, Battle.cbm itself queues `alloc_outgoing_game_event(25,5)` from `battle_send_operate_4_2_entry` at `0x05184A70` (`trace_battle_outgoing_request_source ... tick=273 regs=...,00000019,00000005`).
+    - the current mock answers that short request with generic `1/25/12 { result=4 }`.
+    - the response is consumed as `kind=25 subtype=12`, then fallback callback `051836CD` re-enters Battle.cbm `sub_17AC()` at `0x051836CC`.
+    - current `sub_17AC` flow trace was still filtered to `25/2`, so this rerun proves the next missing evidence target is Battle.cbm's `25/12` branch, not another guess at top-level subtype-8 gating.
+  - changed:
+    - widened trace-only `sub_17AC` event-7 flow capture in `src/main.c` from only `kind=25 subtype=2` to the full currently observed `kind=25` family, including `subtype=12`.
+  - next:
+    - rerun one more attack and inspect `trace_battle_sub17ac_flow_start ... kind=25 subtype=12` plus the subsequent `0x17AC..0x1850` path.
+    - if `25/12` exits through the same early tail as the old `25/2` negative, treat generic `25/12 result=4` as battle-wrong and recover the correct battle-local continuation family before changing payload semantics again.
+
+- follow-up after the latest manual rerun:
+  - confirmed runtime sequence from the newest subtype-8-only attack:
+    - `bin/logs/net_packets.log` shows `tick=563 source=builtin-battle-operate responseLen=58` for `WT len=36 hdr=4/2 objs=1/4/2`, still answered by single-object `1/4/8 { result=1, autorevive=1, info=<12 bytes> }`.
+    - `bin/logs/net_trace.log` at `tick=564` again reaches the subtype-8 success path through `0x05189D82 -> 0x05189DB4`, then `sub_4B70_battle_apply_entry ... lr=05189DB9`.
+    - immediately after that apply, the only follow-up wire traffic is the usual `25/5` scene-default event, then Battle.cbm remains in the loading/widget loop. There is still no `sub_actioninfo_parser_*`.
+  - corrected interpretation of the copied subtype-8 destination bytes:
+    - the current real destination dump is `trace_battle_kind4_subtype8_flow_info_dst ptr=05010cd8 len=16 ... hex=00400000652e6d69666c6f7765725374`.
+    - the matching source-side wrapper dump is `trace_battle_kind4_subtype8_flow_info_src_wrapper ptr=05001cf2 ... hex=000000000000000000016d3c030135410301634103017369646500d154d10001`.
+    - because the destination bytes do not match the raw 12-byte mock payload, `0x05192930` is now more strongly suspected to be a wrapper/object staging helper rather than a straight `memcpy`.
+  - changed:
+    - added trace-only subtype-8 staging-buffer write monitoring in `src/main.c`/`src/hookRam.c`.
+    - the new watcher arms on the real `R9+0x3450+0x30` destination and logs overlapping writes as `trace_battle_subtype8_info_dst_write`, including writer `pc/lr` and a fresh buffer dump.
+  - stronger follow-up after the next manual rerun:
+    - `0x05192930` is now statically confirmed as an ARM-mode memcpy/memmove helper, not a custom action parser.
+    - evidence:
+      - ARM disassembly at `0x05192930..0x05192A4C` shows the classic alignment/copy loop (`cmp r2,#3`, `ldrb/strb`, `ldm/stm`, tail-byte copy).
+      - runtime at `tick=384` shows Battle.cbm reaching `0x05189D78` with `r0=05010cd8`, `r1=05001cf2`, `r2=00000000`, then immediately returning to `0x05189D82`.
+      - the same tick emits `trace_battle_subtype8_info_dst_watch_arm`, but no `trace_battle_subtype8_info_dst_write`.
+    - corrected interpretation:
+      - the missing write is not because the destination watcher was too late.
+      - Battle.cbm's own `info` length getter path is returning zero before the copy: at `0x05189D44..0x05189D46`, `r0=0`, so local `r7` becomes `0`, which explains the later allocator request `len=1` and memcpy `len=0`.
+    - changed:
+      - switched `src/main.c::vm_net_mock_build_battle_operate_response()` to encode subtype-8 `info` with `vm_net_mock_put_object_blob()` instead of the previous raw-entry wrapper.
+    - rationale:
+      - current strongest hypothesis is that the old raw wrapper was enough for `[packet+0x40]("info")` to produce a non-null pointer, but not enough for `[packet+0x54]("info")` to return a non-zero length.
+  - next:
+    - rerun one more attack with the new blob-wrapped subtype-8 `info`.
+    - first check whether `0x05189D44..0x05189D46` now return a non-zero `info` length and whether `trace_battle_subtype8_info_dst_write` finally appears.
+    - only if length is still zero should the next step fall back to recovering a different outer wrapper grammar.
+
+## 2026-06-12 ASCII digits rendered too narrow
+
+- changed:
+  - corrected the first fix: ASCII now uses full-width glyph drawing but keeps half-width advance/measurement.
+  - `src/fontEngine.c::getFontCellWidth()` is restored to `fontWidth / 2` for layout.
+  - new `getFontAsciiDrawWidth()` returns full `fontWidth`, and ASCII draw path now uses it while still advancing by `getFontCellWidth()`.
+- verified:
+  - local font asset `bin/font_gb.uc3` header is `fontWidth=16`, `fontHeight=16`.
+  - glyph dump for ASCII digit `'1'` (`0x3100`) shows a real `16x16` bitmap cell, not a half-width `8x16` glyph.
+  - direct glyph bounds for `1/2/3/A/B/C/a/b/c` show centered narrow ink inside the 16px cell, which matches “full draw width, half advance” better than either “half draw” or “full advance”.
+- evidence:
+  - static asset read: `font_gb.uc3` header `(magic,16,16,6881)`.
+  - direct glyph dump for `0x3100` centers the stroke inside a `16`-pixel-wide cell.
+  - sampled ASCII ink widths are only `4..8px` inside the 16px cell.
+  - previous emulator behavior compressed ASCII draw/measure width to `8px`, matching the visibly squashed login input digits from the user screenshot.
+  - first attempted fix changed both draw and measure to `16px`, which removed squashing but created overly wide spacing and shifted later text/layout.
+- next:
+  - rebuild and ask for one rerun to visually confirm digits render fully while spacing/layout returns to normal.
+
+- follow-up after the next login-field rerun:
+  - confirmed regression:
+    - spacing/layout is back to normal with half-width advance restored, but the last ASCII digit is clipped on the right edge.
+    - this matches draw width and sync-rect width diverging: ASCII now draws as full-width bitmap cells while surrounding rect sync still uses logical half-width string measurement.
+  - changed:
+    - added `mesureStringRenderWidthWithGbkWidth()` to compute actual rendered pixel extent.
+    - `src/main.c::vm_lcd_draw_current_string()` and `vm_lcd_sync_string_to_vm()` now use render width for cache/VM sync rectangles, while `vm_lcd_measure_current_string()` remains the logical API/layout width.
+  - evidence:
+    - user screenshot after the previous fix shows final digit cut on the right while earlier digits are intact.
+    - code inspection before this fix showed both sync helpers using `vm_lcd_measure_current_string()`, which intentionally preserves half-width ASCII advance.
+  - next:
+    - rebuild and rerun once to verify the final ASCII digit is no longer clipped and spacing remains correct.
+
+- changed:
+  - `src/main.c::vm_net_mock_build_battle_operate_response()` is now compiled to a new minimal non-empty subtype-8 experiment instead of the prior safe `4/9` baseline.
+  - current wire response candidate is `1/4/8 { result=1, autorevive=1, info=<12 raw bytes> }`, with only `info[0x0B] = 1`.
+- evidence:
+  - latest runtime trace disproves the earlier assumption that the first subtype-8 field read there was `result`.
+  - `trace_battle_kind4_subtype8_flow` at tick `272` shows `0x05189D1A..0x05189D22` loading string target `0x05189AA8`; module bytes at that address decode to `autorevive`, not `result`.
+  - in the same run, callback return at `0x05189D24` is `r0=0`, `0x05189D2E` writes `0` into `R9+0x3450+0x0B`, and control falls directly to `0x05189DBC`, so the earlier `info[0x0B]=1` hypothesis was not even reached.
+  - static Battle.cbm disassembly still shows that once `autorevive==1`, subtype-8 copies raw `info` bytes verbatim into `sb+0x30`, and the later branch at `0x05189D7C` checks copied byte `*(sb+0x30+0x0B)`.
+- next:
+  - rerun manually and confirm whether adding `autorevive=1` is enough to move subtype-8 past `0x05189D24` and into the `info` copy window `0x05189D32..0x05189D78`.
+  - if the client still flees or crashes after that, treat `autorevive == 1` and byte `+0x0B == 1` as necessary but still insufficient, and continue recovering the missing wrapper/importer format.
+
+- static follow-up after the latest importer pass:
+  - Battle.cbm `sub_743C` subtype-7 path now looks much more relevant to action materialization than before.
+  - evidence from corrected file-offset static disassembly:
+    - `0x05189930..0x05189A84` reads string keys `autorevive` (`0x05189AA8`), `info` (`0x05189AB8`), `fbs` (`0x05189AE4`), and `fdata` (`0x05189AE8`) under the `combatinfo` family headed by string `combatinfo` at `0x05189A94`.
+    - `0x05189930..0x05189956` writes `R9+0x3450+0x0B`, then calls the same `[battleState+0x400]+0x30` object-method family that subtype-8 uses for its staging buffer at `R9+0x3450+0x30`.
+    - the same handler then separately reads `info` ptr/len (`0x05189958..0x05189982`), `fbs` ptr/len (`0x051899C8..0x05189A10`), and `fdata` ptr/len (`0x05189A20..0x05189A46`).
+  - changed:
+    - added trace-only `trace_battle_status7_combatinfo_detail` in `src/main.c`.
+    - hooked Battle.cbm offsets `0x78F0`, `0x7908`, `0x7A10`, `0x7A38`, `0x7A42`, `0x7A56`, `0x7AA8`, `0x7AB2`, `0x7B00`, and `0x7B0A` so the next rerun records parser state plus `R9+0x3450+0x30/+0x34/+0x38` staging buffers without changing guest logic.
+  - conclusion:
+    - stronger `hypothesis`: real attack animation may depend on subtype-7 `combatinfo` side data, or a composite `4/8 + 4/7` response family, not subtype-8 alone.
+    - current runtime still supports this narrowing: in all successful subtype-8-only attack sessions, no `hdr=4/7` packet and no `sub_743C_*` trace appears, while the shared local `0x64` action table remains zero at `sub_4B70`.
+  - next:
+    - rerun once with the new trace-only build.
+    - if no subtype-7 path fires, prioritize a parser-safe composite attack-response experiment next instead of continuing to mutate subtype-8 `info` in isolation.
+
+- follow-up after the newest rerun:
+  - confirmed negative from fresh runtime evidence:
+    - latest attack session reaches the known subtype-8 success path again: `mock_battle_operate_response ... response=4/8 ... len=58`, then `sub_4B70_battle_apply_entry ... lr=05189DB9` at tick `1094`.
+    - the same session still shows no `sub_743C_*` and no `trace_battle_status7_combatinfo_detail`.
+    - packet evidence also stays single-object: latest operate exchange is still only `WT len=36 hdr=4/2 objs=1/4/2` answered by one-object `4/8`.
+    - `trace_battle_local_action_table ptr=010534f4` remains all zero bytes at the same `sub_4B70` success entry.
+  - conclusion:
+    - confirmed: the client is not receiving subtype-7 at all on the current attack path, so the missing importer is not coming from a hidden already-sent `4/7`.
+    - strongest next step is no longer “wait for subtype-7 traces”; it is to deliberately test a parser-safe composite `4/7 + 4/8` operate response.
+  - changed:
+    - `src/main.c::vm_net_mock_build_battle_operate_response()` now emits a two-object WT packet for attack:
+      - existing parser-safe `4/7` status7 object first
+      - existing subtype-8 success object `4/8 { result=1, autorevive=1, info=<12 bytes> }` second
+    - this remains a pure server-response experiment; no Battle.cbm globals or guest control flow are patched.
+  - next:
+    - rerun manually and inspect whether the next attack finally produces `sub_743C_*`, `trace_battle_status7_combatinfo_detail`, or `trace_battle_actioninfo_parser_detail`.
+    - if composite `4/7 + 4/8` still leaves the action table empty, the next experiment should shift from object presence to `combatinfo/info/fbs/fdata` payload content.
+
+- follow-up after the newest rerun:
+  - confirmed negative: the compiled composite `4/7 + 4/8` attack response now reproduces the old subtype-7 crash on the battle-operate path.
+  - packet evidence from `bin/logs/net_packets.log`:
+    - attack request remains `tick=195`, `WT len=36 hdr=4/2 objs=1/4/2`.
+    - mock response is now `tick=195 source=builtin-battle-operate responseLen=297`, i.e. the intended two-object `4/7 + 4/8` packet.
+  - runtime evidence from `bin/logs/net_trace.log`:
+    - the same dispatch reaches `sub_743C_status7_entry`, then `sub_743C_result_read`, `sub_743C_itemnum_read`, `sub_743C_iteminfo_read`, `sub_743C_item_stream_init`, and `sub_743C_crash_lastpc_candidate`.
+    - there is still no `trace_battle_status7_combatinfo_detail`; the crash happens before the later `combatinfo/info/fbs/fdata` window.
+  - stdout evidence:
+    - invalid access is again `地址无法访问:4255de5a type:0 size:19 value:1`.
+    - registers show `pc=05189178`, `lastPc=05189178`, `lr=05189931`, `r9=01050bd0`.
+    - with Battle.cbm base `0x05181F20`, that maps to offset `0x7258`, consistent with the old subtype-7 `iteminfo` stream crash family.
+  - static follow-up:
+    - corrected disassembly of `0x05189470..0x051894C2` shows subtype-7 reads `itemnum`, then still proceeds into `iteminfo` pointer/length fetch and stream initialization.
+    - therefore current empty subtype-7 shell is unsafe even when `itemnum=0`; the next missing contract is earlier than `combatinfo`.
+  - changed:
+    - reverted compiled default in `src/main.c::vm_net_mock_build_battle_operate_response()` back to safe `1/4/9 { result=1 }`.
+  - next:
+    - keep manual battle flow on safe `4/9` while recovering a valid minimal subtype-7 `iteminfo` wrapper offline.
+    - only retry subtype-7 after we have evidence for an `iteminfo` stream that survives `sub_743C` entry.
+
+- static follow-up on subtype-7 `iteminfo` loop:
+  - ownership correction:
+    - helper `0x05188C32..0x05188CD4` is not on the subtype-7 `iteminfo` path after all.
+    - corrected control-flow from `0x05188DD0` shows it is called immediately before named-field reads `actioninfo` and `actionnum`, so it belongs to the action importer front-half.
+  - recovered wrapper shape:
+    - helper first fetches a named field into a local wrapper object.
+    - wrapper callback slot `+0x28` returns a count.
+    - wrapper slots `+0x24` and `+0x20` are then consumed as `ptr/len` pairs and passed into another callback at `[global+0x54]`.
+  - conclusion:
+    - corrected interpretation: this outer wrapper hypothesis now belongs to `actioninfo`, not subtype-7 `iteminfo`.
+  - corrected disassembly of `0x05188E30..0x05189024` now recovers a much more concrete `actioninfo` record layout than the earlier “u8/u32/blob” shorthand:
+    - each record lives in a local `0x64`-byte slot chosen by the first free `slot[0] == 0`.
+    - bytes `+1/+2/+3` are early tagged `u8` fields, where `+3` is a child-count loop bound.
+    - child entries begin at local `+0x14` and step by `0x0C`, each storing two tagged `u8` values and two tagged `u32` values.
+    - when `recordType(+1) == 1`, the parser also fills dword `+0x5C`, blob area `+4`, and tail bytes `+0x60..+0x62`.
+    - when `recordType(+1) == 2`, it fills the same `+0x5C`, blob, and tail area, then conditionally decrements a countdown and may call `[global+0x78]`.
+    - other types still mark the slot used but zero `+4..+0x0F` and store sentinel values `+0x5C = 0xFFFFFFFF`, `+0x60 = 0xFF`, `+0x61 = 0`, `+0x62 = 0xFF`.
+  - corrected disassembly of `0x05189534..0x051897DC` shows `sub_743C` iterates `itemnum` records into a local table near `R9+0x2090 + slot*0x40`; it is not a trivial optional blob gate.
+  - recovered partial record shape:
+    - common front-half consumes a `u32` match key, then `u8/u32/blob/u8`-style getters and writes local slot fields near `+0x9E`, `+0x64`, `+0x6C`, and `+0x9F`.
+    - type `1` takes a richer branch with another blob/string getter, threshold check against `0x3E8`, and a callback via `[global+0x980+0x2C]`.
+    - non-type-1 branch still consumes more getters, with a special type `3` accumulation into slot field `+0x68`.
+    - even the non-match branch still eats several getters and may callback when a later `u8 == 1`.
+  - conclusion:
+    - stronger evidence that `itemnum=0` plus empty `iteminfo` is not enough for a future safe subtype-7 shell.
+  - changed:
+    - added trace-only wrapper probes at Battle.cbm offsets `0x6D12`, `0x6D20`, `0x6D4C`, `0x6D58`, and `0x6D6A`, now labeled for the `actioninfo` wrapper helper.
+    - added trace-only `actioninfo` parser branch probes at offsets `0x6E6A`, `0x6E74`, `0x6ED4`, `0x6F4E`, and `0x6FFA`.
+    - expanded `trace_battle_actioninfo_parser_detail` to dump record bytes `+0x14/+0x15/+0x16`, dwords `+0x18/+0x1C/+0x5C`, and tail bytes `+0x60/+0x61/+0x62`.
+    - added trace-only Battle.cbm item-loop probes at offsets `0x7614`, `0x7638`, `0x766E`, `0x7676`, `0x76DE`, `0x771C`, and `0x7778`.
+    - expanded `trace_battle_pool_probe` to log `sp+0x14`, `sp+0x160`, `sp+0x170`, current item-slot index byte, and per-slot values near `R9+0x2090 + slot*0x40 + {0x64,0x68,0x6C,0x9E,0x9F}`.
+  - next:
+    - keep default on safe `4/9`.
+    - when subtype-7 is retried, use the new item-loop traces to recover the first parser-surviving `iteminfo` record instead of guessing `combatinfo` payloads first.
+    - when subtype-8 is retried, use the new `actioninfo` branch traces to distinguish whether the candidate `4/8.info` reaches a type-1/type-2 record or falls straight into the importer fallback branch.
+
+- follow-up after the newest rerun:
+  - confirmed breakthrough: subtype-8 no longer falls back once `autorevive=1` is present.
+  - packet evidence from `bin/logs/net_packets.log`:
+    - attack request is unchanged: `tick=167`, `WT len=36 hdr=4/2 objs=1/4/2`.
+    - mock response is now `tick=167 source=builtin-battle-operate responseLen=58`, `hex=5754003a0101040800003506726573756c7400030001010a6175746f726576697665000300010104696e666f000c000000000000000000000001`, i.e. `1/4/8 { result=1, autorevive=1, info=<12 bytes> }`.
+  - runtime evidence from `bin/logs/net_trace.log`:
+    - `trace_battle_kind4_subtype8_flow` passes through `0x05189D32..0x05189D78`.
+    - `trace_battle_operate_subtype8_detail label=apply_gate_check pc=05189d82` fires, so execution has already crossed the old fallback split.
+    - `trace_battle_pool_probe label=sub_7BD0_subtype8_apply_call pc=05189db4` fires.
+    - `sub_4B70_battle_apply_entry` now arrives with `lr=05189DB9`, which is the desired success caller after `0x05189DB4`, not fallback `0x05189E25`.
+    - `trace_battle_module_state` at that entry reports `autoRevive=1`.
+  - conclusion:
+    - confirmed: the top-level contract for entering the real subtype-8 apply branch is `autorevive=1`.
+    - superseded hypothesis: `info[0x0B]=1` is no longer proven to be the branch gate; it may still matter downstream, but it is not needed just to reach `0x05189D82 -> 0x05189DB4`.
+  - next:
+    - continue from the success-path aftermath instead of the old branch gate.
+    - inspect what visible battle state or follow-up parser/importer is still missing after `sub_5184B70`, especially since there is still no `trace_battle_actioninfo_parser_detail`.
+
+- static follow-up on importer-adjacent helpers:
+  - `0x05188CDC` runs before `0x05188DD0` and does another object-method based pass over the same parser family. It reads through callback slots like `[obj+0x28]` / `[obj+0x20]`, then writes matched values into per-fighter state blocks in the `+0x500` region.
+  - separate local helpers at `0x051892B0` and `0x0518935C` merge/move fixed-size local records (`0x40`-byte stepping, comparisons on `[record+0x64]`, byte accumulation at `[+0x0E]`), which look like already-materialized battle/action state rather than raw network field decoding.
+  - conclusion:
+    - stronger evidence that subtype-8 `info -> sb+0x30` is only an early staging step.
+    - the later local tables consumed around `0x0518455E/0x05184B70/0x051892B0` are structurally different from the raw copied blob, so `4/8.info` likely needs either an embedded object wrapper or an additional importer stage before those tables exist.
+
+- static follow-up on subtype-8 copy semantics:
+  - disassembly of `0x05189D16..0x05189E24` tightens the `4/8.info` boundary.
+  - after `result==1`, Battle.cbm reads raw field `info` pointer/length, stores `srcPtr` at `sp+8`, keeps `srcLen` in `r7`, prepares destination `sb+0x30`, and then copies exactly `srcLen` bytes into that destination.
+  - the decisive gate at `0x05189D7C` checks destination byte `*(sb+0x30+0x0B)`, not the original source pointer directly.
+  - conclusion:
+    - empty `info` fails because the copied destination buffer leaves byte `+0x0B` at `0`.
+    - this strengthens the working hypothesis that `4/8.info` needs at least a small structured header/wrapper before any deeper `actioninfo/actionnum` import can happen.
+
+- static follow-up on local action-table consumers:
+  - `0x0518455E` is not a network parser. It compacts occupied `0x64`-byte action records upward and copies one subrecord byte (`slot+0x15`) into a small local state byte near `sb-0x0f+1`.
+  - `0x051845BA` immediately calls that helper on `sb+0x0C`, resets local battle-state bytes (`+0x0E/+0x05/+0x06`), sets a flag at `sb+0x9B0+8`, calls `0x05184304`, conditionally mirrors gate state into `sb+3/+4`, and decrements per-fighter countdown bytes across 6 fighter slots.
+  - `0x05184B70` then consumes that local state and active fighter slot data to update per-fighter coordinate/state fields in the `+0x500` region before later render work.
+  - conclusion:
+    - stronger evidence that `0x05188DD0` is the real “stream -> action table” importer, while `0x0518455E/0x051845BA/0x05184B70` are later local consumers of the already-parsed table.
+    - this pushes the unresolved contract boundary back toward the missing importer input shape for `4/8.info`, not the later animation-state helpers themselves.
+
+- follow-up after the newest success-path rerun:
+  - packet evidence from `bin/logs/net_packets.log`:
+    - latest complete battle session reaches `tick=184 source=builtin-battle-operate responseLen=58`, still `1/4/8 { result=1, autorevive=1, info=<12 bytes> }`.
+  - runtime evidence from `bin/logs/net_trace.log`:
+    - subtype-8 again reaches `trace_battle_operate_subtype8_detail label=apply_gate_check pc=05189d82`, then `trace_battle_operate_subtype8_detail label=apply_call pc=05189db4`, then `sub_4B70_battle_apply_entry ... lr=05189DB9`.
+    - `trace_battle_module_data_write ... pc=05189d2e ... writeAddr=0105402b raw=00000001` proves this build now sets `R9+0x3450+0x0B` to `1` on the success path.
+    - there is still no `trace_battle_actioninfo_parser_detail` anywhere in the same session after that apply call.
+    - visible post-attack traffic is only the usual `tick=185 source=builtin-scene-default-event` and later `2/1 moveinfo` ack; no extra battle-action WT request appears.
+  - conclusion:
+    - confirmed repeat: the current mock already reaches the real subtype-8 apply branch and is no longer blocked at the top-level `4/8` gate.
+    - confirmed current gap: the missing contract is now downstream of `sub_5184B70`, or inside the semantic contents of `info`, because the action importer still never emits `trace_battle_actioninfo_parser_detail`.
+  - changed:
+    - added trace-only local action-state probes at Battle.cbm `0x05184304`, `0x0518455E`, `0x051845BA`, and `0x05184B70`.
+    - new log families are `trace_battle_local_action_state`, `trace_battle_local_action_head`, `trace_battle_local_action_table`, `trace_battle_local_action_active_block`, and `trace_battle_local_action_active_action_block`.
+  - next:
+    - rerun manually once more and inspect whether `sb+0x2918+0x0C` ever contains non-empty `0x64`-byte action records after the subtype-8 apply call.
+    - if that table stays empty, focus next on reconstructing the missing `info -> action table` importer wrapper rather than the later `sub_45BA/sub_4B70` consumers.
+
+- follow-up after the newest local-action-state rerun:
+  - packet evidence from `bin/logs/net_packets.log`:
+    - latest battle session reaches `tick=180 source=builtin-battle-operate responseLen=58`, still `1/4/8 { result=1, autorevive=1, info=<12 bytes> }`.
+  - runtime evidence from `bin/logs/net_trace.log`:
+    - success path is stable again: `trace_battle_operate_subtype8_detail label=apply_gate_check pc=05189d82`, then `label=apply_call pc=05189db4`, then `sub_4B70_battle_apply_entry ... lr=05189DB9`.
+    - new local-state traces show `trace_battle_local_action_state label=sub_4304_clear_action_bytes_entry` both on an earlier battle path (`tick=135`) and immediately inside the subtype-8 success branch (`tick=181`).
+    - in both of those traces, `trace_battle_local_action_table ptr=010534f4 len=128` is all zero bytes.
+    - the same remains true at `trace_battle_local_action_state label=sub_4B70_battle_apply_entry` (`tick=181`): `sb+0x2918+0x0C` is still all zero bytes even though `actionBytes=1,1,0,0,0,0` and `autoRevive=1`.
+    - `trace_battle_local_action_active_block` is also all zeroes at `sub_4B70` entry.
+    - only `trace_battle_local_action_active_action_block` contains non-zero data, and its bytes match the already-known per-fighter battle payload shape (`10001`, `80/80`, `20/20`, name bytes), not parsed `0x64`-byte action records.
+    - there is still no `trace_battle_actioninfo_parser_detail`, and there is still no `trace_battle_local_action_state label=sub_45ba_*` or `label=sub_455e_*` in this rerun.
+  - conclusion:
+    - confirmed repeat: by the time subtype-8 reaches `sub_4B70`, the shared local action table at `sb+0x2918+0x0C` has not been populated at all.
+    - stronger evidence that the missing contract is upstream of `sub_45BA/sub_455E/sub_4B70`: the importer/front-half that should materialize `0x64`-byte action records is still not being triggered by the current `4/8.info`.
+  - next:
+    - shift the next probe focus earlier, toward the path that is supposed to build the `sb+0x2918+0x0C` table before `sub_45BA/sub_455E` ever become relevant.
+    - keep treating the current minimal `4/8.info` as only a top-level gate satisfier, not a semantic action stream.
+
+- static/runtime correction on subtype-8 destination ownership:
+  - corrected static evidence:
+    - Battle.cbm `0x05189D50..0x05189D78` does not copy `info` into `parserObj+0x30`.
+    - `0x05189D52` calls main-CBE callback `0x0100E255`, which clears the pointer slot passed in `r0 = R9+0x3450+0x30`.
+    - `0x05189D64` then calls `0x0100EA9D`, which allocates a new `len+1` buffer into that same slot when null.
+    - only after that does `0x05189D76..0x05189D78` call `0x05192930` with destination `*(R9+0x3450+0x30)`, source `info`, length `srcLen`.
+  - corrected interpretation:
+    - the old repeated dump `parserObj+0x30 = 01018089` is a different object field and not the real raw `4/8.info` destination.
+    - this explains why the prior fixed 96-byte dump looked like code/callback data and never changed with different subtype-8 attempts.
+  - changed:
+    - trace-only `src/main.c` now logs the real buffer as `trace_battle_operate_subtype8_info_dst` and `trace_battle_kind4_subtype8_flow_info_dst`, while keeping the older object-field dump for comparison.
+  - next:
+    - rerun a real subtype-8 session and inspect `*(R9+0x3450+0x30)` directly.
+    - use that real copied blob, not `01018089`, to recover the minimal non-empty `4/8.info` grammar that can drive the missing importer.
+
+- follow-up after the newest safe-baseline rerun:
+  - confirmed from fresh logs:
+    - the newest manual run still stayed on the compiled safe baseline, so the new real-destination trace did not fire.
+    - latest attack packet remains `WT len=36 hdr=4/2 objs=1/4/2`, answered at `tick=466` by `mock_battle_operate_response response=4/9 result=1`.
+    - runtime again reaches subtype-9 gate and returns with unchanged gate bytes `2,0,0,0,0`; there is still no fresh `trace_battle_operate_subtype8_info_dst`.
+  - changed:
+    - per latest workflow need, `src/main.c::vm_net_mock_build_battle_operate_response()` is now compiled back to the known parser-valid subtype-8 tracing variant by default.
+    - current default wire response is again `1/4/8 { result=1, autorevive=1, info=<12 raw bytes, byte11=1> }`.
+    - subtype-7 remains disabled; this is only to exercise the corrected real `infoDst` trace, not to retry the unsafe `4/7 + 4/8` composite.
+  - next:
+    - rerun once and inspect `trace_battle_operate_subtype8_info_dst` / `trace_battle_kind4_subtype8_flow_info_dst`.
+    - compare the real copied buffer against the outgoing 12-byte `info` and check whether any later importer probe finally fires.
+
+- follow-up after the first real subtype-8 rerun with corrected default:
+  - verified from fresh runtime evidence:
+    - attack request at `tick=526` is answered by the restored default `mock_battle_operate_response response=4/8 result=1 autorevive=1 infoLen=12 infoGateByte=1`.
+    - dispatch reaches subtype-8 at `tick=527`, and the main-CBE allocator callback writes the real destination pointer: `trace_battle_module_data_write ... writeAddr=01054050 raw=05010cd8 pc=0100eab6`.
+    - the following subtype-8 flow/detail traces now carry `infoDstBuf=05010cd8` through `0x05189D6E`, `0x05189D78`, `0x05189D82`, and `0x05189DB4`.
+    - `sub_4B70_battle_apply_entry ... lr=05189DB9` still fires, so the top-level subtype-8 success path remains stable.
+    - there is still no `sub_actioninfo_parser_*`, and `trace_battle_local_action_table ptr=010534f4` is still all zero bytes at the same apply entry.
+  - corrected interpretation:
+    - confirmed: the real copied `4/8.info` destination is `05010cd8`, not `01018089`.
+    - confirmed negative: even with the real destination identified, the current 12-byte `info` still does not materialize any parsed `0x64` action records.
+  - trace limitation found:
+    - the first corrected build still did not print the contents of `05010cd8`, because the dump condition incorrectly depended on `r7`, which had already been overwritten with `R9+0x3450` by the time the hook fired.
+  - changed:
+    - subtype-8 trace now always dumps a short fixed slice from `infoDstBuf`.
+    - subtype-8 trace now also dumps `sp+8` as `info_src_wrapper` so the field wrapper around `05001cf2` can be compared against the real copied bytes.
+  - next:
+    - rerun once more and inspect the new `trace_battle_operate_subtype8_info_dst` bytes at `05010cd8`.
+    - compare them against `trace_battle_operate_subtype8_info_src_wrapper` and the `05001cf2` wrapper/probe state.
+
+- follow-up after another stable-default rerun:
+  - latest manual rerun again stays on the parser-safe `4/9` baseline and still does not produce any new post-attack contract.
+  - packet evidence from `bin/logs/net_packets.log`:
+    - battle enter is `tick=228 source=builtin-challenge-interaction`.
+    - attack request remains `WT len=36 hdr=4/2 objs=1/4/2`.
+    - mock answers at `tick=247 source=builtin-battle-operate responseLen=23` with `hex=575400170101040900001206726573756c740003000101`, i.e. `1/4/9 { result=1 }`.
+  - runtime evidence from `bin/logs/net_trace.log`:
+    - `mock_battle_operate_response response=4/9 result=1 index=1 operate=0 len=23`.
+    - dispatch reaches `trace_business_dispatch_item ... kind=4 subtype=9` at `tick=248`.
+    - `trace_battle_kind4_subtype9_flow` again reaches the real gate at `0x05189BF0` and returns through `0x05189C02 -> 0x05189B18`.
+    - gate bytes remain `2,0,0,0,0` at `mainObj=0500b210 gateBase=0500b680`.
+    - there is still no `trace_battle_kind4_subtype8_flow`, no `trace_battle_actioninfo_parser_detail`, and no `sub_4B70_battle_apply_entry`.
+  - conclusion:
+    - confirmed repeat: safe `4/9 result=1` is stable but remains a pure gate-hit/no-action response.
+    - confirmed repeat: no hidden follow-up WT request appears after attack ack; current missing contract is still before the subtype-9 gate or inside the separate subtype-8 action-info path.
+
+- follow-up after stable-default rerun:
+  - latest manual rerun is back on the intended safe baseline; there is no subtype-8 escape path in this session.
+  - packet evidence from `bin/logs/net_packets.log`:
+    - battle enter remains `tick=273 source=builtin-challenge-interaction`.
+    - attack request remains `WT len=36 hdr=4/2 objs=1/4/2`.
+    - mock answers at `tick=283 source=builtin-battle-operate responseLen=23` with `hex=575400170101040900001206726573756c740003000101`, i.e. `1/4/9 { result=1 }`.
+  - runtime evidence from `bin/logs/net_trace.log`:
+    - `mock_battle_operate_response response=4/9 result=1 index=1 operate=0 len=23`.
+    - dispatch reaches `trace_business_dispatch_item ... kind=4 subtype=9` at `tick=284`.
+    - `trace_battle_kind4_subtype9_flow` reaches the real gate branch at `0x05189BF0`, then returns through `0x05189C02 -> 0x05189B18`.
+    - gate bytes are still `2,0,0,0,0` at `mainObj=0500b210 gateBase=0500b680`.
+    - there is still no `sub_4B70_battle_apply_entry`, no `trace_battle_kind4_subtype8_flow`, and no follow-up WT request after the attack ack.
+  - conclusion:
+    - confirmed repeat: safe `4/9 result=1` keeps battle flow alive but remains a pure no-action gate hit.
+    - confirmed repeat: no additional server round-trip is being requested after the attack ack; the missing contract is still upstream of the subtype-9 gate or inside the separate subtype-8 action-info family.
+  - next:
+    - continue offline recovery of the minimal non-empty `4/8.info` grammar.
+    - keep the compiled default on safe `4/9` until that candidate exists.
+
+- follow-up after newest manual rerun:
+  - user-visible regression is now fully explained: "又变成玩家已逃跑了" matches the temporary compiled subtype-8 tracing build, not a new parser branch.
+  - packet evidence from `bin/logs/net_packets.log`:
+    - encounter still enters battle at `tick=948 source=builtin-challenge-interaction`.
+    - attack request remains `WT len=36 hdr=4/2 objs=1/4/2`.
+    - mock answered at `tick=957 source=builtin-battle-operate responseLen=30` with `hex=5754001e0101040800001906726573756c74000300010104696e666f0000`, i.e. `1/4/8 { result=1, info=<empty> }`.
+  - runtime evidence from `bin/logs/net_trace.log`:
+    - `trace_battle_kind4_subtype8_flow` reaches the real subtype-8 branch window at `0x05189D16`.
+    - `trace_battle_module_data_write ... pc=05189d2e ... writeAddr=0105402b raw=00000000` proves `R9+0x3450+0x0B` stays `0`.
+    - control then reaches fallback `pc=05189dbc`, and `sub_4B70_battle_apply_entry` fires with `lr=05189E25`, which is the confirmed fallback caller `0x05189E20`, not the desired action caller `0x05189DB4`.
+  - conclusion:
+    - confirmed negative: the temporary compiled `4/8 info=<empty>` build reproduces the already-known flee/escape path.
+    - no new evidence suggests a different battle regression; this is the same empty-info subtype-8 fallback we wanted to trace.
+  - changed:
+    - restored `src/main.c::vm_net_mock_build_battle_operate_response()` compiled default to parser-safe `1/4/9 { result=1 }` so subsequent manual runs can keep battle flow stable without environment setup.
+    - trace-only subtype-8 instrumentation remains in place for the next deliberate non-empty `4/8.info` experiment.
+  - next:
+    - keep default on safe `4/9` while recovering the minimal non-empty `4/8.info` shape offline from static analysis and trace evidence.
+    - once that candidate exists, switch the compiled response back to subtype-8 only for a targeted rerun.
+
+- static follow-up:
+  - corrected Battle.cbm file disassembly parameters: `tools/disasm_thumb.py --file bin/JHOnlineData/mmBattleMstarWqvga.cbm 0xA1 0x05181F20 ...`. The script's old default `0x9A` file-code offset is wrong for this module and produces invalid decode.
+  - using the corrected offset, `0x05188DD0..0x05189024` now recovers a real action parser shape. It first fetches named field `actioninfo` at `0x05188DF8..0x05188E00`, then named field `actionnum` at `0x05188E16..0x05188E1C`, before iterating `actionnum` records.
+  - recovered partial grammar:
+    - `actionnum` is a `u8` loop bound.
+    - each action claims one `0x64`-byte slot from a 13-entry table.
+    - the common action header begins with bytes at `slot+1`, `slot+2`, and usually `slot+3`.
+    - when `slot+1 != 3/4`, `slot+3` is a subrecord count constrained to `1..6`, and each subrecord is `{u8,u8,u32,u32}` copied into 12-byte records at `slot+0x14 + 0x0C*i`.
+    - action type `1` and type `2` then enter distinct extra payload branches.
+  - conclusion:
+    - stronger evidence that `4/8.info` is not just “any non-empty blob”. It likely has to materialize an inner named-object stream compatible with `actioninfo/actionnum`, or another wrapper that `sub_4B70()` converts into that shape before `sub_actioninfo_parser_entry`.
+
+- changed:
+  - corrected the old misleading Battle.cbm trace labels on offsets `0x7E12/0x7E1A/0x7E1C/0x7E28/0x7E58/0x7E62/0x7E94`: they are now named as subtype-8 `info/apply` probes instead of obsolete `sub_7BD0_4_2_success_*`.
+  - added trace-only `trace_battle_operate_subtype8_detail`, which logs `srcPtr/srcLen`, parser object state, destination buffer pointer, and source/destination byte dumps around the `0x05189D32..0x05189DB4` copy/apply window.
+  - added trace-only `trace_battle_actioninfo_parser_detail`, which logs `slotTable`, `actionCount`, `loopIndex`, current record base, and record header bytes around `0x05188DD0`.
+  - added extra Battle.cbm probe points at `0x6E02` (`actioninfo_ptr_ready`) and `0x6E1E` (`actionnum_ready`) so the next manual run can connect `4/8.info` copy output to the first real parser state.
+  - these traces do not write guest memory, alter battle globals, or change packet/parser control flow.
+
+- validation:
+  - pending manual rerun for the new traces.
+  - `make` should still pass after the instrumentation update.
+
+- next:
+  - rerun with the safe default still on `4/9 result=1`, then selectively re-enable `CBE_BATTLE_OPERATE_EXPERIMENT_4_8=1` only for tracing.
+  - inspect whether `trace_battle_operate_subtype8_dst` already contains a field-encoded object stream and whether `sub_actioninfo_parser_detail` sees valid `actionnum`/record headers.
+  - if the destination buffer is only raw bytes with no named-field structure, recover the missing wrapper before guessing `actioninfo` record contents.
 
 - follow-up after manual attack:
   - user-visible result: pressing attack now makes the player flee/escape.
@@ -20,8 +1627,62 @@ Suggested entry format:
   - runtime evidence: `sub_4B70_battle_apply_entry` fires, but with `lr=05189E25`, so the caller is the fallback path `0x05189DBC -> 0x05189E20`, not the intended action branch `0x05189D82 -> 0x05189DB4`.
   - static evidence: after copying raw `info`, Battle.cbm checks `R9+0x3450+0x0B` at `0x05189D7C`; empty `info` leaves that byte not equal to `1`, so it branches to the fallback/escape path.
   - conclusion: `4/8 result=1` is the right neighborhood for action application, but empty `info` is a confirmed negative and must not remain the default response.
-  - changed: default `builtin-battle-operate` is restored to parser-safe no-escape `1/4/9 { result=1 }`.
-  - changed: the empty `4/8` response is now gated behind `CBE_BATTLE_OPERATE_EXPERIMENT_4_8=1` for future controlled tracing only.
+  - trace gap from that same run: the new single-point subtype-8 probes at `0x7E12/0x7E1A/0x7E1C/0x7E28/0x7E58/0x7E62/0x7E94` did not emit, even though the packet definitely reached subtype `4/8` and then `sub_4B70()`.
+  - changed: added a dedicated instruction-window tracer `trace_battle_kind4_subtype8_flow` over `0x05189AF0..0x05189E40` (`traceOff 0x7BD0..0x7F20`) to log `info` source candidates, parser object/buffer/state, and `R9+0x3450+0x0A..0x0D` action bytes on every step through the subtype-8 branch.
+  - evidence:
+    - `bin/logs/net_packets.log`: `tick=171 source=builtin-battle-operate responseLen=30 ... hex=5754001e0101040800001906726573756c74000300010104696e666f0000`
+    - `bin/logs/net_trace.log`: `trace_business_dispatch_item ... kind=4 subtype=8`, `trace_battle_module_data_write pc=05189d2e`, `trace_battle_module_data_write pc=05189dc6`, `sub_4B70_battle_apply_entry ... lr=05189E25`
+  - next:
+    - rerun the controlled `CBE_BATTLE_OPERATE_EXPERIMENT_4_8=1` attack once more and inspect `trace_battle_kind4_subtype8_flow` first.
+    - only after that, decide whether `4/8.info` needs an inner named-object wrapper or a minimal `actioninfo/actionnum` payload.
+  - latest log review correction: the newest session did not actually hit the subtype-8 experiment.
+    - `bin/logs/net_packets.log` last session begins at line `698`; its battle-operate send at `tick=372` gets `responseLen=23`, `hex=575400170101040900001206726573756c740003000101`, which is safe default `1/4/9 { result=1 }`.
+    - matching `bin/logs/net_trace.log` at `tick=373` shows `trace_battle_kind4_subtype9_flow` reaching `0x05189BF0` and returning with `gateBytes=2,0,0,0,0` through `0x05189C02 -> 0x05189B18`.
+    - therefore the absence of `trace_battle_kind4_subtype8_flow` in the newest session is expected: this rerun reconfirms the safe `4/9` no-action gate, not the `4/8` fallback path.
+  - follow-up after another manual rerun:
+    - the log now contains two newer sessions after that correction.
+    - first newer session is not usable for battle-operate tracing: after `builtin-login` it sends a mixed title packet `WT len=46 hdr=1/4 objs=1/1/4,1/1/16`, and the host logs `unhandled_packet ...` followed by `assert(0)`. This is a separate regression on the title/login path, not a battle action-parser result.
+    - second newer session does reach battle, but still does not hit subtype-8:
+      - `bin/logs/net_packets.log` latest complete battle run shows `tick=479 source=builtin-battle-operate responseLen=23`, `hex=575400170101040900001206726573756c740003000101`, again safe default `1/4/9 { result=1 }`.
+      - matching `bin/logs/net_trace.log` shows `mock_battle_operate_response response=4/9 result=1 ...` and `trace_battle_kind4_subtype9_flow_start ... tick=480`, then `pc=05189BF0` with `gateBytes=2,0,0,0,0`.
+    - conclusion:
+      - there is still no new subtype-8 evidence in the latest successful battle run.
+      - `trace_battle_kind4_subtype8_flow` remains unexercised in the newest logs because `CBE_BATTLE_OPERATE_EXPERIMENT_4_8=1` was not in effect for the final battle session.
+  - follow-up after one more manual rerun:
+    - the same split repeats again, which makes the evidence more stable:
+      - one session reproduces the title/login-side unsupported mixed packet `WT len=46 hdr=1/4 objs=1/1/4,1/1/16`, still logged as `unhandled_packet` and then `assert(0)`.
+      - the newest complete battle session again reaches `builtin-battle-operate`, but still receives safe default `1/4/9 { result=1 }`.
+    - evidence:
+      - `bin/logs/net_packets.log`: `tick=394 source=builtin-battle-operate responseLen=23 ... hex=575400170101040900001206726573756c740003000101`
+      - `bin/logs/net_trace.log`: `mock_battle_operate_response response=4/9 result=1 ...`, `trace_battle_kind4_subtype9_flow_start ... tick=395`, then `pc=05189BF0 ... gateBytes=2,0,0,0,0`
+      - `bin/logs/net_packets.log`: `unhandled_packet WT len=46 hdr=1/4 objs=1/1/4,1/1/16 count=2`, immediately followed by `assert(0)`
+    - conclusion:
+      - battle-side status is unchanged: latest successful attack still proves only the known subtype-9 no-action gate.
+      - there is now repeatable evidence that title/login sometimes emits a composite `1/1/4 + 1/1/16` request path the mock server does not yet handle.
+  - changed:
+    - `src/main.c` now detects that exact composite title/login packet by full object list, not by the first-object header alone.
+    - narrow detector requires both objects `1/1/4` and `1/1/16` plus fields `serverID` and `moneytype`, then reuses the existing parser-safe `vm_net_mock_build_title_rolelist_stage_response()` reply.
+    - this keeps the fix upstream at the mock protocol boundary and does not patch title logic, battle logic, or CBE/Battle global state.
+  - expected next validation:
+    - the next rerun should log `source=builtin-title-rolelist-combo` instead of `unhandled_packet ... assert(0)`, so repeated manual tests can reliably reach the later battle path again before we continue `4/8.info` recovery.
+  - follow-up after the newest manual rerun:
+    - the latest session now reaches battle cleanly again and does not hit any newer `unhandled_packet` on the title path.
+    - packet evidence: newest session starts at `bin/logs/net_packets.log` tail with `tick=121 source=builtin-login`, then `tick=123 source=builtin-title-rolelist-stage`, then battle enter at `tick=222 source=builtin-challenge-interaction`, and attack at `tick=272 source=builtin-battle-operate responseLen=23`.
+    - battle-side result is still unchanged: latest attack again receives safe default `1/4/9 { result=1 }`, and `bin/logs/net_trace.log` shows the known `trace_battle_kind4_subtype9_flow ... pc=05189BF0 ... gateBytes=2,0,0,0,0 -> 0x05189C02 -> 0x05189B18`.
+    - conclusion:
+      - "进战斗流程" is currently stable enough for further attack-response experiments.
+      - the active blocker is back to the already-known battle operate contract, not the earlier title/login composite assert.
+  - changed:
+    - widened subtype-8 trace-only instrumentation so the next controlled `CBE_BATTLE_OPERATE_EXPERIMENT_4_8=1` run also dumps the action-state/header object itself (`parserObj`), its `[+0x30]` destination pointer, and `[+0x34]` capacity alongside the copied destination bytes.
+    - purpose: distinguish whether `4/8.info` is missing an inner structured wrapper or merely a key flag/record at a fixed offset.
+  - changed:
+    - per latest user request, `src/main.c::vm_net_mock_build_battle_operate_response()` is compiled directly to the subtype-8 tracing variant again instead of requiring `CBE_BATTLE_OPERATE_EXPERIMENT_4_8=1`.
+    - current default wire response is once more `1/4/8 { result=1, info=<raw empty> }`.
+    - this is still a confirmed negative gameplay result and is enabled only to make repeated local tracing easier; it does not patch Battle globals or bypass the client parser.
+  - next:
+    - the next manual run should now hit subtype-8 without any environment setup, so the new `trace_battle_kind4_subtype8_flow_*` and `trace_battle_operate_subtype8_*` markers should finally appear.
+    - separately, the repeated `1/1/4 + 1/1/16` crash path is now worth documenting as an independent mock-server gap if it blocks future controlled reruns.
+  - changed: compiled default `builtin-battle-operate` is now the subtype-8 empty-info tracing variant instead of parser-safe `4/9`.
   - next: recover the non-empty `info` stream that makes `R9+0x3450+0x0B == 1` and reaches `0x05189D82 -> 0x05189DB4`.
 
 - evidence:

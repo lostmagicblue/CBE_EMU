@@ -45,6 +45,7 @@ void vm_net_trace_scene_dispatch_gate_write(uint64_t address, uint32_t size, int
 void vm_net_trace_scene_loading_owner_write(uint64_t address, uint32_t size, int64_t value);
 void vm_net_trace_battle_module_data_write(uint64_t address, uint32_t size, int64_t value);
 void vm_net_trace_battle_main_gate_write(uint64_t address, uint32_t size, int64_t value);
+void vm_net_trace_battle_subtype8_info_dst_write(uint64_t address, uint32_t size, int64_t value);
 
 u32 last_gpt1_interrupt_time;
 u32 IRQ_MASK_SET_L_Data;

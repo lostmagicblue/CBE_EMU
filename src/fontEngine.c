@@ -40,7 +40,16 @@ inline int getFontHeight()
 
 inline int getFontCellWidth()
 {
+    /*
+     * ASCII glyphs in font_gb.uc3 live in full 16x16 bitmaps, but UI layout
+     * still treats them as half-width cells.
+     */
     return fontWidth / 2;
+}
+
+inline int getFontAsciiDrawWidth()
+{
+    return fontWidth;
 }
 // 一个字符32字节，16x16大小，一行16个像素点就是2字节，所以16x16就是32字节
 u8 getFontBitMap(u16 gbCode, char *bitmapData)
@@ -145,7 +154,7 @@ void drawFontStringWithGbkWidth(u8 *gbkStr, int x, int y, u16 color, int gbkWidt
             break;
         else if (c < 0x80)
         {
-            drawFontCharWithWidth((c << 8), x + ri, y, color, getFontCellWidth());
+            drawFontCharWithWidth((c << 8), x + ri, y, color, getFontAsciiDrawWidth());
             ri += getFontCellWidth();
             i += 1;
         }
@@ -184,4 +193,33 @@ int mesureStringWidthWithGbkWidth(char *gbkStr, int gbkWidth)
         }
     }
     return width;
+}
+
+int mesureStringRenderWidthWithGbkWidth(char *gbkStr, int gbkWidth)
+{
+    if (gbkStr == NULL)
+        return 0;
+
+    int advance = 0;
+    int renderWidth = 0;
+    for (u32 i = 0; gbkStr[i] != 0;)
+    {
+        u8 ch = (u8)gbkStr[i];
+        if (ch < 0x80)
+        {
+            int drawWidth = getFontAsciiDrawWidth();
+            if (advance + drawWidth > renderWidth)
+                renderWidth = advance + drawWidth;
+            advance += getFontCellWidth();
+            i += 1;
+        }
+        else
+        {
+            if (advance + gbkWidth > renderWidth)
+                renderWidth = advance + gbkWidth;
+            advance += gbkWidth;
+            i += gbkStr[i + 1] ? 2 : 1;
+        }
+    }
+    return renderWidth;
 }

@@ -128,3 +128,19 @@ Evidence:
 - IDA decompilation shows that call's logical arguments are `x=33`, `y=n210+9`, `w=sub_104D538(...)`, `h=imageHeight-18`, `color=0xFFF3`
 - runtime trace before the compatibility fix logged the same call as `lcd_shape api=vMFillRectEx x=197 y=41/48/... w=6 h=-13 color=000000c4 last=010034fc`
 - that trace shape is now classified as a calling-convention mismatch: the emulator shifted the 5-argument call by treating `R0=33` as a destination image pointer
+
+## ASCII Font Cell Width
+
+Confirmed runtime/platform contract:
+
+- the bundled `font_gb.uc3` stores ASCII digits/letters in full-size bitmap cells, not pre-halved half-width glyphs
+- for the current Jianghu OL font asset, ASCII should be drawn from the full bitmap width, but laid out/measured using half-width cell advance
+- the emulator must distinguish logical string width from rendered pixel extent: API/layout width can stay half-width for ASCII, but the cache/VM sync rectangle must cover the full rendered extent of the last overhanging ASCII glyph
+
+Evidence:
+
+- local asset evidence: `bin/font_gb.uc3` header is `fontWidth=16`, `fontHeight=16`
+- direct glyph dump for `0x3100` (`'1'`) shows a full `16x16` bitmap cell with the narrow stroke centered inside it
+- direct glyph bounds for ASCII samples such as `1/2/3/A/B/C` are centered narrow strokes inside the 16px cell, with ink widths around `4..8px`
+- emulator code that used half-width for both draw and measure compressed glyph rendering; emulator code that used full-width for both draw and measure fixed the squashing but produced overly wide spacing and shifted later text/layout
+- after switching to full-width draw plus half-width advance, the last ASCII digit in a login field was clipped on the right edge, which matches sync/copy rectangles still being computed from logical width instead of rendered extent
