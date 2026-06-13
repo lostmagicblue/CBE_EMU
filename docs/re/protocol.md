@@ -39,7 +39,7 @@ Field encoding inside an object:
 - integer field values are internally stored as `0, byte_len, big_endian_value`
 - string/blob field values are internally stored as `data_len_be16, data`
 
-Implementation helpers already exist in `src/main.c` and should be reused instead of hand-building packet headers:
+Implementation helpers already exist in `src/mock-server.c` and should be reused instead of hand-building packet headers:
 
 - `vm_net_mock_begin_wt_object`
 - `vm_net_mock_finish_wt_object`
@@ -308,7 +308,7 @@ Evidence:
 - Battle loop over `actionnum`: `Battle.cbm` `0x05189018..0x05189022`
 - first-round two-record success: `bin/logs/net_packets.log` tick `190` responseLen `129`, `actionnum=2`
 - regression cause: `bin/logs/net_packets.log` ticks `226/252/271` responseLen `84`, `actionnum=1`
-- current HP-state implementation site: `src/main.c` `vm_net_mock_build_challenge_interaction_response()` and `vm_net_mock_build_battle_operate_response()`
+- current HP-state implementation site: `src/mock-server.c` `vm_net_mock_build_challenge_interaction_response()` and `vm_net_mock_build_battle_operate_response()`
 - latest lethal-round evidence:
   - `bin/logs/net_trace.log` `tick=334`: `mock_battle_operate_response ... damageValue=8 ... enemyHp=0/20 ... battleEnds=1`
   - older sessions still showed repeated post-lethal `4/2` afterwards (`bin/logs/net_packets.log` ticks `333`, `350`, `364`)
@@ -4746,3 +4746,18 @@ Battle actioninfo still not committing HP locally:
   - corrected trace-only instrumentation:
     - `damage_number_effect_entry` now has a small independent sample cap.
     - `DrawBattleAnimEffect` windows and `sub_4B38` state-4 HP-merge windows have separate budgets, so the next run should capture whether local byte `+0x0D` ever reaches `4` and whether `R9+0x34B4/+0x34B6` ever become nonzero.
+
+Battle actioninfo effect-index/tail experiment boundary:
+
+- latest runtime evidence:
+  - the refined trace pass shows the action/effect state machine does reach `state4_store_target` and `state4_target_copy_store`, but the local record byte stays `record+0x0D == 1`.
+  - `trace_battle_state4_detail` reports `state4cc=0`, `callback52c=2`, and no HP merge; terminal `sub_4B70_battle_apply_entry` still reports `pendingDelta=0,0` and canonical enemy HP `20/20`.
+  - `trace_battle_actioninfo_materialize_detail` continues to confirm type-1 records with `valueA/valueB=12/8` and `8/0`.
+- packet field boundary:
+  - `HandleBattleActionMsg()` reads, for type-1 records, an effect/template index into local offset `+0x5C`, a string/blob scratch into `+0x04..+0x0F`, and three tail bytes into `+0x60..+0x62`.
+  - current baseline has used `effectIndex=0` and tail bytes `0,0,0`; these are parser-safe but HP-inert.
+- mock support:
+  - `src/mock-server.c` now parameterizes this narrow field family with `CBE_BATTLE_TYPE1_EFFECT_INDEX` and `CBE_BATTLE_TYPE1_TAIL0/1/2`.
+  - defaults preserve the confirmed baseline packet exactly.
+  - success criterion for a non-default rerun is `record+0x0D == 4`, nonzero `R9+0x34B4/+0x34B6`, or a Battle.cbm fighter HP table change before terminal settlement.
+  - failure criterion is clean materialization with `record+0x0D == 1`, pending deltas `0,0`, and enemy HP still `20/20`; in that case effect index/tail alone should be recorded as rejected for `G6/G7`.

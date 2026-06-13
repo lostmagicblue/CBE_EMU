@@ -24,7 +24,7 @@ obj/fileIoEngine.o: src/fileIoEngine.c
 	$(CC) -g  -w -c src/fileIoEngine.c -o obj/fileIoEngine.o
 obj/lcd.o: src/lcd.c
 	$(CC) -g  -w -c src/lcd.c -o obj/lcd.o
-obj/main.o: src/main.c src/vmFunc.c src/hookRam.c src/vmEvent.c
+obj/main.o: src/main.c src/mock-server.c src/vmFunc.c src/hookRam.c src/vmEvent.c
 	$(CC) -g  -w -c src/main.c -o obj/main.o
 obj/gifDecode.o: src/gifDecode.c
 	$(CC) -g  -w -c src/gifDecode.c -o obj/gifDecode.o

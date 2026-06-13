@@ -8076,3 +8076,88 @@ Follow-up after the `Type=100 -> 25/2` rerun:
   - trace remains read-only; no packet shape, guest registers, Battle.cbm globals, or game state are modified.
 - validation:
   - rebuild required. Next rerun should check for `anim_entry`, `anim_after_action_slots`, `state4_before_apply`, `state4_delta_base`, and any nonzero `pendingDelta`.
+
+## 2026-06-13 server workflow docs tightened
+
+- changed:
+  - added `docs/re/server-mainline.md` as the short entry point for private-server work.
+  - updated `AGENTS.md`, `docs/re/README.md`, and the project-local reverse-engineering skill so future sessions start from the current server mainline and latest session-log tail before opening long protocol notes.
+- reason:
+  - `server/` is still empty, while the confirmed live backend behavior is embedded in `src/main.c` mock builders.
+  - `docs/re/protocol.md` is valuable evidence but is too long and historical to be the first stop for every server task.
+- current focus preserved:
+  - battle `4/2 -> 1/4/6` remains the active service-side blocker; the next runtime check is still `trace_battle_anim_effect_delta_detail`.
+
+## 2026-06-13 battle static model entry added
+
+- static pass:
+  - exported Battle.cbm pseudocode from IDA instance `yyej` for `HandleServerBattleCmd` (`0x7BD0`), `HandleBattleActionMsg` (`0x6EB0`), `sub_4B38` (`0x4B38`), `DrawBattleAnimEffect` (`0x31FA`), and `HandleBattleSettleMsg` (`0x743C`) into `tmp/ida_battle_static/`.
+  - confirmed the battle dispatcher and action parser model without changing packet behavior.
+- changed:
+  - added `docs/re/battle-mainline.md` as the required battle workflow entry.
+  - linked it from `AGENTS.md`, `docs/re/README.md`, `docs/re/server-mainline.md`, and the project-local reverse-engineering skill.
+- purpose:
+  - battle work should now report progress by gates `G1..G9` and target named unknowns, instead of repeatedly guessing packet fields after each manual run.
+- validation:
+  - documentation-only change; no rebuild required.
+
+## 2026-06-13 battle G6 effect-index/tail experiment prepared
+
+- verified from existing traces before changing packet behavior:
+  - latest `bin/logs/net_packets.log` still shows the battle sequence `4/1 -> 4/2 -> 4/2 -> 4/2`, with the first two operate responses as `1/4/6` and the third as terminal `1/4/7 + 1/4/8 + 1/4/11 + 1/4/9`.
+  - `trace_battle_actioninfo_materialize_detail` still confirms parser-safe type-1 materialization with `valueA/valueB=12/8` and `8/0`.
+  - `trace_battle_state4_detail` now confirms the action/effect state machine reaches `state4_store_target` and `state4_target_copy_store`, but `record+0x0D/local0d` remains `1`, `state4cc=0`, `callback52c=2`, pending deltas remain `0,0`, and canonical enemy HP remains `20/20`.
+- conclusion:
+  - current gate position is `G5` reached, `G6` blocked. The blocker is not terminal ordering and not `valueB=remainingHp`; the missing condition is the transition/delta source that makes `record+0x0D == 4` or writes `R9+0x34B4/+0x34B6`.
+- changed:
+  - added default-preserving env parameters in `src/main.c` for the already-confirmed type-1 actioninfo field family: `CBE_BATTLE_TYPE1_EFFECT_INDEX` and `CBE_BATTLE_TYPE1_TAIL0/1/2`.
+  - both strict and fallback battle operate builders use the same parameters and log `type1EffectIndex` / `type1Tail`.
+  - default values remain `0,0,0,0`, so the normal packet is unchanged until an experiment is explicitly enabled.
+- next single experiment:
+  - run one battle with only one non-default field family, starting with `CBE_BATTLE_TYPE1_EFFECT_INDEX=1` and tail bytes still `0,0,0`.
+  - observe `mock_battle_operate_response`, `trace_battle_actioninfo_materialize_detail`, `trace_battle_state4_detail`, `trace_battle_anim_effect_delta_detail`, `trace_battle_apply_detail`, and canonical enemy HP.
+  - success: `record+0x0D == 4`, nonzero pending delta, or fighter HP table change before terminal settlement.
+  - failure: materialization remains parser-safe but stays at `record+0x0D == 1`, pending deltas `0,0`, enemy HP `20/20`; record effect index `1` as rejected and statically trace the writer of `record+0x0D`.
+- validation:
+  - `make` passed after the builder parameterization.
+
+## 2026-06-13 battle parameterized baseline rerun
+
+- verified from the newest manual run after the builder parameterization:
+  - packet flow remained `4/1 -> 4/2 -> 4/2 -> 4/2`; the first two operate responses were `1/4/6`, and the third was terminal `1/4/7 + 1/4/8 + 1/4/11 + 1/4/9`.
+  - the new trace fields prove the non-default experiment was not enabled: both `mock_battle_operate_response` lines show `type1EffectIndex=0 type1Tail=0,0,0`.
+  - baseline behavior reproduced: type-1 records materialized as `valueA/valueB=12/8` and `8/0`; `trace_battle_state4_detail` remained in `state4_store_target/state4_target_copy_store` with `local0d=1`, `state4cc=0`, `callback52c=2`; terminal apply still showed `pendingDelta=0,0` and canonical enemy HP `20/20`.
+- conclusion:
+  - this rerun confirms the default-preserving parameterization did not change packet semantics.
+  - it does not reject `CBE_BATTLE_TYPE1_EFFECT_INDEX=1`; that experiment still needs one explicit rerun.
+- next single experiment:
+  - rerun with `CBE_BATTLE_TYPE1_EFFECT_INDEX=1` and no tail-byte changes.
+
+## 2026-06-13 battle G6 trace noise filter
+
+- changed:
+  - added a default-on `net_trace.log` filter for the current G6/G7 experiment.
+  - unrelated historical scene/title/resource/pool-probe traces are suppressed at the `vm_net_trace`,
+    `vm_net_trace_bytes`, and `vm_net_trace_mem` output boundary.
+  - retained lines include `mock_battle_operate_response`, `mock_battle_operate_actioninfo_payload`,
+    `trace_battle_actioninfo_materialize_detail`, selected materialize dumps,
+    `trace_battle_state4_detail`, selected state4 dumps, `trace_battle_anim_effect_delta_detail`,
+    `trace_battle_apply_detail`, selected apply dumps, and `sub_4B70` battle module/local action state.
+  - `net_packets.log` is not filtered.
+- usage:
+  - default behavior is quiet G6-only tracing.
+  - set `CBE_BATTLE_G6_TRACE_ONLY=0` to restore full `net_trace.log` output for broader debugging.
+- validation:
+  - `make` passed after adding the trace filter.
+
+## 2026-06-13 embedded mock-server split
+
+- changed:
+  - migrated the embedded Jianghu OL mock-server packet builders and network response/read helpers out of `src/main.c` into `src/mock-server.c`.
+  - `src/main.c` now includes `src/mock-server.c` in the same translation unit, preserving access to emulator-local static helpers and runtime globals without changing guest-visible behavior.
+  - `Makefile` now tracks `src/mock-server.c` as an `obj/main.o` dependency.
+  - updated current workflow docs to point future server/mock packet work at `src/mock-server.c`.
+- scope:
+  - structural migration only; no packet shapes, battle gates, trace filters, guest registers, Battle.cbm memory, or game state-machine behavior were intentionally changed.
+- validation:
+  - `make` passed after the split and dependency update.

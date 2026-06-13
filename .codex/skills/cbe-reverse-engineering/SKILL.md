@@ -12,17 +12,21 @@ Use this skill for any task involving:
 - protocol reconstruction
 - emulator runtime behavior in `src/`
 - future server work in `server/`
+- current server mainline in `docs/re/server-mainline.md`
 
 ## First Pass
 
 1. Read `AGENTS.md`.
 2. Read `docs/re/README.md`.
-3. Read only the most relevant reverse-engineering note:
+3. For private-server or network mock work, read `docs/re/server-mainline.md` and the tail of
+   `docs/re/session-log.md` before opening long protocol notes.
+4. Read only the most relevant reverse-engineering note:
+   - battle work: `docs/re/battle-mainline.md`
    - protocol work: `docs/net_mock_protocol.md` and `docs/re/protocol.md`
    - runtime behavior: `docs/re/runtime-contracts.md`
    - firmware layout: `docs/re/firmware-map.md`
    - unresolved work: `docs/re/open-questions.md`
-4. Inspect only the code or tools directly related to the request.
+5. Inspect only the code or tools directly related to the request.
 
 ## Working Style
 
@@ -50,9 +54,19 @@ For a new problem:
 4. make the smallest code/tooling change needed
 5. validate with a rebuild or repeatable run when possible
 
+For server work:
+
+1. start from the current request in packet logs or an unhandled WT summary
+2. map it to the smallest `src/mock-server.c` mock builder
+3. recover the exact client parser contract before inventing fields
+4. validate inside the embedded mock first
+5. extract to `server/` only after the packet family is stable enough to test
+
 ## Documentation Targets
 
 - packet shape or sequence -> `docs/re/protocol.md`
+- battle parser/state model or experiment gates -> `docs/re/battle-mainline.md`
+- current server target or extraction boundary -> `docs/re/server-mainline.md`
 - emulator/platform semantics -> `docs/re/runtime-contracts.md`
 - firmware/container/offset facts -> `docs/re/firmware-map.md`
 - unresolved threads -> `docs/re/open-questions.md`

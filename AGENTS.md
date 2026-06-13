@@ -15,6 +15,8 @@ Treat the repository as a long-running reverse-engineering project. Prefer prese
 - `src/`: Unicorn-based emulator and platform/runtime shims
 - `tools/`: repeatable helper scripts for disassembly, extraction, decoding, and validation
 - `docs/net_mock_protocol.md`: currently verified network mock behavior for Jianghu OL
+- `docs/re/battle-mainline.md`: battle parser/state model and experiment gates
+- `docs/re/server-mainline.md`: short current entry point for private-server work
 - `docs/re/`: durable reverse-engineering notes, protocol docs, memory maps, and session logs
 - `firmware/`: firmware images, unpacked pieces, and extraction manifests
 - `samples/`: packet captures, screenshots, save data, code snippets, and other evidence
@@ -36,6 +38,8 @@ When you learn something durable, update the closest matching document in `docs/
 
 - `docs/re/firmware-map.md`: firmware layout, segments, loaders, container formats
 - `docs/re/protocol.md`: packet formats, event sequencing, field semantics
+- `docs/re/battle-mainline.md`: battle parser/state model, static flow, experiment gates, rejected hypotheses
+- `docs/re/server-mainline.md`: current service-side target, active blocker, and extraction boundary
 - `docs/re/runtime-contracts.md`: platform APIs, screen lifecycle, timers, file I/O, VM semantics
 - `docs/re/open-questions.md`: unresolved hypotheses and next experiments
 - `docs/re/session-log.md`: short dated notes for what changed and what was verified
@@ -59,10 +63,25 @@ Preferred sequence for new features:
 4. verify with a repeatable run
 5. write the result back into `docs/re/`
 
+For private-server work, use this tighter loop:
+
+1. read `docs/re/server-mainline.md` and the tail of `docs/re/session-log.md`
+2. inspect the current request/response in `bin/logs/net_packets.log` or `unhandled_packet`
+3. map it to the narrowest `src/mock-server.c` mock builder and matching client parser
+4. validate one packet family before changing broader server structure
+5. promote confirmed behavior into `docs/re/protocol.md`, then extract stable builders/tests to `server/`
+
+Avoid rereading the full protocol notebook unless a specific section is needed; it contains useful
+evidence but also historical experiments.
+
+For battle packet work, read `docs/re/battle-mainline.md` first and report progress by its gates
+(`G1` through `G9`). Do not add new battle packet variants unless they target a named unknown or
+reject/advance a specific gate.
+
 ## Editing Rules
 
 - Reuse existing helpers before adding new ad hoc code paths.
-- For network mock behavior, prefer helper builders in `src/main.c` over handwritten packet assembly.
+- For network mock behavior, prefer helper builders in `src/mock-server.c` over handwritten packet assembly.
 - Keep diagnostic logging scoped and easy to remove after verification.
 - Trace-only hooks are acceptable when they do not alter guest registers, memory, return values, or control flow. Hooks that `vm_bx()` around client code, suppress draw/parser calls, clamp client state, or skip table updates require an explicit post-boundary user request and should be treated as temporary experiments, not project fixes.
 - Avoid broad refactors while chasing an unverified reverse-engineering hypothesis.

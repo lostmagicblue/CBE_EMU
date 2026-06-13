@@ -22,6 +22,9 @@
 
 ## Server work
 
-1. Mirror the protocol document rather than inventing packet shapes in code.
-2. Keep handlers minimal and deterministic.
-3. Prefer fixtures from `samples/packets/` when adding tests.
+1. Read `docs/re/server-mainline.md` and the newest `docs/re/session-log.md` entry.
+2. Start from a concrete request in `bin/logs/net_packets.log` or `unhandled_packet`.
+3. Mirror the confirmed embedded mock builder in `src/mock-server.c`; do not invent packet shapes in `server/`.
+4. Keep handlers minimal and deterministic.
+5. Prefer fixtures from packet logs or `samples/packets/` when adding tests.
+6. Move behavior into `server/` only after request trigger, object sequence, field grammar, and side effects are confirmed.
