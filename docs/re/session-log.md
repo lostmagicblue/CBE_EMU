@@ -12,6 +12,691 @@ Suggested entry format:
 - next:
 ```
 
+## 2026-06-13 latest rerun: local write watcher was pre-battle noisy
+
+- verified:
+  - latest run still reaches the same Battle.cbm mainline without a new battle crash:
+    - `bin/logs/net_packets.log` tick `482`: `4/1 id=3,index=3,pos=173,272` receives `1/5/5 + 1/4/10`, responseLen `181`.
+    - tick `490`: first `4/2` receives `1/4/6`, responseLen `86`.
+    - tick `515`: mock-lethal `4/2` receives `1/4/6`, responseLen `85`.
+    - tick `542`: post-lethal `4/2` receives `1/4/7 + 1/4/8 + 1/4/11 + 1/4/9`, responseLen `343`.
+  - subtype-5 enemy template population is still valid for monster id `3`:
+    - runtime evidence: `trace_groupinfo_case5_reader` reads id `3`, name `Monster`, byte flags `1/0`, stats `20/20/20/20`.
+    - runtime evidence: Battle.cbm `sub_66CC_before_return` reports `enemyIds=10001,3,0,0` and `enemyHead ... 00000014,00000014`.
+  - confirmed negative: the local KO/HP side effect is still missing:
+    - tick `515/516` materializes lethal type-1 action data as `record=1,1,1 valueA=8 valueB=0`.
+    - tick `543`, `sub_7BD0_after_status7_parser` and `sub_4B70_battle_apply_entry` still report enemy fighter HP/max `20/20`.
+    - tick `543`, `sub_4B70_battle_apply_entry` has `pendingDelta=0,0`, so no pending HP delta is merged.
+  - confirmed negative: the broad local write watcher did not capture the useful battle window:
+    - runtime evidence: `trace_battle_local_state_write` starts logging at tick `70` with invalid pre-battle state such as `state=209,209,...` and nonsensical HP like `enemyHp=0/83954816`.
+    - runtime evidence: its old 512-entry cap was spent before the latest battle ticks `490/515`, so the latest actioninfo HP writes, if any, were not observed.
+- changed:
+  - narrowed `vm_net_trace_battle_local_state_write()` so it only logs after Battle.cbm `R9+0x3450` reports parser-ready state: `parseOk != 0`, legal own/enemy counts, and at least one fighter.
+  - the watcher now also reads canonical fighter HP from `R9+0x374C` / `R9+0x374C+0xC4` instead of the local action block offsets, and labels writes to `own_fighter_table` / `enemy_fighter_table`.
+  - trace remains read-only; no packet shape, guest memory value, Battle.cbm global, or control flow is changed.
+- next:
+  - rerun one battle and inspect `trace_battle_local_state_write` around the first/lethal `4/2` ticks. The target evidence is whether `actioninfo` writes enemy fighter HP, writes only local action slots, writes pending deltas, or writes nothing HP-related.
+
+## 2026-06-13 latest rerun: no crash, still third operate; add local write watcher
+
+- verified:
+  - latest battle session enters normally:
+    - `bin/logs/net_packets.log` tick `209`: `4/1 id=3,index=3,pos=173,272` handled by `builtin-challenge-interaction`, response `1/5/5 + 1/4/10`, responseLen `181`.
+    - tick `211`: `2/10 Type=100` receives empty `otherinfo`.
+  - operate sequence is still one request too long:
+    - tick `217`: first `4/2` receives `1/4/6`, responseLen `86`.
+    - tick `243`: lethal mock-side `4/2` receives `1/4/6`, responseLen `85`.
+    - tick `268`: third post-lethal `4/2` receives `1/4/7 + 1/4/8 + 1/4/11 + 1/4/9`, responseLen `343`.
+    - tick `269`: short `25/5` receives `1/10/17 { result=1, lastexp=1, curexp=1 }`.
+  - enemy-template prefill remains valid:
+    - `bin/logs/net_trace.log` around tick `210`: `sub_66CC_before_return` reports `enemyIds=10001,3,0,0` and `enemyHead=...,00000003,...,00000014,00000014`.
+  - confirmed negative: Battle.cbm still considers the enemy alive at settlement/apply time:
+    - tick `269`, `sub_7BD0_after_status7_parser` and `sub_4B70_battle_apply_entry` both keep `enemyHead ... 20/20`.
+    - `sub_4B70_battle_apply_entry` reports `pendingDelta=0,0`, so the state-4 HP merge has no HP delta to apply.
+  - confirmed negative: current `4/7` status object does not contain a real `combatinfo` stream:
+    - `trace_battle_status7_combatinfo_detail` appears only at `autorevive_read`, `autorevive_clear_call`, `fdata_ptr_read`, and `fdata_len_read`.
+    - the detailed dump shows `cursor=36 blobObj=00000018 blobPtr=00000000 blobLen=0`; no `combatinfo_word*` / `combatinfo_flag_store` checkpoints fire.
+- conclusion:
+  - the main blocker is still the `4/6.actioninfo` -> local HP/KO path, not enemy-template population and not terminal object ordering.
+  - `4/7.combatinfo` is still a likely reward/prompt field, but this run proves the current mock sends no useful combatinfo payload.
+- changed:
+  - added trace-only `vm_net_trace_battle_local_state_write()` in `src/main.c`, called from `src/hookRam.c`.
+  - it watches Battle.cbm `R9+0x2918` local battle state, active fighter/action blocks, enemy fighter block, and `R9+0x34B4/0x34B6` pending HP/MP deltas.
+  - no guest register, packet, Battle.cbm global, or game logic is modified.
+- next:
+  - rerun one battle and inspect `trace_battle_local_state_write label=pending_delta|local_state_header|active_action_block|enemy_fighter_block` to identify whether `4/6.actioninfo` never writes HP deltas, writes them to the wrong slot, or writes them and clears them before `sub_4B70`.
+
+## 2026-06-13 Battle enters with subtype-5 enemy template, but KO is still HP-inert
+
+- verified:
+  - latest rerun again enters Battle.cbm through the challenge path:
+    - `bin/logs/net_packets.log` tick `308`: `4/1 id=3,index=3,pos=173,272` handled by `builtin-challenge-interaction`.
+    - the response is two objects, `1/5/5 + 1/4/10`, responseLen `181`.
+  - subtype-5 enemy-template prefill is now parser-aligned for this run:
+    - `bin/logs/net_trace.log` `trace_groupinfo_case5_reader after_id` shows cursor `6` and id `3`.
+    - `after_name_ptr` advances to cursor `16` and reads `Monster`.
+    - `after_byte34/after_byte35` read `1/0`, and the four stat reads each return `20`.
+  - Battle.cbm accepts the real enemy id:
+    - `sub_66CC_before_return` reports `enemyIds=10001,3,0,0`.
+    - the same trace reports `enemyHead=...,00000003,...,00000014,00000014`.
+  - action/terminal state is still not semantically correct:
+    - first `4/2` at packet tick `317` returns `1/4/6 actionnum=1`, mock enemy HP `8/20`.
+    - second `4/2` at tick `345` returns `1/4/6(lethal-local-ko-pending)`, mock enemy HP `0/20`.
+    - third `4/2` at tick `371` returns `1/4/7 + 1/4/8 + 1/4/11 + 1/4/9`.
+    - around ticks `346..372`, Battle-local traces still keep `enemyHead ... 20/20`; subtype-8 apply at `sub_4B70_battle_apply_entry` also sees `enemyHead ... 20/20`.
+- conclusion:
+  - confirmed: the current subtype-5 prefill line is sufficient to avoid the fallback player-template enemy for the latest id `3` battle.
+  - confirmed negative: mock-side HP reaching zero does not make Battle.cbm's local fighter table enter KO/death state.
+  - confirmed negative: terminal victory objects on the third operate request still run against an enemy that the client locally considers alive.
+- changed:
+  - trace-only `HandleBattleSettleMsg` / `4/7.combatinfo` probes now dump stream object words, reader callback slots, cursor/blob pointer/length, next bytes, and read-return checkpoints at `0x05189910..0x051899CE`.
+  - evidence target: recover whether `combatinfo` is a reward/result summary only, or whether a non-empty field is also required before `4/8/4/11/4/9` can present a nonblank victory prompt.
+- next:
+  - rerun one battle and inspect `trace_battle_status7_combatinfo_detail` labels `combatinfo_word*`, `combatinfo_flag_store`, and optional `combatinfo_bonus_*` to recover the minimal `4/7.combatinfo` record shape.
+  - keep the separate `4/6.actioninfo` question open for the actual monster KO/death animation, because current type-1/valueB records still do not decrement `enemyHead`.
+
+## 2026-06-13 Type-1 valueB confirmed on wire, but target mapping remains HP-inert
+
+- verified:
+  - latest rerun delivered the remaining-HP `valueB` experiment:
+    - `bin/logs/net_trace.log` line `13820`: first action payload contains `valueA=12,valueB=8`.
+    - line `14088`: Battle.cbm reads `child_valueB_read r0=00000008`.
+    - lines `14146` and `14160`: materialized type-1 record is `record=1,1,1 valueA=12 valueB=8`.
+    - line `14938`: lethal action payload contains `valueA=8,valueB=0`.
+    - lines `15264` and `15278`: lethal materialized record is still `record=1,1,1 valueA=8 valueB=0`.
+  - confirmed negative: even with battleinfo HP aligned to `20/20` and `valueB` carrying `8/0`, Battle-local fighter HP does not decrement.
+    - `bin/logs/net_trace.log` lines `15879..15885` still show `valueAB=0,20`.
+    - line `16166` still shows `enemy0=...,00000014,00000014` during terminal/status processing.
+    - `bin/logs/net_packets.log` line `239` shows a third post-lethal `4/2` still occurs before the terminal chain.
+- conclusion:
+  - confirmed: `valueB` is parsed correctly, but it is not sufficient to select/commit the enemy fighter HP state.
+  - confirmed: the safe type-1 slot experiment changed the record from the crashing `record=1,2,1` to `record=1,1,1`, avoiding `0x05186C98 -> pc=0` but leaving target selection HP-inert.
+  - hypothesis: type-1 needs the actor slot to stay on safe wire slot `1`, while the child target wire slot must change away from the previous `0` so the local action points at the enemy fighter instead of the active/player-side slot.
+- changed:
+  - `src/main.c` now keeps `CBE_BATTLE_TYPE1_FIRST_ACTOR_WIRE_SLOT=1` by default, but adds `CBE_BATTLE_TYPE1_FIRST_TARGET_WIRE_SLOT` and defaults it to `1` for the next run.
+  - battle operate traces now print the actual first-record `wireMapped=<actor>_to_<target>` values used after type-1 overrides.
+- next:
+  - rerun and check whether the first/lethal records still avoid the `0x05186C98` null callback, whether `targetId` changes away from the previous self/slot-1 behavior, and whether `enemy0` moves from `0x14/0x14` before any terminal objects.
+
+## 2026-06-13 Type-1 child target slot 1 is parsed but still HP-inert
+
+- verified:
+  - the newest rerun used the target-slot experiment:
+    - `bin/logs/net_trace.log` line `20996`: first `4/6` logs `wireMapped=1_to_1`, `valueA=12,valueB=8`.
+    - line `22235`: lethal `4/6` logs `wireMapped=1_to_1`, `valueA=8,valueB=0`.
+    - line `20995`: first actioninfo payload changed to include the new child target byte (`...010100010100010100010100...`) instead of the older target `0` sequence.
+  - Battle.cbm consumed that target byte:
+    - line `21236`: `child_actor_map` reads `r0=00000001`.
+    - line `21323`: materialized record dump has child bytes at offset `0x14..0x1c` as target `1`, flag `1`, `valueA=12`, `valueB=8`.
+    - line `22562`: lethal materialized record similarly has target `1`, flag `1`, `valueA=8`, `valueB=0`.
+  - confirmed negative: this still does not commit local HP/death.
+    - lines `21339`, `21395`, `22578`, and `22626` keep `valueAB=0,20 targetId=1`.
+    - `bin/logs/net_packets.log` line `351` still shows a third post-lethal `4/2` before terminal settlement.
+- conclusion:
+  - confirmed negative: `type=1 actor=1,target=1,valueB=remainingHP` is parser-valid and crash-free, but still targets the HP-inert path.
+  - superseded hypothesis: the child target might need to be the opposite/enemy side slot. The later `1_to_2` rerun disproved this as a default because it reaches a zero callback crash at `0x0518789C`.
+- changed:
+  - `CBE_BATTLE_TYPE1_FIRST_TARGET_WIRE_SLOT` is restored to default `1`; the env override remains available to reproduce `1_to_2` or try other target bytes without another code edit.
+- next:
+  - rerun with the corrected enemy-id mapping and check whether `enemyWireId`/slot ids separate from the player template before trying target bytes again.
+
+## 2026-06-13 Battle blank prompt caused by premature terminal and enemy HP mismatch
+
+- verified:
+  - user-visible state: after the final hit, Battle exits immediately to a blank prompt; the expected monster-death animation and victory/EXP/drop prompt are missing.
+  - latest packet sequence:
+    - `bin/logs/net_packets.log` tick `3835`: touch/challenge `4/1 id=105` enters Battle with `1/4/10`.
+    - tick `3843`: first `4/2 index=0 Operate=0` receives `1/4/6 actionnum=2`, responseLen `129`.
+    - tick `3865`: second/lethal `4/2` receives inline terminal `1/4/6+1/4/7+1/4/8+1/4/11+1/4/9`, responseLen `422`.
+    - tick `3866`: Battle-emitted short `25/5` receives `1/10/17 { result=1, lastexp=1, curexp=1 }`.
+  - `10/17` is consumed but still not correct:
+    - `bin/logs/net_trace.log` tick `3867` dispatches `kind=10 subtype=17` via `trace_business_dispatch_item` / `trace_business_handler`.
+    - the same window still enters `battle_event7_dispatch_entry_sub_17AC` under active Battle screen/current-this `01053f78/01053f60`.
+  - critical mismatch:
+    - runtime Battle.cbm slot dumps around `sub_4B70` / subtype-9 still show `enemy0=...,00000050,00000050`.
+    - mock-side trace for the same lethal response reports `enemyHp=0/20`.
+- conclusion:
+  - confirmed negative: `25/5 -> 10/17` is not the missing victory prompt contract when sent immediately after inline terminal objects.
+  - confirmed: the client-local battleinfo enemy HP was `80/80`, while mock combat math used `20/20`; two player hits totaling 20 cannot produce a local KO/death animation from the client's fighter table.
+  - confirmed: inline `4/7+4/8+4/11+4/9` on the lethal `4/6` exits too early for the desired visual flow.
+- changed:
+  - `src/main.c` battleinfo enemy HP default now uses `CBE_BATTLE_ENEMY_HP` default `20`, matching the mock-side battle-operate HP seed.
+  - lethal `4/6` responses no longer append `4/7+4/8+4/11+4/9` in the same WT packet; they stay as `1/4/6` and log `4/6(lethal-local-ko-pending)`.
+  - terminal follow-up safety remains for later `4/2` / `25/5` windows, but the next run should show whether local KO now happens before any settlement object.
+- next:
+  - rerun a complete fight and check that `1/4/10 battleinfo` encodes enemy HP `0x14/0x14`, that Battle.cbm slot dumps decrement toward `0/20`, and that the final hit produces a KO/death animation before any `25/5` or terminal follow-up.
+
+## 2026-06-13 Type-1 actioninfo reaches damage dispatch but crashes on slot byte 2
+
+- verified:
+  - the rerun used the new `type=1` default:
+    - `bin/logs/net_packets.log` tick `206`: first `4/2 index=0 Operate=0` receives `1/4/6 actionnum=2`, responseLen `133`.
+    - `bin/logs/net_trace.log` logs `mock_battle_operate_response ... firstRecordType=1 ... damageValue=12 ... enemyHp=8/20`.
+  - the parser goal was reached:
+    - `trace_battle_actioninfo_stream_read` at tick `207` shows the first record materialized as `record=1,2,1`; this is the intended richer `type=1` branch, not the old malformed `record=1,1,2,0`.
+  - confirmed negative: the current `record=1,2,1` shape is not execution-safe.
+    - runtime state before crash: `trace_battle_local_action_state label=state4_store_target ... localState=255,0,1,0,0,0,2 ... valueAB=0,20`.
+    - `trace_battle_state4_detail` shows `activeSlot=1`, but the local action record bytes contain slot byte `2`; `trace_battle_damage_dispatch_detail` then reaches `type6_call pc=05186c98` with the callback source still zero.
+    - `bin/logs/stdout_trace.log` ends with `pc=0`, `lr=5186c9b`, `lastPc=5186c98`.
+- static evidence:
+  - Battle.cbm `sub_6B08` at `0x05186C5A..0x05186C98` handles local action type `1`. It calls `sub_4404(activeSlot,3,6,1,7)` at `0x05186C74`; when that returns nonzero, it loads a stage callback from `slotStage+0x0C` and calls it at `0x05186C98`.
+  - `sub_4404()` (`0x05184404..0x05184456`) returns `1` when the current slot stage value does not match the supplied small set. In the failing run, the selected stage block is all zero, so the later `blx` target is zero.
+- changed:
+  - next default experiment keeps `type=1`, but narrows the first action to one record by default (`CBE_BATTLE_TYPE1_BUNDLE_COUNTER=0`).
+  - for `type=1`, the first record's slot byte now defaults to `1` (`CBE_BATTLE_TYPE1_FIRST_ACTOR_WIRE_SLOT=1`) instead of the crashing `2`.
+  - env overrides remain:
+    - `CBE_BATTLE_ACTION_TYPE=2` restores the stable HP-inert baseline.
+    - `CBE_BATTLE_TYPE1_BUNDLE_COUNTER=1` re-enables the paired counter record.
+    - `CBE_BATTLE_FIRST_ACTION_TYPE` / `CBE_BATTLE_COUNTER_ACTION_TYPE` can split the record types for later mixed experiments.
+- next:
+  - rerun and check whether the first record materializes as `record=1,1,1`, whether `sub_6B08` avoids the `0x05186C98 -> pc=0` path, and whether enemy HP finally moves from `0x14/0x14`.
+
+## 2026-06-13 Battle HP aligned, but type-2 actioninfo does not decrement client HP
+
+- verified:
+  - HP alignment fix was active:
+    - `bin/logs/net_packets.log` tick `163`: `1/4/10 battleinfo` now carries enemy HP/max HP `0x14/0x14`.
+  - inline terminal removal was active:
+    - tick `208`: second/lethal mock-side `4/2` receives only `1/4/6 actionnum=1`, responseLen `84`.
+  - client still did not form a local KO:
+    - tick `226`: client sends a third `4/2`.
+    - `bin/logs/net_trace.log` around ticks `209..227` keeps reporting `enemy0=...,00000014,00000014`.
+  - current action record is parser-valid but HP-inert:
+    - `trace_battle_actioninfo_materialize_detail` shows the lethal record as `record=2,2,1 valueA=8 valueB=0`.
+    - `trace_battle_local_action_state` shows `valueAB=0,20`, so the local fighter table still has the enemy at `20/20`.
+- conclusion:
+  - confirmed: the latest blocker is no longer battleinfo HP mismatch.
+  - confirmed negative: current `type=2` `4/6.actioninfo` records drive effect/materialization but do not decrement the client-local fighter HP or trigger KO/death.
+  - hypothesis: the damage/KO path needs the richer `type=1` action record while preserving the stable slot/subcount shape that now materializes as `record=2,2,1` for type 2.
+- changed:
+  - `src/main.c` now defaults battle action records to `type=1`.
+  - the builder keeps `actor=2,target=0,subCount=1` for player-hit records and includes the damage number as the type-1 blob/string.
+  - `CBE_BATTLE_ACTION_TYPE=2` can restore the previous type-2 baseline for comparison.
+- next:
+  - rerun and first check whether the record materializes as `record=1,2,1` rather than the old crashing `record=1,1,2,0`.
+  - then check whether `enemy0` changes from `0x14/0x14`, whether damage-dispatch reaches a non-null callback, and whether the final hit plays the monster death animation before any terminal follow-up.
+
+## 2026-06-13 Battle terminal reaches victory gate but remains in auto prompt; add subtype-8 before gate/result
+
+- verified:
+  - latest inline-terminal run no longer needs a third attack:
+    - `bin/logs/net_packets.log` latest battle session tick `193`: first `4/2` -> `1/4/6`, responseLen `129`.
+    - tick `219`: second/lethal `4/2` -> composite terminal response, responseLen `369`.
+    - no later third `4/2` appears in that session tail.
+  - the terminal objects are consumed and subtype `4/9` passes its victory gate:
+    - `bin/logs/net_trace.log` line `11813`: `mock_battle_operate_response response=4/6+4/7+4/11+4/9 ... enemyHp=0/20 ... battleEnds=1`.
+    - line `12491`: subtype-9 reaches `pc=05189c04` with gate bytes showing `mainObj+0x474 == 1`.
+    - line `12493`: subtype-9 reaches `pc=05189ea4` with `r0=8`.
+  - this is still not the clean victory exit:
+    - after the gate success, repeated UI traces draw `按1键开启/关闭自动战斗`.
+    - runtime stays on the Battle screen context (`activeScreen=01053f78`, `currentThis=01053f60`).
+- conclusion:
+  - confirmed: inline timing is now correct; the previous third-attack problem is fixed.
+  - confirmed negative: `4/7 + 4/11 + 4/9` is only a victory-gate/phase-8 sequence, not the full battle-end cleanup.
+  - strongest next contract: run subtype `4/8` while Battle.cbm is still in mode `2`, then run `4/11` and `4/9`.
+  - evidence for the ordering: prior terminal `4/7 + 4/8` reaches `case8_apply_call pc=05189DB4` and `sub_4B70_send25_call`; `4/8` after `4/9` would be too late because subtype-9 reaches the phase-8 path.
+- changed:
+  - lethal action replies now append `4/7 + 4/8 + 4/11 + 4/9` after the `4/6` action object, producing `1/4/6 + 1/4/7 + 1/4/8 + 1/4/11 + 1/4/9`.
+  - stray post-terminal `4/2` safety replies now use `1/4/7 + 1/4/8 + 1/4/11 + 1/4/9`.
+  - no Battle.cbm logic is patched and no Battle globals are force-written.
+- next:
+  - rerun and check for `case8_apply_call pc=05189DB4`, `sub_4B70_battle_apply_entry`, then `case11_*`, then subtype-9 `0x05189C04/0x05189EA4`.
+  - success criteria: no third `4/2`, no persistent auto-battle prompt, and Battle screen context exits or advances to the documented result/victory path.
+
+## 2026-06-13 Battle terminal exits to scene but post-battle 25/5 still used escape-shaped result
+
+- verified:
+  - latest manual rerun uses the intended five-object lethal terminal response:
+    - `bin/logs/net_packets.log` tick `1435`: second/lethal `4/2` receives `responseLen=422`.
+    - `bin/logs/net_trace.log` line `2557`: `mock_battle_operate_response response=4/6+4/7+4/8+4/11+4/9 ... enemyHp=0/20 ... battleEnds=1`.
+  - subtype `4/8` now runs in the right window:
+    - line `3283`: `case8_apply_gate_check pc=05189D82`.
+    - line `3306`: `case8_apply_call pc=05189DB4`.
+    - line `3316`: `sub_4B70_battle_apply_entry ... lr=05189DB9`.
+    - line `3339`: `sub_4B70_send25_call`, so the next short `25/5` is emitted by Battle.cbm itself.
+  - subtype `4/11` and `4/9` still run after the apply:
+    - lines `3368..3385`: `case11_*` consumes `result=1,type=1`.
+    - lines `3454..3456`: subtype-9 reaches `0x05189C04` and `0x05189EA4`.
+  - the old auto-battle prompt symptom is gone from the latest packet tail; the client instead sends scene-side `25/5` and then `2/1 moveinfo`.
+- conclusion:
+  - confirmed: `4/7+4/8+4/11+4/9` is a materially better terminal sequence than `4/7+4/11+4/9`; it reaches apply/cleanup and then scene-side continuation.
+  - confirmed gap: the immediate Battle-emitted short `25/5` is still answered by the generic `1/25/5 { result=4 }` shell.
+  - evidence against result `4` for this battle-terminal window:
+    - `docs/re/battle-flow.md` records battle-end result `1` as victory and result `4` as escape.
+    - prior runtime/user-visible negative: terminal `4/7 + 4/4 { result=1 }` reached cleanup but showed escape success, so escape/leave semantics are easy to trigger accidentally.
+- changed:
+  - `vm_net_mock_build_scene_default_event_response()` now treats the first short `25/5` after `g_mockBattleOperateSessionFinished` as a one-shot battle-terminal ack.
+  - that one response stays same-subtype `1/25/5`, but uses `result=1` instead of `result=4`, then clears the finished-session flag.
+  - ordinary scene/default `25/5` responses remain `result=4`.
+- next:
+  - rerun one complete fight and check for `mock_scene_default_event_response response=25/5 result=1 battleTerminalAck=1`.
+  - user-visible target: the blank post-battle prompt should either become a victory/result prompt or disappear; if it remains blank, trace the text source around the first prompt after this ack.
+
+## 2026-06-13 Battle terminal 25/5 result=1 still enters kind25 generic branch; switch to 10/17
+
+- verified:
+  - the one-shot `25/5 result=1` experiment was active in the latest run:
+    - `bin/logs/net_trace.log` line `9305`: `mock_scene_default_event_response response=25/5 result=1 battleTerminalAck=1`.
+    - `bin/logs/net_packets.log` tick `5409`: response bytes end in `result=1`.
+  - user-visible blank prompt still appears, so `result=1` inside same-subtype `25/5` is not sufficient.
+  - runtime explains why:
+    - after dispatch, the packet still enters Battle.cbm fallback as `kind=25 subtype=5`.
+    - `trace_battle_sub17ac_flow` at tick `5410` takes the same `sub_17AC` family as the old `result=4` shell.
+    - the parsed record is still `kind=25`, which static/runtime evidence says falls through the handled set and reaches the generic branch rather than a victory handler.
+- conclusion:
+  - confirmed negative: changing only `25/5.result` from `4` to `1` does not change the local branch family; it remains a `kind=25 subtype=5` generic/no-message path.
+  - stronger current contract: the Battle-emitted short `25/5` is a request for the server's battle-end/result object, not a request to echo `25/5`.
+  - `docs/re/battle-flow.md` records the high-level battle-end response as `cmd=10, subcmd=17`, with `result=1` for victory.
+- changed:
+  - the first short `25/5` after `g_mockBattleOperateSessionFinished` now returns a single `1/10/17 { result=1, lastexp=1, curexp=1 }` object.
+  - this avoids producing another `kind=25` record for Battle.cbm `sub_17AC`.
+  - ordinary scene/default `25/5` responses remain `1/25/5 { result=4 }`.
+- next:
+  - rerun and check for `mock_scene_default_event_response response=10/17 result=1 battleTerminalAck=1`.
+  - if blank prompt remains, inspect whether `kind=10 subtype=17` reaches `HandleBattleActionResult` / `DispatchFactionNetEvents` or is ignored by the active dispatcher.
+
+## 2026-06-13 Battle terminal objects were one operate late; inline terminal on lethal 4/6
+
+- verified:
+  - latest run still emitted three battle operate requests:
+    - `bin/logs/net_packets.log` tick `239`: first `4/2` -> `1/4/6`, responseLen `129`, actionnum `2`.
+    - tick `262`: second `4/2` -> `1/4/6`, responseLen `84`, actionnum `1`.
+    - tick `278`: third `4/2` -> `1/4/7 + 1/4/11 + 1/4/9`, responseLen `290`.
+  - the second response was already lethal on the mock side:
+    - `bin/logs/net_trace.log` line `4965`: `enemyHp=0/20`, `battleEnds=1`, but response was only `4/6`.
+  - the terminal sequence itself still works when it finally runs:
+    - line `5816`: terminal `4/7+4/11+4/9`.
+    - tick `279`: subtype `4/9` reaches `0x05189C04` and `0x05189EA4`.
+- conclusion:
+  - `confirmed gap`: the terminal contract was being sent one operate request too late.
+  - `hypothesis`: the lethal action response should be a composite packet `1/4/6 + 1/4/7 + 1/4/11 + 1/4/9`, so the client can play the killing hit and immediately consume battle-end objects without asking for a third attack.
+- changed:
+  - strict and fallback battle-operate builders now append `4/7 + 4/11 + 4/9` to the same packet when `battleEndsThisRound=1`.
+  - non-lethal turns remain plain `1/4/6`.
+  - no Battle.cbm code is patched and no Battle globals are force-written.
+- next:
+  - rerun and check that tick sequence becomes: first `4/2` action, second lethal `4/2` composite `4/6+4/7+4/11+4/9`, then at most `4/12`; there should be no third `4/2`.
+
+## 2026-06-13 Battle terminal reaches subtype9 victory gate, next request is 4/12
+
+- verified:
+  - the new `1/4/7 + 1/4/11 + 1/4/9` terminal contract reached the intended victory-gate path:
+    - `bin/logs/net_trace.log` tick `227`: subtype `4/11` reaches `case11_result_read`, `case11_result_after_read`, and `case11_type_after_read`.
+    - same tick: `trace_battle_main_gate_write ... pc=05189B66` writes `mainObj+0x474=1`.
+    - same tick: subtype `4/9` reaches `0x05189BF0` with `gateBytes=2,0,0,0,1`, then reaches `0x05189C04` and `0x05189EA4`.
+  - the next blocker is a new client request, not a subtype-9 parser failure:
+    - `bin/logs/net_packets.log` after terminal response: `send_payload len=9`, `hdr=4/12`, then `unhandled_packet`.
+    - `bin/logs/net_trace.log` tick `237`: `trace_battle_outgoing_request_source ... pc=05184A70 ... regs=...,00000004,0000000c`.
+    - UI text at the same tick: `按1键开启/关闭自动战斗`.
+- conclusion:
+  - `confirmed`: `4/11` before `4/9` satisfies the missing subtype-9 gate.
+  - `confirmed gap`: the mock now needs a response for Battle.cbm's post-terminal short `4/12` request.
+  - `hypothesis`: an empty same-family `1/4/12` ack is parser-safe because static `sub_7BD0` returns immediately for subtype `>= 12` (`0x05189B06..0x05189B18`).
+- changed:
+  - added `vm_net_mock_build_battle_auto12_ack_response()` for `WT len=9 hdr=4/12`.
+  - response is a single empty `1/4/12` object and does not patch Battle.cbm logic or force-write globals.
+- next:
+  - rerun and check for `builtin-battle-auto12-ack`; if the client remains in Battle, inspect the next request after `4/12` rather than changing terminal `4/11+4/9` yet.
+
+## 2026-06-13 Battle terminal 4/7+4/9 reaches victory gate, add 4/11 before 4/9
+
+- verified:
+  - latest manual rerun delivered the two-object terminal follow-up:
+    - `bin/logs/net_packets.log` tick `225`: post-lethal `4/2` receives `responseLen=262`, the `1/4/7 + 1/4/9` packet.
+    - `bin/logs/net_trace.log` tick `226`: dispatch processes subtype `4/7`, then subtype `4/9`.
+  - subtype `4/9 { result=1 }` reaches the intended result branch but fails the state gate:
+    - `trace_battle_kind4_subtype9_flow` reaches `0x05189BF0`.
+    - the branch reads `mainObj=0500b210`, `gateBase=0500b680`, `gateBytes=2,0,0,0,0`.
+    - execution returns through `0x05189C02 -> 0x05189B18`, so no clean victory exit follows.
+  - prior `4/11` evidence explains the missing precondition:
+    - `trace_battle_main_gate_write ... pc=05189B66` showed subtype `4/11 { result=1,type=1 }` writes `mainObj+0x474=1`.
+    - static `sub_7BD0` subtype-9 result branch checks `mainObj+0x474` or `mainObj+0x470` before `0x05189C04`.
+- conclusion:
+  - `confirmed negative`: `1/4/7 + 1/4/9 { result=1 }` is parser-valid but lacks the subtype-9 gate precondition.
+  - `hypothesis`: victory terminal should be `1/4/7 + 1/4/11 { result=1,type=1 } + 1/4/9 { result=1 }`.
+- changed:
+  - terminal follow-up now returns `1/4/7 + 1/4/11 + 1/4/9` in both strict and fallback battle-operate builders.
+  - no Battle.cbm logic is patched and no Battle globals are force-written.
+- next:
+  - rerun one fight and check for `response=4/7+4/11+4/9`, a `trace_battle_main_gate_write` at `pc=05189B66`, then subtype-9 reaching `0x05189C04/0x05189EA4` instead of returning through `0x05189C02`.
+
+## 2026-06-13 Battle terminal 4/7+4/4 is escape-success, switch to 4/9 victory result
+
+- verified:
+  - latest manual rerun delivered the two-object terminal follow-up:
+    - `bin/logs/net_packets.log` tick `282`: post-lethal `4/2` receives `responseLen=262`, the `1/4/7 + 1/4/4` packet.
+  - ordering `4/4` after `4/7` fixed the previous mode-gate failure:
+    - `bin/logs/net_trace.log` tick `283`: `case4_mode2_gate` fires with `r0=2`.
+    - same tick: `case4_result_after_read` fires with `r0=1`.
+    - same tick: `case4_success_cleanup`, `sub_4B70_battle_apply_entry`, and `sub_4B70_send25_call` all fire.
+  - the result is semantically wrong:
+    - user-visible result is escape success after one battle.
+    - `docs/re/battle-flow.md` records high-level result `1` as victory and result `4` as escape, but Battle.cbm subtype `4/4` itself is the escape/leave branch.
+- conclusion:
+  - `confirmed negative`: `1/4/7 + 1/4/4 { result=1 }` is a valid escape/leave cleanup, not the monster-death victory contract.
+  - `hypothesis`: terminal victory should use the existing Battle.cbm subtype `4/9` result branch with `result=1`.
+- changed:
+  - terminal follow-up now returns `1/4/7 + 1/4/9 { result=1 }`.
+  - no game logic is patched and no Battle globals are force-written.
+- next:
+  - rerun one fight and check for `response=4/7+4/9`, `case1_9_result1_gate`, and whether the visible terminal message becomes victory instead of escape.
+
+## 2026-06-13 Battle terminal 4/8 before 4/4 fails the case4 mode gate
+
+- verified:
+  - latest manual rerun delivered the `4/7+4/8+4/4` terminal packet:
+    - `bin/logs/net_packets.log` tick `510`: post-lethal `4/2` receives `responseLen=315`, the three-object `1/4/7 + 1/4/8 + 1/4/4` packet.
+    - `bin/logs/net_trace.log` tick `511`: business dispatch sees objects `4/7`, `4/8`, and `4/4` in that order.
+  - `4/4` is reached, but it does not reach its result parser or cleanup branch:
+    - the old trace label `sub_7BD0_case4_result_read` fires at runtime `pc=05189E26` / off `0x7F06`, with packet `kind=4 subtype=4` and field table `result=1`.
+    - static disassembly corrects that label: off `0x7F06` is `cmp r0,#2; bne ...`, a mode gate before the result helper call.
+    - runtime at that gate has `r0=0`, so no `case4_result_after_read` or `case4_success_cleanup` trace follows.
+  - the exit is still not clean:
+    - after `25/5` and `2/1 moveinfo`, `runtime_state post_data_event` still reports active screen/current-this `01053f78/01053f60`.
+- conclusion:
+  - `confirmed negative`: `1/4/4 { result=1 }` after `1/4/8` is ordered too late; subtype-8/apply changes the state needed by the case4 gate.
+  - `confirmed static`: Battle.cbm case4 cleanup path is `0x7F06` mode-2 gate, `0x7F12` result read call, `0x7F14` result check, and `0x7F18` success cleanup.
+- changed:
+  - terminal follow-up now returns `1/4/7 + 1/4/4` only, so case4 runs before any subtype-8 apply path can clear the mode gate.
+  - renamed the misleading trace label at off `0x7F06` from `case4_result_read` to `case4_mode2_gate`.
+  - no game logic is patched and no Battle globals are force-written.
+- next:
+  - rerun one fight and check for `response=4/7+4/4`, `case4_mode2_gate` with `r0=2`, then `case4_result_after_read` and `case4_success_cleanup`.
+
+## 2026-06-13 Battle terminal 4/11 consumed, switch next cleanup trial to 4/4
+
+- verified:
+  - latest manual rerun consumed the three-object terminal follow-up:
+    - `bin/logs/net_packets.log` tick `472`: post-lethal `4/2` receives `responseLen=325`, the `1/4/7 + 1/4/8 + 1/4/11` packet.
+    - `bin/logs/net_trace.log` tick `473`: subtype-7 reaches `case7_settle_result_check`, `before_status7_parser`, `after_status7_parser`.
+    - same tick: subtype-8 reaches `case8_info_ptr_read`, `case8_info_len_read`, `case8_apply_gate_check`, and `case8_apply_call`; `sub_4B70_send25_call` fires.
+    - same tick: subtype-11 reaches `case11_result_read`, `case11_result_after_read`, and `case11_type_after_read`.
+  - `4/11` is not the missing clean-exit contract:
+    - after `case11_type_after_read`, runtime writes `mainObj+0x474=1` (`trace_battle_main_gate_write ... pc=05189B66`), proving the branch ran.
+    - post-terminal flow still emits `25/5` and `2/1 moveinfo`, but `runtime_state post_data_event` and later scene ticks continue under active screen/current-this `01053f78/01053f60`.
+- conclusion:
+  - `confirmed negative`: `1/4/11 { result=1,type=1 }` is parser-valid and stateful, but it does not remove the residual Battle screen context.
+  - next static target is Battle.cbm `HandleServerBattleCmd()` case 4 at off `0x7F06..0x7F4C`, whose `result=1` branch is the clear/reset/attribute-update path.
+- changed:
+  - terminal follow-up now returns `1/4/7 + 1/4/8 + 1/4/4`.
+  - the new object is minimal: `1/4/4 { result=1 }`.
+  - no game logic is patched and no Battle globals are force-written.
+- next:
+  - rerun one fight and check for `response=4/7+4/8+4/4`, subtype-4 parser traces if present, and whether post-`25/5` scene ticks leave `01053f78/01053f60`.
+
+## 2026-06-13 Battle partial exit via 4/7+4/8, add terminal 4/11 cleanup
+
+- verified:
+  - latest manual rerun confirms terminal `4/7+4/8` is a real partial exit, not just a visual illusion:
+    - `bin/logs/net_packets.log` tick `208`: post-lethal `4/2` receives `responseLen=297`, the two-object `1/4/7 + 1/4/8` packet.
+    - tick `209`: client emits `25/5`.
+    - tick `210`: client emits `2/1 moveinfo`.
+  - Battle.cbm consumes the terminal subtype-8 object and reaches its apply path:
+    - `bin/logs/net_trace.log` tick `209`: `case8_info_ptr_read`, `case8_info_copy_call`, `case8_apply_gate_check pc=05189D82`, `case8_apply_call pc=05189DB4`.
+    - the same tick reaches `sub_4B70_battle_apply_entry ... lr=05189DB9`.
+    - `sub_4B70_send25_call` fires, so the following `25/5` is a client/Battle-generated follow-up.
+  - the exit is still not clean:
+    - `sub_4B70_battle_apply_entry` still reports `mainBattle=2,0,0,0`.
+    - later scene runtime ticks and actor passes continue under active screen/current-this `01053f78/01053f60`, the Battle screen context.
+- conclusion:
+  - `confirmed partial`: `4/7+4/8` is sufficient to break out of the battle operate loop into scene-side requests.
+  - `confirmed negative`: it does not yet produce a clean final battle cleanup/result state.
+  - static follow-up target: Battle.cbm `HandleServerBattleCmd()` case 11 at off `0x7C16..0x7C8E` reads `result`, then `type`; with `result=1,type=1` it calls `SetBattlePhase(8)` and clears state bytes.
+- changed:
+  - terminal follow-up now returns `1/4/7 + 1/4/8 + 1/4/11`.
+  - the new object is minimal: `1/4/11 { result=1, type=1 }`.
+  - no game logic is patched and no Battle globals are force-written.
+- next:
+  - rerun one fight and check for `response=4/7+4/8+4/11`, `case11_result_read`, `case11_type_after_read`, and whether the post-`25/5` scene ticks still report the Battle screen context or a cleaner scene/screen state.
+
+## 2026-06-13 Battle terminal 4/7 parsed, add terminal-only 4/8 apply object
+
+- verified:
+  - latest manual rerun advanced beyond the old zero-action terminal blocker:
+    - `bin/logs/net_packets.log` tick `167`: touch/challenge request `4/1 id=105,index=3,pos=249,239` enters Battle with `1/4/10`.
+    - tick `173`: first operate request `4/2 index=0 Operate=0` receives `1/4/6 actionnum=2`.
+    - tick `199`: lethal operate receives `1/4/6 actionnum=1`; mock enemy HP reaches `0/20`.
+    - tick `217`: post-lethal `4/2` receives terminal-only `1/4/7`, responseLen `244`.
+  - terminal-only `4/7` is parser-safe:
+    - `bin/logs/net_trace.log` tick `218` reaches `case7_settle_result_check`, `before_status7_parser`, `sub_743C_status7_entry`, `sub_743C_itemnum_read`, `sub_743C_iteminfo_read`, `sub_743C_item_stream_init`, `sub_743C_before_sub_7228`, `sub_7228_entry`, `sub_743C_autorevive_read`, `sub_743C_fdata_ptr_read`, `sub_743C_fdata_len_read`, and `after_status7_parser`.
+    - no crash appears in `bin/logs/stdout_trace.log`.
+  - terminal-only `4/7` is not sufficient to exit Battle:
+    - `after_status7_parser` still reports active Battle screen `01053f78` and `mainBattle=2,0,0,0`.
+    - later traces at ticks `229..230` are still Battle.cbm fighter render probes.
+- conclusion:
+  - `confirmed negative`: post-lethal `1/4/7` alone is a valid settle/status parser contract, but it does not trigger the final Battle state reset/exit.
+  - `confirmed static`: `HandleServerBattleCmd()` / Battle.cbm off `0x7BD0` also has subtype `4/8`; branch `0x05189D16..0x05189E24` reads `result`, `autorevive`, and raw `info`, and the previously validated non-empty info candidate reaches `case8_apply_gate_check pc=05189D82` and `case8_apply_call pc=05189DB4`.
+- changed:
+  - post-lethal `terminalFollowup=1` now returns a two-object WT packet: `1/4/7` settle/status followed by `1/4/8 { result=1, autorevive=1, info=<12 raw bytes, byte11=1> }`.
+  - this is terminal-only; normal player/enemy action rounds still use subtype `1/4/6` tagged `actioninfo`.
+  - no Battle.cbm code is patched and no Battle globals are force-written.
+- next:
+  - rerun one fight and inspect whether the post-lethal response logs `response=4/7+4/8`, reaches `case8_apply_gate_check` / `case8_apply_call`, and changes `mainBattle` / active screen after `after_status7_parser`.
+  - if it still stays in Battle, compare case8 state bytes against subtype `4/4 { result=1 }` and subtype `4/11 { result=1,type=1 }` static cleanup branches before adding another object.
+
+## 2026-06-13 Battle terminal-only settle experiment
+
+- verified:
+  - latest broad-trace rerun confirms the terminal blocker is still the post-lethal `4/2 -> 1/4/6 actionnum=0` response:
+    - `bin/logs/net_packets.log` tick `157`: challenge `4/1 id=105,index=3`
+    - tick `167`: first operate response `responseLen=129`, `actionnum=2`
+    - tick `192`: lethal response `responseLen=84`, `actionnum=1`
+    - tick `206`: post-lethal response `responseLen=39`, `actionnum=0`
+  - new `trace_battle_server_cmd` proves the post-lethal server response is consumed only as kind `4` subtype `6`:
+    - `bin/logs/net_trace.log` tick `207`: `dispatch_entry ... kind=4 subtype=6 ... mockHp=110/120,0/20`
+    - the same tick reaches `case6_action_entry`, `case6_before_action_parser`, and `case6_after_action_phase_set`.
+    - no `case7_settle_result_check` or `case8_*` marker appears in that terminal window.
+  - the zero-action return is unchanged:
+    - tick `207`: `actionnum_result r0=00000000`
+    - tick `207`: `trace_battle_actioninfo_loop_detail ... actionCount=0`, then `return pc=05189024`.
+  - field-table trace is useful but its displayed `taggedLen` was endian-wrong for BE16 field lengths.
+- changed:
+  - fixed `trace_wt_field_entry.taggedLen` decoding to BE16 so `00 01` fields display as length `1`, not `256`.
+  - changed `vm_net_mock_build_battle_operate_response()` and its fallback so only `terminalFollowup=1` replies with a single `1/4/7` settle/status object instead of `1/4/6 actionnum=0`.
+  - `vm_net_mock_append_battle_status7_object()` now uses the current mock role HP for the `hp` field.
+- evidence:
+  - static Battle.cbm `HandleServerBattleCmd()` off `0x7BD0` routes subtype `7` through the settle gate at off `0x805C` and into `HandleBattleSettleMsg()` off `0x743C` only when the current mode value is `2`.
+  - latest runtime tick `207` shows the post-lethal dispatch window still has mode `2`, unlike the older delayed scene-default `25/5 -> 4/7` negative where mode had already become `0`.
+- next:
+  - rerun one fight and inspect whether terminal-only `4/7` reaches `before_status7_parser` / `sub_743C_status7_entry`, exits battle, or exposes the next missing `iteminfo/combatinfo` contract.
+
+## 2026-06-13 Battle broad terminal trace pass
+
+- verified:
+  - latest manual rerun still pins the active terminal gap after a lethal `1/4/6` action reply:
+    - `bin/logs/net_packets.log` latest session ticks `207`, `215`, `248`, `265`
+    - tick `215`: first action reply carries `actionnum=2`
+    - tick `248`: lethal reply carries `actionnum=1`
+    - tick `265`: post-lethal follow-up is still `1/4/6 actionnum=0`
+  - three empty companion-field encodings are confirmed negative for `iteminfo/teaminfo`: raw empty, raw tagged-empty, and empty WT blob.
+    - latest evidence: `bin/logs/net_trace.log` tick `266` still shows `trace_battle_teaminfo_wrapper_detail ... teamCount=1`, then reads neighboring `actionnum` bytes as record data.
+  - static dispatch evidence now broadens the terminal search space beyond only subtype `6`:
+    - `HandleServerBattleCmd()` / Battle.cbm off `0x7BD0` dispatches kind-4 server battle responses.
+    - subtype `6` is action parsing; subtype `7` is settle parsing; subtype `8` is info/autorevive/fbs/fdata; subtype `1`/`9`, `4`, and `11` are result/cleanup branches.
+  - static WT-object evidence from main CBE shows parsed objects expose a field table at object `+0x18`, with count at `+0x10` and 12-byte entries (`namePtr`, `valuePtr`, metadata).
+- changed:
+  - added trace-only `trace_wt_field_table` / `trace_wt_field_entry` dumps for WT objects entering battle parsers.
+  - added `trace_battle_server_cmd` snapshots at `HandleServerBattleCmd()` dispatch and key subtype branches, including parsed kind/subtype, Battle state bytes, team counts, phase word, and mock HP state.
+  - extended status-7/settle tracing to dump the packet field table.
+  - no game logic patch, no Battle.cbm bypass, no forced write to Battle globals.
+- next:
+  - rerun one complete manual fight and inspect whether post-lethal remains only subtype `6`, or whether a later subtype `7`/`8`/result branch is requested/accepted.
+  - if subtype `6` remains the only path, use the new field-table dumps plus `InitActionSlot_B()` slot id/link traces to recover a real non-empty `teaminfo` record instead of trying more empty placeholders.
+
+## 2026-06-13 Battle operate subtype-6 companion fields
+
+- verified:
+  - current `battle-flow.md` still describes battle end mainly as result objects such as `10/17`, but the latest live card point is inside the already-active Battle.cbm operate loop: `1/4/2 -> 1/4/6`.
+  - latest logs confirm the terminal follow-up remains a parser-valid but semantically weak empty subtype-6 response:
+    - `bin/logs/net_packets.log` ticks `258`, `293`, `314`
+    - tick `314` request is another `4/2 index=0 Operate=0`
+    - response length is `39`, containing only `actionnum=0` and empty `actioninfo`.
+  - static Battle.cbm evidence shows subtype-6 reads companion fields before action records:
+    - `HandleBattleActionMsg()` at `0x05188DD0` / offset `0x6EB0`
+    - `InitActionSlot_A()` at `0x05188C32` / offset `0x6D12`, field `iteminfo`
+    - `InitActionSlot_B()` at `0x05188CDC` / offset `0x6DBC`, field `teaminfo`
+    - zero-action direct return at `0x051890FA..0x05189104`.
+- changed:
+  - `src/main.c` now emits explicit empty raw `iteminfo` and `teaminfo` fields in every `1/4/6` battle-operate response, before `actionnum/actioninfo`.
+  - both the strict battle-operate builder and relaxed fallback builder use the same helper.
+  - trace lines now mark `companionFields=iteminfo_empty,teaminfo_empty`.
+- status:
+  - confirmed: this stays at the mock-server packet boundary and does not patch Battle.cbm logic or force-write battle globals.
+  - hypothesis pending rerun: explicit companion fields may expose the next terminal-end branch or prove that non-empty `teaminfo` / `iteminfo` records are required.
+- next:
+  - rerun one short battle and inspect whether `sub_teaminfo_wrapper_*` fires after the new fields.
+  - if terminal follow-up still returns through the zero-action loop, recover the minimal non-empty `teaminfo` record instead of changing `actionnum` or reviving the rejected `type=1` actioninfo experiment.
+
+- follow-up after the manual rerun:
+  - verified:
+    - the new fields were delivered and did not crash:
+      - `bin/logs/net_packets.log` tick `222` response `1/4/6` grew to `responseLen=151` and contains `iteminfo`, `teaminfo`, `actionnum`, `actioninfo`.
+      - tick `244` lethal response is `responseLen=106`.
+      - tick `262` terminal follow-up is `responseLen=61`.
+    - `sub_teaminfo_wrapper_*` now fires; previous run had zero matches.
+    - terminal follow-up still returns through the zero-action loop:
+      - `bin/logs/net_trace.log` tick `263` shows `trace_battle_actioninfo_loop_detail ... actionCount=0`, followed by `return pc=05189024`.
+  - conclusion:
+    - `confirmed negative`: zero-length raw `iteminfo/teaminfo` values are not a correct empty stream.
+    - evidence: `sub_teaminfo_wrapper_member_id_read` reads `r0=74696f6e` (`"tion"`) and `link_value_read` reads values such as `03010001`, proving the parser continued into later packet/object bytes instead of seeing zero records.
+  - changed:
+    - `src/main.c` now encodes `iteminfo` and `teaminfo` as tagged empty streams: one tagged `u8` value `0`.
+    - trace marker changed to `companionFields=iteminfo_tagged_empty,teaminfo_tagged_empty`.
+  - next:
+    - rerun one short battle and check that `sub_teaminfo_wrapper_count_ready/count_read` reports zero records and no `member_id_read` fires for the empty field.
+    - if terminal still stalls, the next contract likely needs a real non-empty `teaminfo` relation record or a separate battle-end object after lethal.
+
+## 2026-06-13 IDA static analysis: comprehensive function naming and struct definition
+
+- changed:
+  - All game logic region functions (0x100-0x105) fully named — zero `sub_` remaining
+  - Defined key structs: `UIControlV2` (0x40C bytes, 25 vtable fn ptrs), `BattleActor` (340 bytes), `PopBox` (dialog box)
+  - Renamed `AdvanceTextChar` → `PopBox_TimerAdvanceText`
+  - Added structural comments to `InitUIControl`, `DrawPopBoxUI`, `AllocBattleActorArray`, `FreeBattleTeamData`
+  - Confirmed ARM library regions (0x106-0x10C) contain only `sub_` functions with no game-logic xrefs
+  - IDB saved with all progress
+- verified:
+  - All Battle subsystem functions named (50+ functions)
+  - All Scene subsystem functions named (50+ functions)
+  - All Actor/Role subsystem functions named (90+ functions)
+  - All Guild subsystem functions named (45+ functions)
+  - All Shop subsystem functions named (23+ functions)
+  - All Task/Quest subsystem functions named (50+ functions)
+  - All Timer subsystem functions named (30+ functions)
+  - All Network subsystem functions named (7+ functions)
+  - All Item/Skill subsystem functions named (20+ functions)
+  - UI control subsystem fully mapped: ListBox, PopBox, UIControl with vtable layout
+  - Payment/HTTP subsystem functions named
+- evidence:
+  - IDA func_query for `^sub_10[0-5]` returns 0 results
+  - All remaining `sub_` functions are in 0x106+ ARM library regions with no game-logic callers
+  - String cross-references from `coolbar_*.c`, `MMORPG_*.c` source files all resolve to named functions
+- next:
+  - Deep analysis of individual function logic for protocol documentation
+  - Define more precise struct field names based on usage patterns
+  - Map network packet format fields to parser functions
+
+## 2026-06-13 Battle flow: complete client request/server response mapping
+
+- changed:
+  - Created `docs/re/battle-flow.md` — comprehensive battle flow document
+  - Mapped full battle lifecycle: trigger → enter → actions → end
+  - Documented all client network requests with WT packet format
+  - Documented all server response handlers with field requirements
+  - Identified battle state machine values and transitions
+- verified:
+  - Battle trigger: `HandleSceneNPCInteraction` (0x1027D3C) → key 0x4000 on monster
+  - Battle enter: `HandleBattleEnterReq` (0x1015E14) → WT cmd=2 subcmd=1 Type=2
+  - Battle enter response: `HandleBattleResultEvent` (0x103DABC) → WT cmd=10 subcmd=22 result=1/0
+  - Attack: `HandleBattleActionDispatch` phase 0 → `SendSerialPacket(ctx, 8, 3, targetSeq)`
+  - Skill: `BattleAction_SelectSkill` (0x101CD1E) → WT cmd=4 subcmd=1 type=29
+  - Item: `BattleAction_UseItem` (0x101CA42) → WT cmd=3 subcmd=1 type=7 param=29
+  - Defend: `BattleAction_Defend` (0x101C99A) → no network request, local only
+  - Escape: `HandleBattleConfirm` n2=2 → WT cmd=5 subcmd=1 type=2 param=12
+  - Battle end: `HandleBattleActionResult` (0x1042AAE) → WT cmd=10 subcmd=17 result=1-5
+  - Battle menu result: `HandleBattleMenuResult` (0x1042E3E) → WT cmd=10 subcmd=40
+  - Exp result: `ProcessExpBattleResult` (0x1040A2C) → reads lastexp/curexp
+  - Net dispatch registration: `InitScenePageTable` (0x1042F34) page[0].netHandler = HandleBattleResultEvent
+- evidence:
+  - All functions decompiled and cross-referenced in IDA
+  - `alloc_outgoing_game_event` (0x100E2E4) creates WT packets: result[0]=1, result[1]=type, result[2]=param
+  - `SendSerialPacket` (0x1019B4C) used for in-battle attack actions
+  - Battle state values confirmed: session+23682 (1=player turn, 3=waiting, 5=chat)
+- next:
+  - Implement server-side battle handlers matching documented protocol
+  - Verify battle flow end-to-end with emulator
+
+## 2026-06-13 Network protocol format and dispatch mapping
+
+- changed:
+  - Fully mapped network packet format: WT magic (0x57 0x54), BE16 totalLen, u8 fieldCount, TLV entries (u8 nameLen+name, BE16 valLen+val)
+  - Mapped main business dispatch `net_business_dispatch_by_subcmd` (0x1012f78): 18 subcmd types
+  - Mapped scene channel dispatch `net_handle_scene_channel_dispatch` (0x1039b8a): 14 subcmd types
+  - Mapped actor move dispatch `net_handle_actor_move_info` (0x1012adc): 8 subcmd types
+  - Mapped chat dispatch `net_handle_type_payload_detail` (0x10126c6): 6 channel types
+  - Defined structs: `ActorInfo`, `ActorSpriteEntry`, `SceneActorEntry`, `GameGlobalState`, `NetBusinessEntry`
+  - Added structural comments to all key protocol functions
+  - IDB saved with all progress
+- verified:
+  - ParseNetworkPacket (0x100955e): header validation, field extraction into dest buffer
+  - ParseSceneActorPacket (0x1009ac2): 3-stage parse (header → actor list → sprite data)
+  - ParseActorListData (0x10097d0): per-actor TLV with kind(0/1/2), subKind, actorId, name, extra
+  - ParseActorSpriteData (0x10098fe): 8 TLV fields per sprite (resName, animName, pose, dir, 6 anim pairs)
+  - event_packet_build_WT (0x103461a): serializes WT packet with TLV fields
+  - event_packet_parse_WT (0x103467a): parses WT packet magic + TLV fields
+  - alloc_outgoing_game_event (0x100e2e4): cmdType=2 battle, 5 scene; returns vtable for field adding
+  - Battle enter sends event(2,1,2,10) with Type=2
+  - Scene exit sends event(5,1,subcmd,actionId) with exitID/type/curid/objid fields
+- evidence:
+  - WT magic bytes 0x57 0x54 confirmed in both build and parse functions
+  - Business dispatch switch at 0x1012eac covers subcmds 2-30
+  - Scene channel dispatch switch at 0x1039b9a covers subcmds 1-21
+  - Actor move dispatch switch at 0x1012b0a covers subcmds 2-13
+- next:
+  - Define precise protocol.md with packet format tables
+  - Map all send_* functions to their request packet formats
+  - Analyze remaining net_handle_* functions for field-level protocol docs
+
+## 2026-06-13 Battle terminal-followup static narrowing and extra trace probes
+
+- verified:
+  - newest rerun still matches the prior narrow post-lethal symptom:
+    - first battle operate reply `tick=258` -> `responseLen=129`
+    - lethal reply `tick=293` -> `responseLen=84`
+    - post-lethal follow-up `tick=314` -> `responseLen=39`
+    - that follow-up is still `1/4/6 { actionnum=0, actioninfo="" }`
+  - newest `stdout_trace.log` has no fresh crash for this session; the visible `pc=0 / lastPc=5186c98` entry remains an older rejected `type=1` experiment.
+  - static IDA now narrows the subtype-6 entry contract:
+    - `HandleBattleActionMsg()` (`Battle.cbm` `0x05188DD0`, offset `0x6EB0`) always calls `InitActionSlot_A()` then `InitActionSlot_B()` before reading `actioninfo/actionnum`
+    - `InitActionSlot_A()` (`0x05188C32`, offset `0x6D12`) reads field `iteminfo`
+    - `InitActionSlot_B()` (`0x05188CDC`, offset `0x6DBC`) reads field `teaminfo`
+    - zero-action terminal follow-up is only a direct loop exit:
+      - `actionnum` stored at `0x05188EFE`
+      - loop compare/return at `0x051890FA..0x05189104`
+- conclusion:
+  - `confirmed`: current terminal follow-up `4/6 actionnum=0` is parser-valid but only reaches the empty-loop return path inside `HandleBattleActionMsg()`.
+  - `hypothesis`: the missing post-lethal contract is more likely a companion field/object problem than another `actionnum` scalar tweak; `teaminfo` is now a first-class candidate.
+- changed:
+  - trace-only instrumentation in [src/main.c](/E:/DevOs/CBE_EMU/src/main.c):
+    - added `sub_teaminfo_wrapper_*` probes for `0x6DBC/0x6DDC/0x6DF0/0x6E0A/0x6E24/0x6E46/0x6E5C`
+    - added `sub_actioninfo_parser_loop_*` probes for `0x6F0C/0x70FA/0x7100/0x7104`
+  - no mock packet logic or Battle/client state writes were changed.
+- validation:
+  - `make` passed on 2026-06-13.
+- evidence:
+  - `bin/logs/net_packets.log` newest battle session ticks `258/293/314`
+  - static IDA `mmBattleMstarWqvga.cbm` instance:
+    - `HandleBattleActionMsg()` at `0x6EB0`
+    - `InitActionSlot_A()` at `0x6D12`
+    - `InitActionSlot_B()` at `0x6DBC`
+    - zero-action loop exit at `0x70FA..0x7104`
+- next:
+  - rerun one short battle on this tracing build.
+  - first checks:
+    - whether terminal follow-up reaches `sub_teaminfo_wrapper_*` with a missing/empty `teaminfo`
+    - whether `sub_actioninfo_parser_loop_compare/return` shows a pure zero-iteration return with no local state mutation
+    - if yes, next packet experiment should prefer minimal non-empty companion data over changing battle globals or reviving the rejected `type=1` path
+
 ## 2026-06-12 Battle operate repeat-counterattack gating correction
 
 - verified:
@@ -35,6 +720,110 @@ Suggested entry format:
 - next:
   - rerun manual battle and check whether ticks after the first attack also stay on `responseLen=129 actionnum=2`.
   - then confirm whether repeated attacks keep monster回击 without reintroducing the old crash paths.
+
+## 2026-06-12 Battle HP state and terminal-round simulation
+
+- verified:
+  - latest user-visible state is now “每个回合都有怪物的回击流程了”.
+  - current packet baseline confirms repeated player attacks are all the same live `4/2 index=0 operate=0` family, so HP/damage state can be modeled entirely server-side without inventing a new request shape.
+  - evidence:
+    - `bin/logs/net_packets.log` latest stable session at ticks `174`, `198`, `220`
+    - `bin/logs/net_trace.log` battle replies remain `mock_battle_operate_response response=4/6 actionnum=2`
+- changed:
+  - added mock-side per-battle HP state in `src/main.c`:
+    - `g_mockBattleRoleHpCurrent/Max`
+    - `g_mockBattleEnemyHpCurrent/Max`
+  - `vm_net_mock_build_challenge_interaction_response()` now seeds those values when `1/4/10` battle start is emitted.
+  - `vm_net_mock_build_battle_operate_response()` and fallback now:
+    - clamp player-hit damage to remaining enemy HP
+    - decrement enemy HP on every attack round
+    - append monster counterattack only while enemy survives and player HP is still positive
+    - clamp counter damage to remaining player HP
+    - disarm the battle session after a terminal round where either side reaches `0`
+- status:
+  - `confirmed`: this keeps all logic on the mock-server boundary and does not patch Battle.cbm globals.
+  - `hypothesis`: lethal `4/6` rounds may now be enough for the client to enter its own kill/death/battle-end flow, but that still needs manual confirmation.
+- next:
+  - rerun one full battle until monster or player HP reaches `0`.
+  - first checks:
+    - `mock_battle_operate_response ... roleHp=... enemyHp=... battleEnds=...`
+    - final round suppresses counterattack when enemy HP is exhausted
+    - client either exits battle on monster death or enters death/revive flow on player death without a new crash
+
+- follow-up after the newest manual report:
+  - verified:
+    - current lethal-round simulation is not sufficient by itself to make the client leave battle; latest user-visible result is “现在战斗不会退出”.
+    - latest logs prove the client really does see a lethal round before the stall:
+      - `bin/logs/net_trace.log` at tick `334`: `mock_battle_operate_response ... damageValue=8 ... enemyHp=0/20 ... battleEnds=1`
+    - after that lethal round, the client still emits more `4/2` operate requests instead of switching to a new response family.
+      - evidence: `bin/logs/net_packets.log` later ticks `333`, `350`, `364`
+  - changed:
+    - lowered the default mock enemy HP seed from `80` to `20` in `src/main.c`.
+    - rationale:
+      - keep the current parser-safe damage grammar unchanged
+      - shorten manual repro time so the next runs can focus on the post-lethal battle-end contract instead of repeated mid-fight turns
+  - corrected mock bug:
+    - added `g_mockBattleOperateSessionFinished` so post-lethal `4/2` requests no longer re-seed battle HP from defaults.
+    - terminal follow-up requests now stay on a dedicated finished-session path instead of reopening the fight internally.
+  - validation:
+    - rebuild required via `make`.
+  - next:
+    - rerun with the shorter two-hit-style enemy HP budget and capture the exact packet/trace behavior after `battleEnds=1`.
+    - first checks:
+      - `mock_battle_operate_response ... terminalFollowup=1`
+      - whether the client stops sending `4/2`, or exposes a new post-battle request family once the mock no longer reopens the fight
+
+- follow-up after the newest stable lethal session and the next static pass:
+  - verified:
+    - newest packet/log pair no longer shows the old post-lethal re-open loop.
+      - evidence:
+        - `bin/logs/net_packets.log` newest battle session only shows two operate requests at ticks `259` and `282`
+        - the second reply is the lethal one, `responseLen=84`
+        - no later `4/2` appears in that newest session tail
+    - static `Battle.cbm` narrows a likely missing semantic boundary inside subtype-6 itself:
+      - `0x05188ED4..0x05188F4C` is the richer `type=1` materialize path with child-loop and tail-field consumption
+      - `0x05188F4E..0x05189010` is the lighter `type=2` path used by the currently stable hit/counter-hit flow
+  - conclusion:
+    - `confirmed`: the current stall after monster lethal is now local to Battle.cbm after it consumes the lethal `4/6` packet, not a missing follow-up request family.
+    - `hypothesis`: terminal monster-KO needs a subtype-6 `type=1` record, while ordinary mid-fight turns can stay on the parser-safe `type=2` baseline.
+  - changed:
+    - `src/main.c` now keeps all non-terminal rounds unchanged on `type=2`.
+    - only the narrow lethal monster-KO case (`enemyHpCurrent -> 0` on record 0, no counterattack) switches record 0 to a minimal `type=1` tagged-seq record built from the static grammar at `0x05188ED4..0x05188F4C`.
+    - fallback builder mirrors the same terminal-only `type=1` choice.
+  - validation:
+    - `make` passed.
+  - next:
+    - rerun one short battle to monster death.
+    - first checks:
+      - `mock_battle_operate_response ... recordType=1 ... enemyHp=0/20 ... battleEnds=1`
+      - whether Battle logs `sub_actioninfo_parser_type1_branch`
+      - whether the client exits battle cleanly, or at least advances beyond the prior post-lethal local stall
+
+- follow-up after the next rerun crashed immediately on attack:
+  - verified:
+    - the terminal `type=1` experiment is not safe.
+    - evidence:
+      - `bin/logs/net_packets.log` lethal reply at tick `775` is still a single-record `4/6` packet, `responseLen=84`
+      - `bin/logs/net_trace.log` around tick `776` shows:
+        - `sub_actioninfo_parser_header_type_read r0=1`
+        - later branch still lands on `sub_actioninfo_parser_type2_branch`
+        - materialized local record becomes `record=1,1,2,0`
+        - local state falls into `battle_damage_dispatch_gate_type6_check` at `0x05186C74`
+        - then reaches `battle_damage_dispatch_type6_call` at `0x05186C98`
+      - `bin/logs/stdout_trace.log` crash:
+        - `lastPc=5186c98`
+        - `lr=5186c9b`
+        - `pc=0`
+  - conclusion:
+    - `confirmed negative`: the current minimal terminal `type=1` tagged-seq encoding is wrong; it does not cleanly take the real type-1 path and instead destabilizes the later type-6 damage-dispatch branch.
+  - changed:
+    - reverted the terminal-only `type=1` experiment in `src/main.c`.
+    - restored the prior stable all-`type=2` default so attack requests no longer crash.
+  - validation:
+    - rebuild required via `make`.
+  - next:
+    - rerun once on the reverted build to confirm the crash is gone.
+    - then continue from the last non-crashing baseline and recover the real lethal-end companion fields around `0x05188C32` / `0x05188CDC` instead of guessing terminal `type=1`.
 
 ## 2026-06-12 Battle short-followup subtype-5 no-op correction
 
@@ -6972,3 +7761,318 @@ Follow-up after the `Type=100 -> 25/2` rerun:
 - validation:
   - `make` passes.
   - next manual run should check for `mock_challenge_interaction_response ... moveinfoAck=1` and no `unhandled_packet WT len=88`.
+
+## 2026-06-13 battle operate companion-field rerun
+
+- verified from the newest manual run:
+  - latest battle session enters through `4/1 id=105` and the mock still resolves the battle enemy to fallback wire id `10001`; `trace_encounter_table_records ... ids=10001,0,0,0` and `mock_challenge_interaction_response ... runtime_negative=enemy_template_fallback_is_player_character` keep the real-enemy mapping issue open.
+  - `4/2 index=0 Operate=0` remains the live attack request family.
+  - tagged-empty companion fields were delivered in `4/6`: `net_packets.log` ticks `213`, `238`, and `267` show response lengths `157`, `112`, and `67`; `iteminfo`/`teaminfo` carry value bytes `00 01 00`.
+  - this is still not the true empty shape for `InitActionSlot_B()`: tick `268` reports `teamCount=1`, then `member_id_read r0=00016163` and `link_value_read r0=6e756d00`, consuming neighboring `actionnum` bytes as if they were a teaminfo record.
+  - the post-lethal follow-up still reaches the zero-action return path: tick `268` has `actionnum_result r0=0`, `actionCount=0`, and `return pc=05189024`.
+- conclusion:
+  - confirmed negative: both zero-length raw companion fields and raw tagged-empty companion fields leak later object metadata into the item/team wrapper readers.
+  - confirmed: `actioninfo` remains a raw tagged stream, but `iteminfo/teaminfo` need a different outer empty encoding or non-empty real records.
+  - still unresolved: terminal battle exit does not occur from `4/6 actionnum=0`; a companion field/object contract is still missing after lethal.
+- changed:
+  - changed `src/main.c` battle `4/6` builders to emit `iteminfo` and `teaminfo` as normal empty WT blob fields while leaving `actioninfo` as raw tagged-stream and leaving HP/damage logic unchanged.
+- validation:
+  - rebuild required.
+
+## 2026-06-13 groupinfo enemy-template seed
+
+- latest rerun evidence:
+  - `bin/logs/net_trace.log` shows `BattleScene_CreateCharList()` using the full hotspot table from main-CBE callback `0x01018675` / `GetSceneData23728()` with ids `10001,105,105,105,105,2`.
+  - the same trace shows the compact Battle template source from callback `0x01018513` / `GetSceneData23796()` still returning `0500c718` with ids `10001,0,0,0`.
+  - `trace_prompt_hotspot_candidate` confirms the touched record is row/index `1` with `recordId=105`, and `mock_challenge_interaction_response` consequently falls back from `requestEnemyId=105` to `enemyWireId=10001`.
+  - the first `groupinfo` seed attempt used tagged scalar helpers and crashed before stable map entry. The failure corrected the `u32` grammar: `trace_add_role_to_list` showed row1 id becoming `0x00140000`/`0x00040000` instead of `105`, proving subtype-10 `groupinfo` `u32` fields are raw-width values in this blob.
+  - the second attempt made all scalars raw. That fixed the id path: `trace_add_role_to_list` and Battle.cbm both showed compact ids `10001,105,0,0`. It then crashed at `scene_draw_team_member_status_list()` `0x01014388` with `pc=0` because row1 `+0x22/+0x23` stayed `0,0` and selected a null UI callback. This proves the three `u8` fields still need tagged `00 01 VV` encoding.
+  - the mixed-grammar attempt then reached the map and battle with compact ids `10001,105,0,0`, but it also produced an offline teammate UI entry and self-directed battle damage. Runtime evidence includes `ui_offline.gif` loading on the map and `mock_battle_operate_response ... wireMapped=1_to_1` after `mock_challenge_interaction_response ... enemyWireId=105`.
+- static evidence:
+  - main-CBE `net_handle_group_info()` subtype `10` (`0x01011F3A`) reads `num`, `groupinfo`, and `leadid`, then loops decoded `groupinfo` records.
+  - the recovered record order is `u32 id, string name, u8, u8, u8, u32, u32, u32, u32`.
+  - `AddRoleToList()` (`0x01011E1E`) writes each decoded entry into `Global_R9+23796`, the compact four-row table returned by `GetSceneData23796()` and later consumed by Battle.cbm `sub_66A4()`.
+- changed:
+  - `src/main.c` now keeps the built-in `1/5/10.groupinfo` template seed default-off (`CBE_GROUPINFO_TEMPLATE_SEED=0`). The mixed-grammar builder remains available for repeatable experiments, but no longer runs on the normal path.
+  - added trace-only `trace_add_role_to_list` probes at `0x01011E1E`, `0x01011E62`, `0x01011E84`, and `0x01011EA4` to show parser arguments and compact-table rows before/during/after `AddRoleToList()`.
+  - the id/name/bytes/stats still have `CBE_GROUPINFO_TEMPLATE_*` overrides for controlled negative/grammar checks.
+- validation:
+  - pending rebuild and rerun. Expected normal-path behavior is no offline teammate entry, no `trace_add_role_to_list` row1 seed unless the env override is explicitly enabled, and no battle self-damage caused by `groupinfo` party-slot pollution.
+  - conclusion: `1/5/10.groupinfo` is a confirmed grammar source for the compact table but a confirmed wrong semantic source for monster enemy templates.
+
+## 2026-06-13 battle type-1 valueB remaining-HP experiment
+
+- verified from the newest manual run:
+  - latest battle session enters via `4/1 id=105` and returns `1/4/10`; packet evidence is `bin/logs/net_packets.log` tick `369`, responseLen `117`.
+  - the live attack request family is still `4/2 index=0 Operate=0`; packet evidence is ticks `378`, `410`, and post-lethal tick `437`.
+  - current `4/6` type-1 single-record replies are parser-safe and no longer crash: tick `378` returns `actionnum=1/actioninfoLen=47` with visible damage text `12`, and tick `410` returns `actionnum=1/actioninfoLen=46` with damage text `8`.
+  - runtime still shows no client-local HP settlement: `trace_battle_pool_probe` around ticks `436..437` keeps `enemy0=...,00000014,00000014` even after mock HP is already `0/20`.
+  - Battle reaches the terminal object gate only after the third `4/2`: `mock_battle_operate_response response=4/7+4/8+4/11+4/9 ... enemyHp=0/20`, followed by subtype-9 gate traces at `0x05189BF0..0x05189EA4`.
+  - `25/5 -> 10/17 result=1` is dispatched after that terminal chain, but the latest trace still shows Battle-local state with `enemy0` unchanged, explaining the remaining blank/wrong victory prompt behavior.
+- conclusion:
+  - confirmed negative: mock-side HP reaching zero is not enough; the `4/6.actioninfo` record must also drive Battle.cbm's local fighter HP/death state before terminal packets are semantically correct.
+  - confirmed: the old `valueB=0` type-1 record reaches damage/action dispatch but leaves the local fighter table unchanged.
+  - hypothesis: in the stable type-1 record grammar, the second child `u32` (`valueB`) is more likely a post-hit HP/value field than a pure placeholder.
+- changed:
+  - `src/main.c` now defaults type-1 `valueB` to remaining HP after mock-side settlement:
+    - player-hit record: first hit sends `valueA=12,valueB=8`; lethal hit sends `valueA=8,valueB=0`.
+    - counter record, if enabled, mirrors the same rule for the player's remaining HP.
+  - added env overrides `CBE_BATTLE_TYPE1_VALUEB_REMAINING_HP`, `CBE_BATTLE_FIRST_VALUE_B`, and `CBE_BATTLE_COUNTER_VALUE_B` so the next rerun can invert the hypothesis without another code edit.
+  - no Battle.cbm logic is patched, no Battle globals are written, and `iteminfo/teaminfo` remain omitted by default.
+- validation:
+  - rebuild required.
+
+## 2026-06-13 battle operate empty-blob companion rerun
+
+- verified from the newest manual run:
+  - the new empty-blob companion fields were delivered:
+    - `bin/logs/net_packets.log` tick `215`: first operate response `responseLen=155`
+    - tick `248`: lethal response `responseLen=110`
+    - tick `265`: post-lethal follow-up `responseLen=65`
+    - payload bytes show `iteminfo` and `teaminfo` as `valueLen=2` / inner length `0`.
+  - this still does not produce a true empty teaminfo stream:
+    - `bin/logs/net_trace.log` tick `266`: `teamCount=1`
+    - tick `266`: `member_id_read r0=03016163`
+    - tick `266`: `link_value_read r0=6e756d00`, again reading the neighboring `actionnum` bytes.
+  - the terminal follow-up is unchanged semantically:
+    - tick `266`: `actionnum_result r0=0`
+    - tick `266`: `trace_battle_actioninfo_loop_detail ... actionCount=0`
+    - tick `266`: `return pc=05189024`.
+  - enemy mapping remains fallback:
+    - `mock_challenge_interaction_response ... requestEnemyId=105 enemyWireId=10001 ... runtime_negative=enemy_template_fallback_is_player_character`.
+- static follow-up:
+  - IDA `mmBattleMstarWqvga.cbm` off `0x6DBC` shows `InitActionSlot_B()` does not read a record count from the `teaminfo` field.
+  - when `teaminfo` exists, it obtains the current-team record count via `R9+0x2050`, then reads that many records from the field.
+  - each record reads three tagged i32-family scalars; first scalar matches `R9+0x2918 + slot*0xC4 + 0x524`, third scalar stores into `slot+0x540`.
+- conclusion:
+  - confirmed negative: raw empty, raw tagged-empty, and empty WT blob are all invalid `iteminfo/teaminfo` empty encodings.
+  - confirmed: a present `teaminfo` field requires real records; omitting it is safer than sending placeholder empties.
+- changed:
+  - changed `src/main.c` so `4/6` responses omit `iteminfo/teaminfo` by default until the real record grammar is recovered.
+  - added trace-only slot dumps to `sub_teaminfo_wrapper_*`: first four slot ids at `+0x524` and links at `+0x540`.
+- validation:
+  - rebuild required.
+
+## 2026-06-13 latest battle rerun: `1_to_2` child target is parser-valid but stage-unsafe
+
+- verified from the newest manual run:
+  - the battle still enters through `4/1 id=105 -> 1/4/10`, but the start packet resolves both fighter ids to the player-template id `10001`: `mock_challenge_interaction_response ... requestEnemyId=105 enemyWireId=10001`, and `sub_66CC_before_return` reports `ownHead=...,00002711,...` plus `enemyHead=...,00002711,...`.
+  - the first attack response carried the intended target-mapping trial: `mock_battle_operate_response ... wireMapped=1_to_2 ... enemyHp=8/20`.
+  - Battle.cbm consumed the target byte as `2`: `trace_battle_actioninfo_stream_read label=child_actor_map ... r0=00000002`.
+  - the client then crashed before any second attack or terminal packet: `stdout_trace.log` ends with `pc=0`, `lr=518789f`, `lastPc=518789c`.
+- static evidence:
+  - Battle.cbm `0x05187896..0x0518789C` loads `[slot+0x2c]` and calls it with `blx r1`, so the crash is a zero stage/render callback for the selected slot path.
+  - the older `0x05186C98` crash remains the same class of failure: a type-1 action path reached a slot callback that was not initialized.
+- conclusion:
+  - confirmed negative: `CBE_BATTLE_TYPE1_FIRST_TARGET_WIRE_SLOT=2` is parser-valid but unsafe while the enemy slot is still initialized from the fallback player template.
+  - confirmed: the battle start object still needs a real enemy/template mapping before target=2 or death/KO action semantics can be trusted.
+- changed:
+  - reverted the default `CBE_BATTLE_TYPE1_FIRST_TARGET_WIRE_SLOT` to `1`; the env override can still reproduce the `1_to_2` crash.
+  - changed battle enemy resolution to prefer the live `4/1` request id (for example `105`) over the encounter-table first id `10001`; later rerun disproved this as a safe default.
+- validation:
+  - rebuild required.
+
+## 2026-06-13 forced request enemy id crashes before first attack
+
+- verified from the newest manual run:
+  - the mock emitted `1/4/10` with `requestEnemyId=105 enemyWireId=105`, while Battle.cbm's current enemy template table still contained only `enemyIds=10001,0,0,0`.
+  - Battle.cbm reached `sub_66CC_enemy_lookup_callsite pc=05188958` with `r0=00000069`, then immediately reached `sub_66CC_enemy_lookup_failed_path pc=05188A46`.
+  - `sub_66CC_before_return` still reported `parseOk=1`, but the enemy slot was only partially initialized: `enemyHead=...,00000069,01000000,...`.
+  - the client crashed before the first `4/2` attack in this latest session. `stdout_trace.log` ends with `pc=0`, `lr=51876d5`, `lastPc=51876d2`.
+- static evidence:
+  - Battle.cbm `0x051876CE..0x051876D2` loads a render/stage callback from the fighter slot (`[slot+0x584+4]`) and calls it with `blx r3`; the lookup-failed enemy slot leaves this callback zero.
+- conclusion:
+  - confirmed negative: changing only `battleinfo.enemyId` from fallback `10001` to request id `105` is not parser/render safe.
+  - confirmed: the real touched monster must first be present in Battle.cbm's enemy template table, or the mock must recover the upstream response/resource contract that populates that table.
+- changed:
+  - restored crash-safe default enemy resolution: if the request id is absent from the current Battle.cbm enemy table, use the first nonzero table id (`10001` in the current logs).
+  - added `CBE_BATTLE_FORCE_REQUEST_ENEMY_ID=1` as an explicit regression/experiment switch for reproducing the `105` lookup-failed crash.
+- validation:
+  - rebuild required.
+
+## 2026-06-13 enemy template table source trace
+
+- static evidence:
+  - Battle.cbm `BattleScene_CreateCharList()` (`mmBattleMstarWqvga.cbm` offset `0x642A`) binds two separate tables before the first `4/10.battleinfo` parse.
+  - offsets `0x6462..0x646A` store a main-CBE callback return into `battleState+0x54`; `CollectAttackableTargets()` (`0x28A4`) consumes this as the 25-record `0x154` hotspot table.
+  - offsets `0x65A8..0x65AE` store direct callback `[*[R9+0x2050]+0x28]` into `battleState+0x50`; `sub_66A4()` (`0x66A4`) consumes this as the four-record `0x4c` enemy-template table.
+  - main-CBE `GetSceneData23796()` (`0x01018512`) returns the compact buffer, and `CopyRoleDataToBuffer()` (`0x01010228`) currently fills only row 0 from the player scene node.
+- runtime evidence from current logs:
+  - the touched monster request is `4/1 id=105`, but the compact table still has `enemyIds=10001,0,0,0`.
+  - forcing `battleinfo.enemyId=105` is still a confirmed negative because it reaches `sub_66CC_enemy_lookup_failed_path` and then a zero callback crash.
+  - the later `2/10 Type=100` request happens after `4/10.battleinfo`, so it is too late to be the only source for the initial enemy-template lookup.
+- changed:
+  - added trace-only `trace_battle_create_charlist_source` at Battle.cbm offsets `0x6462/0x6464/0x646A/0x646C` and `0x65A8/0x65AA/0x65AC/0x65AE/0x65B0`.
+  - it dumps the main object callback words, `battleState` table pointers, compact `0x4c` rows, hotspot `0x154` rows, and main-CBE global scene/compact pointers.
+  - no game logic, packets, guest registers, CBE globals, Battle.cbm globals, parser state, or render state are patched.
+- validation:
+  - rebuild required.
+
+## 2026-06-13 fallback battle target self-hit mitigation
+
+- verified from the newest manual run:
+  - `groupinfo` seeding is now off on the normal path, and the offline teammate UI no longer appears.
+  - the enemy-template source is still unresolved: Battle.cbm compact table remains `enemyIds=10001,0,0,0`, while the touched monster request is still `4/1 id=105`.
+  - the challenge response therefore stays on the crash-safe fallback id: `mock_challenge_interaction_response ... requestEnemyId=105 enemyWireId=10001 ... runtime_negative=enemy_template_fallback_is_player_character`.
+  - the first two attack responses still used the type-1 default `wireMapped=1_to_1`; Battle-local action traces then kept `targetId=1`, matching the visible "attack self" behavior.
+- conclusion:
+  - confirmed: the self-hit is no longer caused by `groupinfo` party-slot pollution; it is the current fallback-template battle slot plus type-1 target byte default.
+  - confirmed negative: this does not solve the real enemy-template table population issue. The durable fix still needs the upstream contract that fills `GetSceneData23796()` / Battle.cbm `battleState+0x50` with the touched monster template before `1/4/10`.
+- changed:
+  - changed `CBE_BATTLE_TYPE1_FIRST_TARGET_WIRE_SLOT` default from `1` to `0` in both battle operate builders.
+  - the env override remains available: `=1` reproduces the self-hit baseline, and `=2` reproduces the confirmed stage-unsafe zero-callback crash while the enemy slot is still fallback-initialized.
+- validation:
+  - rebuild required.
+
+## 2026-06-13 same-packet subtype-5 enemy-template prefill experiment
+
+- verified before the change:
+  - after the target-slot mitigation, visible attack damage is now applied to the enemy side, but the main enemy-template issue remains.
+  - latest logs still show `4/1 id=105`, `mock_challenge_interaction_response ... enemyWireId=10001`, and compact table `enemyIds=10001,0,0,0`.
+  - the post-challenge `2/10 Type=100` is still answered by empty `otherinfo`, and it occurs after the initial `4/10.battleinfo` parse, so it cannot be the only source for the first enemy lookup.
+- static evidence:
+  - `net_handle_group_info()` subtype `5` at `0x0101208C` reads field `groupinfo` as a single record stream.
+  - the subtype-5 reader sequence is `u32 id, u8, string name, u8, u8, u32, u32, u32, u32`.
+  - it calls `AddRoleToList()` at `0x01012116`, which writes into `Global_R9+23796`, the compact table returned by `GetSceneData23796()` and consumed by Battle.cbm `battleState+0x50`.
+- changed:
+  - `src/main.c` now prepends `1/5/5 { groupinfo=<one subtype-5 template record> }` before `1/4/10 battleinfo` when the touched monster id is absent from the compact table.
+  - with this prefill active, `battleinfo.enemyWireId` uses the live request id, e.g. `105`, instead of the old fallback `10001`.
+  - the experiment defaults on through `CBE_BATTLE_PREFILL_ENEMY_TEMPLATE=1`; setting it to `0` restores the previous fallback behavior.
+- validation:
+  - rebuild required. Next rerun should look for `mock_battle_enemy_template_prefill`, `trace_add_role_to_list`, compact ids `10001,105,0,0`, and absence/presence of `sub_66CC_enemy_lookup_failed_path`.
+
+## 2026-06-13 subtype-5 prefill tagged-u8 crash correction
+
+- verified from the newest manual run:
+  - the mock did prepend `1/5/5` before `1/4/10`: `net_packets.log` shows the challenge response as two objects with `groupinfo` followed by `battleinfo`.
+  - the subtype-5 record was malformed after decode: `net_trace.log` shows `trace_add_role_to_list label=entry ... args=1,00140000,20,16777216 ... nameArg=<nonascii:00140000>`.
+  - the compact table briefly gained row1 id `105`, but row bytes were bad (`raw20=734d0000`, `raw28=72000001`, `raw36=00010014`), so this was not a healthy enemy template.
+  - the client then crashed before the first attack: `stdout_trace.log` ended at main CBE `SetAnimFrameIndex` (`pc=0x01004E1C`) reading through a null animation/resource pointer, with Battle LR `0x05188A93`.
+- conclusion:
+  - confirmed negative: subtype-5 `u8` fields must not use the tagged `00 01 xx` sequence used by other typed streams; that encoding shifts the following string/stat fields and poisons the compact row.
+  - hypothesis pending rerun: subtype-5 `groupinfo` uses raw-width fields inside the blob: raw `u32 id`, raw `u8`, raw length-prefixed string, raw `u8`, raw `u8`, then raw `u32` stats.
+- changed:
+  - changed `vm_net_mock_append_battle_enemy_template_prefill_object()` so its three subtype-5 `u8` fields use `vm_net_mock_put_u8()` rather than `vm_net_mock_seq_put_u8()`.
+  - added `u8Encoding=raw` plus the tagged-u8 crash evidence to the prefill trace line.
+- validation:
+  - rebuild required. Next rerun should verify whether `trace_add_role_to_list` now receives a plausible name pointer/string, compact row1 has sane raw fields, and Battle.cbm no longer crashes before battle entry.
+
+## 2026-06-13 subtype-5 prefill all-raw-u8 crash correction
+
+- verified from the newest manual run:
+  - the new raw-u8 packet was delivered: `mock_battle_enemy_template_prefill ... u8Encoding=raw ... groupinfoLen=33`, and packet response length dropped from `176` to `170`.
+  - same-packet ordering is now confirmed useful: after dispatching `1/5/5`, Battle's later `4/10` parser sees `enemyTable=0500c718 enemyIds=10001,105,0,0`.
+  - `sub_66A4()` finds the requested enemy id rather than taking the lookup-failed path: `sub_66A4_enemy_lookup_compare` logs row0 compare `10001`, then row1 compare `105 == 105`.
+  - however the compact row is still malformed after `AddRoleToList()`: row1 has `raw20=746f0000`, `raw28=00010000`, `raw36=00011401`, showing ASCII/string and stat bytes are still shifted.
+  - Battle `sub_66CC_before_return` reports `parseOk=1` and `enemyHead=...,00000069,01006f74,...`, then the client crashes before battle entry. `stdout_trace.log` ends with `pc=0x00270000`, `lr=0x0101438B`, `lastPc=0x01014388`.
+- static evidence:
+  - IDA `net_handle_group_info()` subtype-5 case begins at `0x0101208C`.
+  - it reads `groupinfo`, initializes a stream, then consumes fields through reader slots in this order: `+0x20`, `+0x2C`, `+0x1C`, `+0x28`, `+0x28`, and four more `+0x20` reads, before calling `AddRoleToList()` at `0x01012116`.
+  - subtype-10 groupinfo already uses tagged `u8` values after the string, so the two subtype-5 `+0x28` reads are more likely tagged-byte reads than raw-byte reads.
+- conclusion:
+  - confirmed negative: all-raw subtype-5 `u8` encoding is still wrong.
+  - confirmed partial: `1/5/5` before `1/4/10` can populate row1 early enough for Battle.cbm's enemy lookup.
+  - hypothesis pending rerun: subtype-5 uses raw first byte before the string, then tagged `u8` for the two post-name bytes.
+- changed:
+  - changed `vm_net_mock_append_battle_enemy_template_prefill_object()` to encode subtype-5 as raw `u32 id`, raw byte0, raw length-prefixed name, tagged byte34, tagged byte35, then raw `u32` stats.
+  - trace label is now `u8Encoding=raw_then_tagged`.
+- validation:
+  - rebuild required. Next rerun should verify row1 raw fields align like a healthy compact row: id `105`, HP/stat dwords near `0x14`, sane name copy, and no pre-battle crash.
+
+## 2026-06-13 subtype-5 raw-then-tagged negative and reader trace
+
+- verified from the newest manual run:
+  - the `raw_then_tagged` packet was delivered in the same challenge response: `net_packets.log` shows tick `675`, responseLen `174`, and objects `1/5/5` followed by `1/4/10`.
+  - same-packet ordering is confirmed: `trace_add_role_to_list` fills compact row1 id `105`, and Battle.cbm `sub_66A4_enemy_lookup_compare` later compares row1 `105 == 105`.
+  - the subtype-5 record is still malformed: `trace_add_role_to_list label=entry` shows the stack byte arguments as `116,111` (`'t','o'`), and compact row1 has string-polluted bytes (`raw20=746f0000`).
+  - the client still crashes before battle entry with `stdout_trace.log` ending at `pc=0x00270000`, `lr=0x0101438B`, `lastPc=0x01014388`.
+- conclusion:
+  - confirmed negative: `raw_then_tagged` is not the subtype-5 enemy-template grammar.
+  - confirmed partial: the remaining failure is the subtype-5 record stream/cursor contract, not the `5/5` before `4/10` object order.
+- changed:
+  - added trace-only `trace_groupinfo_case5_reader` probes on main-CBE `net_handle_group_info()` subtype-5 read sites `0x0101209E..0x01012116`.
+  - the trace dumps reader/state pointer, cursor, blob pointer/length, next bytes, callback slots `+0x1C/+0x20/+0x24/+0x28/+0x2C`, registers, and local stack slots around the static reader order.
+- validation:
+  - `make` passed after adding the trace-only probes.
+  - next rerun should inspect `trace_groupinfo_case5_reader` to decide whether the string read fails to advance, the blob pointer/length wrapper differs from assumption, or an earlier scalar read changes cursor alignment.
+
+## 2026-06-13 subtype-5 reader contract correction
+
+- verified from the newest manual run:
+  - `trace_groupinfo_case5_reader` captured the subtype-5 stream before every reader call.
+  - at `0x0101209E`, the stream begins with `next=00 25 00 00 00 69...`: the first two bytes are the `groupinfo` object-blob inner length, followed by raw id `105`.
+  - after the `+0x20` id reader, cursor is `6` and `r0=0x69`, proving this reader consumes 6 bytes and reads the 4-byte scalar at cursor+2.
+  - the previous extra raw byte before the string caused the bug: at cursor `6`, `+0x2C` and `+0x1C` saw bytes `00 00`, treated name length as zero, returned a pointer into the real string header, and the following `+0x28` reads consumed `Monster` bytes (`0x6f`, `0x74`).
+  - Battle.cbm then found row1 id `105`, but the compact row stayed malformed (`raw20=746f0000`) and the client crashed before battle entry at `pc=0x00270000`, `lr=0x0101438B`, `lastPc=0x01014388`.
+- conclusion:
+  - confirmed negative: subtype-5 does not have a standalone raw byte between id and string.
+  - confirmed: later `+0x20` stat reads also consume 6 bytes, so stats need seq-style two-byte prefixes before the 4-byte values.
+- changed:
+  - changed `vm_net_mock_append_battle_enemy_template_prefill_object()` to emit `raw id`, then `seq string`, `seq u8`, `seq u8`, and `seq u32*4`.
+  - updated the prefill trace label to `grammar=raw_id_seq_string_seq_u8_seq_u8_seq_u32x4`.
+- validation:
+  - `make` passed after the builder correction.
+  - next rerun should show `after_name_ptr` cursor past the whole `Monster` string, `after_byte34/after_byte35` returning configured bytes `1/0`, stat reads returning `20`, and a compact row without `746f0000`.
+
+## 2026-06-13 special-scene route stole monster challenge
+
+- verified from the newest manual run:
+  - the client did not enter battle because the `4/1` request was handled by `builtin-special-scene-interaction`, not `builtin-challenge-interaction`.
+  - packet evidence: `bin/logs/net_packets.log` tick `297` shows `WT len=60 hdr=4/1 objs=1/4/1(id=105)` with response source `builtin-special-scene-interaction`, responseLen `54`.
+  - runtime evidence: `bin/logs/net_trace.log` logs `mock_special_scene_interaction_response request=4/1 id=105 index=4 pos=108,448 scene=01..._01.sce target=01..._02.sce`.
+  - static/runtime table evidence: the real same-class portal rectangle for `01..._01.sce -> 01..._02.sce` is `208,432-256,448` (`trace_same_class_scene_table_entry`), while this monster interaction used `posx=108`.
+- conclusion:
+  - confirmed negative: the broad special-scene condition `id=105,index=4,posy>=400` is unsafe because monster challenge ids overlap portal ids.
+  - this rerun did not exercise the corrected subtype-5 prefill grammar; the request was routed away before the battle response builder.
+- changed:
+  - tightened `vm_net_mock_build_special_scene_interaction_response()` so Taohuadao server-side scene-entry responses only match the recovered portal rectangles.
+  - `id=105` outside `208,432-256,448` now falls through to `vm_net_mock_build_challenge_interaction_response()`.
+- validation:
+  - `make` passed after tightening the special-scene route.
+  - next rerun should show the same `id=105,pos=108,448` class of interaction handled by `builtin-challenge-interaction`, then `mock_battle_enemy_template_prefill` with the `raw_id_seq_string_seq_u8_seq_u8_seq_u32x4` grammar.
+
+## 2026-06-13 battle HP commit negative and delta trace
+
+- verified from the newest manual battle:
+  - the battle request sequence was `4/1` challenge, `2/10`, then live `4/2 index=0 Operate=0` at packet ticks `177`, `204`, and `230`.
+  - the first two operate responses were `1/4/6`; mock-side HP settled `20 -> 8 -> 0`, and the third post-lethal request received terminal `1/4/7 + 1/4/8 + 1/4/11 + 1/4/9`.
+  - `trace_battle_actioninfo_materialize_detail` showed the two type-1 action records reached `HandleBattleActionMsg()` with `valueA/valueB=12/8` and `8/0`.
+  - `trace_battle_local_state_write`, `sub_4B70_battle_apply_entry`, and terminal subtype handling still showed `pendingDelta=0,0` and canonical `enemyHp=20/20`.
+- static evidence:
+  - `HandleBattleActionMsg()` (`Battle.cbm 0x05188DD0`, IDA `0x6EB0`) parses type-1 child values, copies effect template data selected by record `+0x5C`, and calls the effect callback through battle state `+0x24`.
+  - `sub_4B38()` (`Battle.cbm 0x05184B38`, IDA `0x4B38`) only commits HP when local action byte `+0x0D == 4`; it consumes signed deltas at `R9+0x34B4/+0x34B6`.
+- conclusion:
+  - confirmed negative: `valueB=remaining HP` alone is not the missing lethal/death contract. The terminal objects are arriving after the client has never locally decremented the enemy fighter table.
+  - hypothesis: the next missing piece is either an action record/effect-template field that makes `DrawBattleAnimEffect()` generate pending deltas, or a still-unrecovered `iteminfo/teaminfo` companion grammar.
+- changed:
+  - added read-only `trace_battle_anim_effect_delta_detail` probes for `DrawBattleAnimEffect` windows, `sub_4582`, and `sub_4B38` state-4 delta consumer windows.
+  - no packet behavior, guest memory writes, Battle.cbm globals, or game control flow were changed.
+- validation:
+  - rebuild required. Next rerun should inspect `trace_battle_anim_effect_delta_detail` to see whether the animation stage ever produces nonzero pending deltas or reaches `local0d=4`.
+
+## 2026-06-13 latest delta trace was starved by damage-number entry
+
+- verified from the newest manual battle:
+  - packet flow is still `4/1 -> 4/6 -> 4/6 -> third 4/2 terminal`:
+    - `bin/logs/net_packets.log` ticks `167`, `174`, `199`, and `221` show challenge, first action, lethal mock-side action, then post-lethal terminal follow-up.
+  - enemy template population remains valid:
+    - `trace_groupinfo_case5_reader` reads id `3`, name `Monster`, bytes `1/0`, and stats `20/20/20/20`.
+    - Battle.cbm `sub_66CC_before_return` keeps `enemyIds=10001,3,0,0` and enemy HP/max `20/20`.
+  - actioninfo is still HP-inert:
+    - `mock_battle_operate_response` logs mock-side HP `20 -> 8 -> 0`.
+    - `trace_battle_actioninfo_materialize_detail` reaches type-1 records `valueA/valueB=12/8` and `8/0`.
+    - terminal subtype-8/sub_4B70 still sees canonical Battle.cbm `enemyHp=20/20` and `pendingDelta=0,0`.
+  - the new delta trace did not yet answer the DrawBattleAnimEffect question because its global 160-entry budget was consumed entirely by `damage_number_effect_entry` (`sub_4582`, Battle.cbm IDA `0x4582`).
+    - runtime evidence: `trace_battle_anim_effect_delta_detail` label counts are `160 damage_number_effect_entry`, with no `anim_*` or `state4_*` labels.
+    - runtime evidence: all sampled damage-number entries had `pendingDelta=0,0`; no `local0d=4` state-4 HP merge window was observed.
+- conclusion:
+  - confirmed negative: the current type-1 `valueB=remaining HP` records still do not generate pending HP deltas or client-local enemy KO.
+  - confirmed trace limitation: the previous delta probe was under-sampled for the useful windows because `sub_4582()` is too hot.
+- changed:
+  - `trace_battle_anim_effect_delta_detail` now has separate per-label-class budgets:
+    - `damage_number_effect_entry` is capped at 24 samples.
+    - `state4_*` state-machine/HP-merge windows have their own 128-sample budget.
+    - `anim_*` DrawBattleAnimEffect windows have their own 192-sample budget.
+  - trace remains read-only; no packet shape, guest registers, Battle.cbm globals, or game state are modified.
+- validation:
+  - rebuild required. Next rerun should check for `anim_entry`, `anim_after_action_slots`, `state4_before_apply`, `state4_delta_base`, and any nonzero `pendingDelta`.

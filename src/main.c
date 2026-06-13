@@ -234,6 +234,11 @@ static u32 g_battleSubtype8InfoDstWriteTraceCount = 0;
 static u32 g_mockBattleOperateSessionSerial = 0;
 static u32 g_mockBattleOperateTurnCounter = 0;
 static u8 g_mockBattleOperateSessionArmed = 0;
+static u8 g_mockBattleOperateSessionFinished = 0;
+static u32 g_mockBattleRoleHpCurrent = 0;
+static u32 g_mockBattleRoleHpMax = 0;
+static u32 g_mockBattleEnemyHpCurrent = 0;
+static u32 g_mockBattleEnemyHpMax = 0;
 
 static uc_err add_manager_code_hooks(uc_engine *uc);
 static void vm_net_trace(const char *fmt, ...);
@@ -245,19 +250,32 @@ static void vm_net_trace_title_login_dispatch(const char *label, u32 pc);
 static void vm_net_trace_title_role_path(const char *label, u32 pc);
 static void vm_net_trace_title_rolelist_reader_methods(const char *label, u32 pc);
 static void vm_net_trace_title_role_select_action(const char *label, u32 pc);
+static void vm_net_trace_groupinfo_case5_reader(const char *label, u32 pc);
 static void vm_net_trace_battle_module_state(const char *label, u32 pc);
 static void vm_net_trace_battle_pool_probe(const char *label, u32 pc, u32 moduleBase);
+static void vm_net_trace_wt_field_table_detail(const char *label, u32 obj, u32 pc);
+static void vm_net_trace_battle_server_cmd_detail(const char *label, u32 pc);
 static void vm_net_trace_battle_operate_subtype8_detail(const char *label, u32 pc);
 static void vm_net_trace_battle_actioninfo_parser_detail(const char *label, u32 pc);
+static void vm_net_trace_battle_teaminfo_wrapper_detail(const char *label, u32 pc);
+static void vm_net_trace_battle_actioninfo_loop_detail(const char *label, u32 pc);
 static void vm_net_trace_battle_status7_combatinfo_detail(const char *label, u32 pc);
 static void vm_net_trace_battle_status7_item_record_detail(const char *label, u32 pc);
 static void vm_net_trace_battle_status7_sub7228_detail(const char *label, u32 pc);
 static void vm_net_trace_battle_apply_detail(const char *label, u32 pc);
 static void vm_net_trace_battle_local_action_state(const char *label, u32 pc);
 static void vm_net_trace_battle_damage_dispatch_detail(const char *label, u32 pc);
+static void vm_net_trace_battle_anim_effect_delta_detail(const char *label, u32 pc);
 static void vm_net_trace_battle_arm_subtype8_info_dst_watch(u32 base, u32 len, u32 pc);
 static bool vm_net_mock_current_screen_is_battle(void);
 static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *pos);
+static bool vm_net_mock_append_battle_terminal_subtype8_object(u8 *out, u32 outCap, u32 *pos);
+static bool vm_net_mock_append_battle_terminal_case4_object(u8 *out, u32 outCap, u32 *pos);
+static bool vm_net_mock_append_battle_terminal_case9_object(u8 *out, u32 outCap, u32 *pos);
+static bool vm_net_mock_append_battle_terminal_case11_object(u8 *out, u32 outCap, u32 *pos);
+static u32 vm_net_mock_build_battle_auto12_ack_response(const u8 *request, u32 requestLen,
+                                                        u8 *out, u32 outCap);
+static u32 vm_net_mock_min_u32(u32 a, u32 b);
 void vm_net_trace_title_login_write(uint64_t address, uint32_t size, int64_t value);
 void vm_net_trace_shared_event_owner_write(uint64_t address, uint32_t size, int64_t value);
 void vm_net_trace_current_net_object_write(uint64_t address, uint32_t size, int64_t value);
@@ -266,6 +284,7 @@ void vm_net_trace_scene_loading_owner_write(uint64_t address, uint32_t size, int
 static void vm_format_trace_bytes_hex(const u8 *bytes, u32 count, char *out, size_t outCap);
 static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
 static bool vm_net_trace_read_u32(u32 addr, u32 *value);
+static bool vm_net_trace_read_u16(u32 addr, u16 *value);
 static bool vm_net_trace_read_u8(u32 addr, u8 *value);
 static uc_err scheduler_dispatch_net_tasks(void);
 static uc_err scheduler_flush_post_vm_business_send_ready(const char *reason);
@@ -2163,6 +2182,11 @@ static bool vm_net_mock_request_contains_object(const u8 *request, u32 requestLe
     return false;
 }
 
+static u32 vm_net_mock_min_u32(u32 a, u32 b)
+{
+    return (a < b) ? a : b;
+}
+
 static bool vm_net_mock_is_title_rolelist_combo_request(const u8 *request, u32 requestLen)
 {
     if (request == NULL || requestLen < 4)
@@ -3586,6 +3610,200 @@ static void vm_net_trace_sub_1010228_callsite(const char *label, u32 pc)
                  g_currentScreenThis);
     vm_net_trace_encounter_table_records("sub_1010228_callsite_src", srcObj);
     vm_net_trace_encounter_table_records("sub_1010228_callsite_dst", dstObj);
+}
+
+static void vm_net_trace_add_role_to_list(const char *label, u32 pc)
+{
+    static u32 s_addRoleTraceCount = 0;
+    u32 lr = 0;
+    u32 sp = 0;
+    u32 r0 = 0;
+    u32 r1 = 0;
+    u32 r2 = 0;
+    u32 r3 = 0;
+    u32 r4 = 0;
+    u32 r5 = 0;
+    u32 r6 = 0;
+    u32 r7 = 0;
+    u32 stackArgs[6] = {0};
+    u32 compactObj = 0;
+    u8 groupCount = 0;
+    char nameArg[96];
+
+    if (s_addRoleTraceCount >= 96)
+        return;
+
+    nameArg[0] = 0;
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+    uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+    uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+    uc_reg_read(MTK, UC_ARM_REG_R4, &r4);
+    uc_reg_read(MTK, UC_ARM_REG_R5, &r5);
+    uc_reg_read(MTK, UC_ARM_REG_R6, &r6);
+    uc_reg_read(MTK, UC_ARM_REG_R7, &r7);
+    if (sp)
+        (void)uc_mem_read(MTK, sp, stackArgs, sizeof(stackArgs));
+    vm_net_read_guest_ascii_label(r1, nameArg, sizeof(nameArg));
+    if (Global_R9)
+    {
+        (void)uc_mem_read(MTK, Global_R9 + 23796, &compactObj, 4);
+        (void)uc_mem_read(MTK, Global_R9 + 23668, &groupCount, 1);
+    }
+
+    ++s_addRoleTraceCount;
+    vm_net_trace("trace_add_role_to_list label=%s pc=%08x lr=%08x last=%08x tick=%u"
+                 " args=%u,%08x,%u,%u stack=%u,%u,%u,%u,%u,%u regs4=%08x,%08x,%08x,%08x"
+                 " nameArg=%s compactObj=%08x groupCount=%u count=%u"
+                 " evidence=IDA:main_CBE_AddRoleToList_0x01011E1E_writes_R9_plus_23796\n",
+                 label ? label : "unknown",
+                 pc,
+                 lr,
+                 lastAddress,
+                 g_schedulerTick,
+                 r0,
+                 r1,
+                 r2,
+                 r3,
+                 stackArgs[0],
+                 stackArgs[1],
+                 stackArgs[2],
+                 stackArgs[3],
+                 stackArgs[4],
+                 stackArgs[5],
+                 r4,
+                 r5,
+                 r6,
+                 r7,
+                 nameArg,
+                 compactObj,
+                 groupCount,
+                 s_addRoleTraceCount);
+    vm_net_trace_encounter_table_records("add_role_to_list_compact", compactObj);
+}
+
+static void vm_net_trace_groupinfo_case5_reader(const char *label, u32 pc)
+{
+    static u32 s_groupinfoCase5TraceCount = 0;
+    u32 lr = 0;
+    u32 sp = 0;
+    u32 regs[8] = {0};
+    u32 reader = 0;
+    u32 state = 0;
+    u32 cursor = 0;
+    u32 blobObj = 0;
+    u32 blobData = 0;
+    u32 blobLen = 0;
+    u32 cb1c = 0;
+    u32 cb20 = 0;
+    u32 cb24 = 0;
+    u32 cb28 = 0;
+    u32 cb2c = 0;
+    u32 locals[10] = {0};
+    u8 nextBytes[32];
+    char nextHex[128];
+    char r0Label[64];
+    char r1Label[64];
+
+    if (s_groupinfoCase5TraceCount >= 160)
+        return;
+
+    memset(nextBytes, 0, sizeof(nextBytes));
+    nextHex[0] = 0;
+    r0Label[0] = 0;
+    r1Label[0] = 0;
+
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+    uc_reg_read(MTK, UC_ARM_REG_R0, &regs[0]);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &regs[1]);
+    uc_reg_read(MTK, UC_ARM_REG_R2, &regs[2]);
+    uc_reg_read(MTK, UC_ARM_REG_R3, &regs[3]);
+    uc_reg_read(MTK, UC_ARM_REG_R4, &regs[4]);
+    uc_reg_read(MTK, UC_ARM_REG_R5, &regs[5]);
+    uc_reg_read(MTK, UC_ARM_REG_R6, &regs[6]);
+    uc_reg_read(MTK, UC_ARM_REG_R7, &regs[7]);
+
+    reader = sp + 0x40;
+    state = reader + 0x400;
+    if (sp)
+    {
+        (void)uc_mem_read(MTK, sp + 0x24, &locals[0], sizeof(locals));
+    }
+    if (state)
+    {
+        (void)uc_mem_read(MTK, state + 0x00, &cursor, 4);
+        (void)uc_mem_read(MTK, state + 0x08, &blobObj, 4);
+        (void)uc_mem_read(MTK, state + 0x1c, &cb1c, 4);
+        (void)uc_mem_read(MTK, state + 0x20, &cb20, 4);
+        (void)uc_mem_read(MTK, state + 0x24, &cb24, 4);
+        (void)uc_mem_read(MTK, state + 0x28, &cb28, 4);
+        (void)uc_mem_read(MTK, state + 0x2c, &cb2c, 4);
+    }
+    if (blobObj)
+    {
+        (void)uc_mem_read(MTK, blobObj + 0x04, &blobData, 4);
+        (void)uc_mem_read(MTK, blobObj + 0x08, &blobLen, 4);
+    }
+    if (blobData && cursor < blobLen)
+    {
+        u32 avail = blobLen - cursor;
+        u32 readLen = avail < sizeof(nextBytes) ? avail : (u32)sizeof(nextBytes);
+        if (uc_mem_read(MTK, blobData + cursor, nextBytes, readLen) == UC_ERR_OK)
+            vm_format_trace_bytes_hex(nextBytes, readLen, nextHex, sizeof(nextHex));
+    }
+    if (nextHex[0] == 0)
+        snprintf(nextHex, sizeof(nextHex), "unreadable");
+    vm_net_read_guest_ascii_label(regs[0], r0Label, sizeof(r0Label));
+    vm_net_read_guest_ascii_label(regs[1], r1Label, sizeof(r1Label));
+
+    ++s_groupinfoCase5TraceCount;
+    vm_net_trace("trace_groupinfo_case5_reader label=%s pc=%08x lr=%08x last=%08x tick=%u"
+                 " reader=%08x state=%08x cursor=%u blobObj=%08x blobData=%08x blobLen=%u next=%s"
+                 " cb1c=%08x cb20=%08x cb24=%08x cb28=%08x cb2c=%08x"
+                 " regs=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x r0Text=%s r1Text=%s"
+                 " locals_sp24=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x count=%u"
+                 " evidence=IDA:main_CBE_net_handle_group_info_subtype5_0x0101208C_reader_order_20_2c_1c_28_28_20x4_to_AddRoleToList_0x01012116\n",
+                 label ? label : "unknown",
+                 pc,
+                 lr,
+                 lastAddress,
+                 g_schedulerTick,
+                 reader,
+                 state,
+                 cursor,
+                 blobObj,
+                 blobData,
+                 blobLen,
+                 nextHex,
+                 cb1c,
+                 cb20,
+                 cb24,
+                 cb28,
+                 cb2c,
+                 regs[0],
+                 regs[1],
+                 regs[2],
+                 regs[3],
+                 regs[4],
+                 regs[5],
+                 regs[6],
+                 regs[7],
+                 r0Label,
+                 r1Label,
+                 locals[0],
+                 locals[1],
+                 locals[2],
+                 locals[3],
+                 locals[4],
+                 locals[5],
+                 locals[6],
+                 locals[7],
+                 locals[8],
+                 locals[9],
+                 s_groupinfoCase5TraceCount);
 }
 
 static void vm_net_trace_title_screen_callback(const char *label, u32 pc)
@@ -6934,6 +7152,315 @@ static bool vm_net_trace_read_u8(u32 addr, u8 *value)
     return uc_mem_read(MTK, addr, value, 1) == UC_ERR_OK;
 }
 
+void vm_net_trace_battle_local_state_write(uint64_t address, uint32_t size, int64_t value)
+{
+    static u32 s_battleLocalStateWriteTraceCount = 0;
+    u32 writeAddr = (u32)address;
+    u32 writeEnd = writeAddr + size;
+    u32 pc = 0, lr = 0, r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r9 = 0;
+    u32 localBase = 0;
+    u32 battleStateBase = 0;
+    u32 fighterBase = 0;
+    u32 fighterTableBytes = 0;
+    u32 activeSlot = 0;
+    u32 activeBlock = 0;
+    u32 activeActionBlock = 0;
+    u32 pendingAddr = 0;
+    u32 oldValue = 0;
+    u16 ownCount = 0, enemyCount = 0, subtype = 0, parseOk = 0;
+    u16 pendingA = 0, pendingB = 0;
+    u8 stateBytes[16];
+    u32 ownHp = 0, ownMaxHp = 0, enemyHp = 0, enemyMaxHp = 0;
+    const char *label = "battle_local_misc";
+    bool overlaps = false;
+
+    if (s_battleLocalStateWriteTraceCount >= 2048 || size == 0)
+        return;
+
+    uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+    uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+    uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+    uc_reg_read(MTK, UC_ARM_REG_R4, &r4);
+    uc_reg_read(MTK, UC_ARM_REG_R5, &r5);
+    uc_reg_read(MTK, UC_ARM_REG_R6, &r6);
+    uc_reg_read(MTK, UC_ARM_REG_R7, &r7);
+    uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+    if (r9 == 0)
+        return;
+
+    localBase = r9 + 0x2918u;
+    battleStateBase = r9 + 0x3450u;
+    pendingAddr = r9 + 0x34B4u;
+    fighterBase = r9 + 0x374Cu;
+    (void)vm_net_trace_read_u16(battleStateBase + 0x1Au, &ownCount);
+    (void)vm_net_trace_read_u16(battleStateBase + 0x1Cu, &enemyCount);
+    (void)vm_net_trace_read_u16(battleStateBase + 0x20u, &subtype);
+    (void)vm_net_trace_read_u16(battleStateBase + 0x22u, &parseOk);
+    if (parseOk == 0 || ownCount > 6 || enemyCount > 6 || (ownCount + enemyCount) == 0)
+        return;
+    fighterTableBytes = (u32)(ownCount + enemyCount) * 0xC4u;
+    overlaps = (writeAddr < localBase + 0xC20u && writeEnd > localBase) ||
+               (writeAddr < pendingAddr + 4u && writeEnd > pendingAddr) ||
+               (writeAddr < fighterBase + fighterTableBytes && writeEnd > fighterBase);
+    if (!overlaps)
+        return;
+
+    memset(stateBytes, 0, sizeof(stateBytes));
+    (void)vm_net_trace_read_u8(localBase + 0x02u, (u8 *)&activeSlot);
+    activeBlock = localBase + (u32)(activeSlot & 0xffu) * 0xC4u;
+    activeActionBlock = activeBlock + 0x520u;
+    if (size == 1)
+        (void)vm_net_trace_read_u8(writeAddr, (u8 *)&oldValue);
+    else if (size == 2)
+        (void)vm_net_trace_read_u16(writeAddr, (u16 *)&oldValue);
+    else
+        (void)vm_net_trace_read_u32(writeAddr, &oldValue);
+    (void)uc_mem_read(MTK, localBase, stateBytes, sizeof(stateBytes));
+    (void)vm_net_trace_read_u16(pendingAddr, &pendingA);
+    (void)vm_net_trace_read_u16(pendingAddr + 2u, &pendingB);
+    (void)vm_net_trace_read_u32(fighterBase + 0x10u, &ownHp);
+    (void)vm_net_trace_read_u32(fighterBase + 0x14u, &ownMaxHp);
+    (void)vm_net_trace_read_u32(fighterBase + 0xC4u + 0x10u, &enemyHp);
+    (void)vm_net_trace_read_u32(fighterBase + 0xC4u + 0x14u, &enemyMaxHp);
+
+    if (writeAddr < pendingAddr + 4u && writeEnd > pendingAddr)
+        label = "pending_delta";
+    else if (writeAddr < fighterBase + 0xC4u && writeEnd > fighterBase)
+        label = "own_fighter_table";
+    else if (writeAddr < fighterBase + 0x188u && writeEnd > fighterBase + 0xC4u)
+        label = "enemy_fighter_table";
+    else if (writeAddr < fighterBase + fighterTableBytes && writeEnd > fighterBase)
+        label = "fighter_table_extra";
+    else if (writeAddr < localBase + 0x10u && writeEnd > localBase)
+        label = "local_state_header";
+    else if (writeAddr < activeActionBlock + 0x64u && writeEnd > activeActionBlock)
+        label = "active_action_block";
+    else if (writeAddr < activeBlock + 0xC4u && writeEnd > activeBlock)
+        label = "active_fighter_block";
+    else if (writeAddr < localBase + 0x188u && writeEnd > localBase + 0xC4u)
+        label = "enemy_fighter_block";
+
+    ++s_battleLocalStateWriteTraceCount;
+    vm_net_trace("trace_battle_local_state_write label=%s writeAddr=%08x writeSize=%u old=%08x raw=%08x"
+                 " pc=%08x lr=%08x caller=%08x last=%08x tick=%u r9=%08x localBase=%08x battle=%u,%u,%u,%u fighterBase=%08x activeSlot=%u"
+                 " activeBlock=%08x activeActionBlock=%08x state=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u"
+                 " pendingDelta=%d,%d ownHp=%u/%u enemyHp=%u/%u regs=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x count=%u"
+                 " evidence=runtime:Battle.cbm_local_state_memory_write_watch_for_actioninfo_hp_ko_delta_gated_by_4_10_parse_state\n",
+                 label,
+                 writeAddr,
+                 size,
+                 oldValue,
+                 (u32)value,
+                 pc,
+                 lr,
+                 lr & ~1u,
+                 lastAddress,
+                 g_schedulerTick,
+                 r9,
+                 localBase,
+                 (unsigned int)ownCount,
+                 (unsigned int)enemyCount,
+                 (unsigned int)subtype,
+                 (unsigned int)parseOk,
+                 fighterBase,
+                 (unsigned int)(activeSlot & 0xffu),
+                 activeBlock,
+                 activeActionBlock,
+                 (unsigned int)stateBytes[0],
+                 (unsigned int)stateBytes[1],
+                 (unsigned int)stateBytes[2],
+                 (unsigned int)stateBytes[3],
+                 (unsigned int)stateBytes[4],
+                 (unsigned int)stateBytes[5],
+                 (unsigned int)stateBytes[6],
+                 (unsigned int)stateBytes[7],
+                 (unsigned int)stateBytes[8],
+                 (unsigned int)stateBytes[9],
+                 (unsigned int)stateBytes[10],
+                 (unsigned int)stateBytes[11],
+                 (unsigned int)stateBytes[12],
+                 (unsigned int)stateBytes[13],
+                 (unsigned int)stateBytes[14],
+                 (unsigned int)stateBytes[15],
+                 (int)(short)pendingA,
+                 (int)(short)pendingB,
+                 ownHp,
+                 ownMaxHp,
+                 enemyHp,
+                 enemyMaxHp,
+                 r0,
+                 r1,
+                 r2,
+                 r3,
+                 r4,
+                 r5,
+                 r6,
+                 r7,
+                 s_battleLocalStateWriteTraceCount);
+}
+
+static void vm_net_trace_battle_create_charlist_source(const char *label, u32 pc, u32 moduleBase)
+{
+    static u32 s_battleCreateCharListTraceCount = 0;
+    u32 lr = 0, sp = 0, r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r9 = 0;
+    u32 battleBase = 0;
+    u32 mainObj = 0;
+    u32 direct0 = 0, direct4 = 0, direct8 = 0, directC = 0, direct10 = 0, direct14 = 0, direct28 = 0, direct40 = 0;
+    u32 ext1C = 0, ext20 = 0, ext28 = 0, ext2C = 0, ext30 = 0;
+    u32 table24 = 0, table28 = 0, table2C = 0, table4C = 0, compactTable = 0, fullTable = 0, table58 = 0;
+    u32 retIds[4] = {0};
+    u32 curIds[4] = {0};
+    u32 retRaw0[4] = {0};
+    u32 retRaw44[4] = {0};
+    u32 curRaw0[4] = {0};
+    u32 curRaw44[4] = {0};
+    u32 fullIds[6] = {0};
+    u32 fullId24[6] = {0};
+    u32 fullId48[6] = {0};
+    u16 fullPosX[6] = {0};
+    u16 fullPosY[6] = {0};
+    u8 fullFlag13B[6] = {0};
+    u8 fullFlag13F[6] = {0};
+    u8 fullFlag147[6] = {0};
+    u32 globalSceneTable = 0;
+    u32 globalCompactTable = 0;
+    u32 globalCurrentNode = 0;
+    u32 globalActorId = 0;
+    u32 off = moduleBase && pc >= moduleBase ? pc - moduleBase : 0xffffffffu;
+
+    if (s_battleCreateCharListTraceCount >= 96)
+        return;
+
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+    uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+    uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+    uc_reg_read(MTK, UC_ARM_REG_R4, &r4);
+    uc_reg_read(MTK, UC_ARM_REG_R5, &r5);
+    uc_reg_read(MTK, UC_ARM_REG_R6, &r6);
+    uc_reg_read(MTK, UC_ARM_REG_R7, &r7);
+    uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+
+    if (r9)
+    {
+        battleBase = r9 + 0x3450u;
+        (void)vm_net_trace_read_u32(r9 + 0x2050u, &mainObj);
+        (void)vm_net_trace_read_u32(battleBase + 0x24u, &table24);
+        (void)vm_net_trace_read_u32(battleBase + 0x28u, &table28);
+        (void)vm_net_trace_read_u32(battleBase + 0x2Cu, &table2C);
+        (void)vm_net_trace_read_u32(battleBase + 0x4Cu, &table4C);
+        (void)vm_net_trace_read_u32(battleBase + 0x50u, &compactTable);
+        (void)vm_net_trace_read_u32(battleBase + 0x54u, &fullTable);
+        (void)vm_net_trace_read_u32(battleBase + 0x58u, &table58);
+    }
+    if (mainObj)
+    {
+        (void)vm_net_trace_read_u32(mainObj + 0x00u, &direct0);
+        (void)vm_net_trace_read_u32(mainObj + 0x04u, &direct4);
+        (void)vm_net_trace_read_u32(mainObj + 0x08u, &direct8);
+        (void)vm_net_trace_read_u32(mainObj + 0x0Cu, &directC);
+        (void)vm_net_trace_read_u32(mainObj + 0x10u, &direct10);
+        (void)vm_net_trace_read_u32(mainObj + 0x14u, &direct14);
+        (void)vm_net_trace_read_u32(mainObj + 0x28u, &direct28);
+        (void)vm_net_trace_read_u32(mainObj + 0x40u, &direct40);
+        (void)vm_net_trace_read_u32(mainObj + 0x11Cu, &ext1C);
+        (void)vm_net_trace_read_u32(mainObj + 0x120u, &ext20);
+        (void)vm_net_trace_read_u32(mainObj + 0x128u, &ext28);
+        (void)vm_net_trace_read_u32(mainObj + 0x12Cu, &ext2C);
+        (void)vm_net_trace_read_u32(mainObj + 0x130u, &ext30);
+    }
+    if (compactTable)
+    {
+        for (u32 i = 0; i < 4; ++i)
+        {
+            u32 rec = compactTable + i * 0x4Cu;
+            (void)vm_net_trace_read_u32(rec + 0x00u, &curRaw0[i]);
+            (void)vm_net_trace_read_u32(rec + 0x24u, &curIds[i]);
+            (void)vm_net_trace_read_u32(rec + 0x44u, &curRaw44[i]);
+        }
+    }
+    if (r0)
+    {
+        for (u32 i = 0; i < 4; ++i)
+        {
+            u32 rec = r0 + i * 0x4Cu;
+            (void)vm_net_trace_read_u32(rec + 0x00u, &retRaw0[i]);
+            (void)vm_net_trace_read_u32(rec + 0x24u, &retIds[i]);
+            (void)vm_net_trace_read_u32(rec + 0x44u, &retRaw44[i]);
+        }
+    }
+    if (fullTable)
+    {
+        for (u32 i = 0; i < 6; ++i)
+        {
+            u32 rec = fullTable + i * 0x154u;
+            (void)vm_net_trace_read_u32(rec + 0x24u, &fullId24[i]);
+            (void)vm_net_trace_read_u32(rec + 0x48u, &fullId48[i]);
+            (void)vm_net_trace_read_u32(rec + 0x64u, &fullIds[i]);
+            (void)vm_net_trace_read_u16(rec + 0x30u, &fullPosX[i]);
+            (void)vm_net_trace_read_u16(rec + 0x34u, &fullPosY[i]);
+            (void)vm_net_trace_read_u8(rec + 0x13Bu, &fullFlag13B[i]);
+            (void)vm_net_trace_read_u8(rec + 0x13Fu, &fullFlag13F[i]);
+            (void)vm_net_trace_read_u8(rec + 0x147u, &fullFlag147[i]);
+        }
+    }
+    if (Global_R9)
+    {
+        (void)vm_net_trace_read_u32(Global_R9 + 23728u, &globalSceneTable);
+        (void)vm_net_trace_read_u32(Global_R9 + 23796u, &globalCompactTable);
+        (void)vm_net_trace_read_u32(Global_R9 + 23716u, &globalCurrentNode);
+        if (globalCurrentNode)
+            (void)vm_net_trace_read_u32(globalCurrentNode + 0x64u, &globalActorId);
+    }
+
+    ++s_battleCreateCharListTraceCount;
+    vm_net_trace("trace_battle_create_charlist_source label=%s pc=%08x off=%04x lr=%08x caller=%08x last=%08x tick=%u"
+                 " regs=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x sp=%08x r9=%08x battleBase=%08x"
+                 " mainObj=%08x direct=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x ext=%08x,%08x,%08x,%08x,%08x"
+                 " tables=%08x,%08x,%08x,%08x,%08x,%08x,%08x"
+                 " retAsCompact=%08x ids=%u,%u,%u,%u raw0=%08x,%08x,%08x,%08x raw44=%08x,%08x,%08x,%08x"
+                 " curCompact=%08x ids=%u,%u,%u,%u raw0=%08x,%08x,%08x,%08x raw44=%08x,%08x,%08x,%08x"
+                 " fullTable=%08x ids64=%u,%u,%u,%u,%u,%u ids24=%u,%u,%u,%u,%u,%u ids48=%u,%u,%u,%u,%u,%u"
+                 " pos=%u:%u,%u:%u,%u:%u,%u:%u,%u:%u,%u:%u flags13b=%u,%u,%u,%u,%u,%u flags13f=%u,%u,%u,%u,%u,%u flags147=%u,%u,%u,%u,%u,%u"
+                 " global=%08x sceneTable=%08x compactTable=%08x currentNode=%08x currentActorId=%u activeScreen=%08x currentThis=%08x count=%u"
+                 " evidence=Battle.cbm:BattleScene_CreateCharList_0x6462_0x646A_0x65A8_0x65AE,sub_66A4_enemy_template_table\n",
+                 label ? label : "unknown",
+                 pc, off, lr, lr & ~1u, lastAddress, g_schedulerTick,
+                 r0, r1, r2, r3, r4, r5, r6, r7, sp, r9, battleBase,
+                 mainObj, direct0, direct4, direct8, directC, direct10, direct14, direct28, direct40,
+                 ext1C, ext20, ext28, ext2C, ext30,
+                 table24, table28, table2C, table4C, compactTable, fullTable, table58,
+                 r0, retIds[0], retIds[1], retIds[2], retIds[3],
+                 retRaw0[0], retRaw0[1], retRaw0[2], retRaw0[3],
+                 retRaw44[0], retRaw44[1], retRaw44[2], retRaw44[3],
+                 compactTable, curIds[0], curIds[1], curIds[2], curIds[3],
+                 curRaw0[0], curRaw0[1], curRaw0[2], curRaw0[3],
+                 curRaw44[0], curRaw44[1], curRaw44[2], curRaw44[3],
+                 fullTable,
+                 fullIds[0], fullIds[1], fullIds[2], fullIds[3], fullIds[4], fullIds[5],
+                 fullId24[0], fullId24[1], fullId24[2], fullId24[3], fullId24[4], fullId24[5],
+                 fullId48[0], fullId48[1], fullId48[2], fullId48[3], fullId48[4], fullId48[5],
+                 (unsigned int)fullPosX[0], (unsigned int)fullPosY[0],
+                 (unsigned int)fullPosX[1], (unsigned int)fullPosY[1],
+                 (unsigned int)fullPosX[2], (unsigned int)fullPosY[2],
+                 (unsigned int)fullPosX[3], (unsigned int)fullPosY[3],
+                 (unsigned int)fullPosX[4], (unsigned int)fullPosY[4],
+                 (unsigned int)fullPosX[5], (unsigned int)fullPosY[5],
+                 (unsigned int)fullFlag13B[0], (unsigned int)fullFlag13B[1], (unsigned int)fullFlag13B[2],
+                 (unsigned int)fullFlag13B[3], (unsigned int)fullFlag13B[4], (unsigned int)fullFlag13B[5],
+                 (unsigned int)fullFlag13F[0], (unsigned int)fullFlag13F[1], (unsigned int)fullFlag13F[2],
+                 (unsigned int)fullFlag13F[3], (unsigned int)fullFlag13F[4], (unsigned int)fullFlag13F[5],
+                 (unsigned int)fullFlag147[0], (unsigned int)fullFlag147[1], (unsigned int)fullFlag147[2],
+                 (unsigned int)fullFlag147[3], (unsigned int)fullFlag147[4], (unsigned int)fullFlag147[5],
+                 Global_R9, globalSceneTable, globalCompactTable, globalCurrentNode, globalActorId,
+                 vmAddedScreen, g_currentScreenThis, s_battleCreateCharListTraceCount);
+}
+
 static void vm_net_trace_battle_outgoing_request_source(const char *label, u32 pc, u32 moduleBase)
 {
     static u32 s_battleOutgoingSourceTraceCount = 0;
@@ -8298,6 +8825,209 @@ static void vm_net_trace_mem(const char *tag, u32 ptr, u32 len)
     vm_net_trace_bytes(line, data, dumpLen);
 }
 
+static void vm_net_trace_wt_field_table_detail(const char *label, u32 obj, u32 pc)
+{
+    static u32 s_wtFieldTableTraceCount = 0;
+    u32 lr = 0;
+    u32 kind = 0;
+    u32 subtype = 0;
+    u32 fieldCount = 0;
+    u32 fieldCap = 0;
+    u32 fieldTable = 0;
+    u32 rawGet = 0;
+    u32 stringGet = 0;
+    u32 u32Get = 0;
+    u32 u8Get = 0;
+    u32 lenGet = 0;
+    u32 i = 0;
+
+    if (obj == 0 || s_wtFieldTableTraceCount >= 192)
+        return;
+
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    (void)vm_net_trace_read_u32(obj + 0x04u, &kind);
+    (void)vm_net_trace_read_u32(obj + 0x08u, &subtype);
+    (void)vm_net_trace_read_u32(obj + 0x10u, &fieldCount);
+    (void)vm_net_trace_read_u32(obj + 0x14u, &fieldCap);
+    (void)vm_net_trace_read_u32(obj + 0x18u, &fieldTable);
+    (void)vm_net_trace_read_u32(obj + 0x28u, &rawGet);
+    (void)vm_net_trace_read_u32(obj + 0x40u, &stringGet);
+    (void)vm_net_trace_read_u32(obj + 0x44u, &u32Get);
+    (void)vm_net_trace_read_u32(obj + 0x4Cu, &u8Get);
+    (void)vm_net_trace_read_u32(obj + 0x54u, &lenGet);
+
+    ++s_wtFieldTableTraceCount;
+    vm_net_trace("trace_wt_field_table label=%s pc=%08x lr=%08x caller=%08x last=%08x tick=%u"
+                 " obj=%08x kind=%u subtype=%u fieldCount=%u fieldCap=%u fieldTable=%08x"
+                 " methods=%08x,%08x,%08x,%08x,%08x count=%u"
+                 " evidence=runtime:WT_object_field_table_entry_12_bytes_name_value_meta\n",
+                 label ? label : "unknown",
+                 pc,
+                 lr,
+                 lr & ~1u,
+                 lastAddress,
+                 g_schedulerTick,
+                 obj,
+                 kind,
+                 subtype,
+                 fieldCount,
+                 fieldCap,
+                 fieldTable,
+                 rawGet,
+                 stringGet,
+                 u32Get,
+                 u8Get,
+                 lenGet,
+                 s_wtFieldTableTraceCount);
+
+    if (fieldTable == 0)
+        return;
+    if (fieldCount > 8)
+        fieldCount = 8;
+    for (i = 0; i < fieldCount; ++i)
+    {
+        u32 entry = fieldTable + i * 12u;
+        u32 namePtr = 0;
+        u32 valuePtr = 0;
+        u32 meta = 0;
+        u16 taggedLen = 0;
+        u8 bytes[16] = {0};
+        u8 lenBytes[2] = {0};
+        char name[64];
+        char valueHex[96];
+        u32 dumpLen = 0;
+
+        name[0] = '\0';
+        valueHex[0] = '\0';
+        (void)vm_net_trace_read_u32(entry + 0x00u, &namePtr);
+        (void)vm_net_trace_read_u32(entry + 0x04u, &valuePtr);
+        (void)vm_net_trace_read_u32(entry + 0x08u, &meta);
+        vm_net_read_guest_best_effort_label(namePtr, name, sizeof(name));
+        if (valuePtr != 0)
+        {
+            if (uc_mem_read(MTK, valuePtr, lenBytes, sizeof(lenBytes)) == UC_ERR_OK)
+                taggedLen = (u16)(((u16)lenBytes[0] << 8) | (u16)lenBytes[1]);
+            dumpLen = taggedLen + 2u;
+            if (dumpLen > sizeof(bytes))
+                dumpLen = sizeof(bytes);
+            if (dumpLen == 0)
+                dumpLen = sizeof(bytes);
+            if (uc_mem_read(MTK, valuePtr, bytes, dumpLen) == UC_ERR_OK)
+                vm_format_trace_bytes_hex(bytes, dumpLen, valueHex, sizeof(valueHex));
+        }
+        vm_net_trace("trace_wt_field_entry label=%s obj=%08x idx=%u entry=%08x namePtr=%08x name=%s valuePtr=%08x meta=%08x taggedLen=%u valueHead=%s evidence=runtime:WT_field_entry_name_value_meta\n",
+                     label ? label : "unknown",
+                     obj,
+                     i,
+                     entry,
+                     namePtr,
+                     name,
+                     valuePtr,
+                     meta,
+                     (unsigned int)taggedLen,
+                     valueHex);
+    }
+}
+
+static void vm_net_trace_battle_server_cmd_detail(const char *label, u32 pc)
+{
+    static u32 s_battleServerCmdTraceCount = 0;
+    u32 lr = 0, sp = 0, r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r9 = 0;
+    u32 packet = 0;
+    u32 packetKind = 0;
+    u32 packetSubtype = 0;
+    u32 battleState = 0;
+    u32 battleMain = 0;
+    u32 phaseWord = 0;
+    u32 state5c = 0;
+    u8 state06 = 0;
+    u8 state0a = 0;
+    u8 state0b = 0;
+    u8 state0c = 0;
+    u8 state0d = 0;
+    u8 state0e = 0;
+    u16 ownCount = 0;
+    u16 enemyCount = 0;
+
+    if (s_battleServerCmdTraceCount >= 192)
+        return;
+
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+    uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+    uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+    uc_reg_read(MTK, UC_ARM_REG_R4, &r4);
+    uc_reg_read(MTK, UC_ARM_REG_R5, &r5);
+    uc_reg_read(MTK, UC_ARM_REG_R6, &r6);
+    uc_reg_read(MTK, UC_ARM_REG_R7, &r7);
+    uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+
+    packet = r7 != 0 ? r7 : r1;
+    (void)vm_net_trace_read_u32(packet + 0x04u, &packetKind);
+    (void)vm_net_trace_read_u32(packet + 0x08u, &packetSubtype);
+    battleState = r9 + 0x3450u;
+    (void)vm_net_trace_read_u32(r9 + 0x2050u, &battleMain);
+    (void)vm_net_trace_read_u32(battleState + 0x5Cu, &state5c);
+    (void)vm_net_trace_read_u8(battleState + 0x06u, &state06);
+    (void)vm_net_trace_read_u8(battleState + 0x0Au, &state0a);
+    (void)vm_net_trace_read_u8(battleState + 0x0Bu, &state0b);
+    (void)vm_net_trace_read_u8(battleState + 0x0Cu, &state0c);
+    (void)vm_net_trace_read_u8(battleState + 0x0Du, &state0d);
+    (void)vm_net_trace_read_u8(battleState + 0x0Eu, &state0e);
+    (void)vm_net_trace_read_u16(battleState + 0x1Au, &ownCount);
+    (void)vm_net_trace_read_u16(battleState + 0x1Cu, &enemyCount);
+    if (battleMain != 0)
+        (void)vm_net_trace_read_u32(battleMain + 0x470u, &phaseWord);
+
+    ++s_battleServerCmdTraceCount;
+    vm_net_trace("trace_battle_server_cmd label=%s pc=%08x lr=%08x caller=%08x last=%08x tick=%u"
+                 " packet=%08x kind=%u subtype=%u regs=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x sp=%08x"
+                 " battleState=%08x battleMain=%08x state06=%u state0a0b0c0d0e=%u,%u,%u,%u,%u state5c=%u counts=%u,%u phaseWord=%08x"
+                 " mockHp=%u/%u,%u/%u count=%u"
+                 " evidence=Battle.cbm:HandleServerBattleCmd_0x7BD0_kind4_case_map\n",
+                 label ? label : "unknown",
+                 pc,
+                 lr,
+                 lr & ~1u,
+                 lastAddress,
+                 g_schedulerTick,
+                 packet,
+                 packetKind,
+                 packetSubtype,
+                 r0,
+                 r1,
+                 r2,
+                 r3,
+                 r4,
+                 r5,
+                 r6,
+                 r7,
+                 sp,
+                 battleState,
+                 battleMain,
+                 (unsigned int)state06,
+                 (unsigned int)state0a,
+                 (unsigned int)state0b,
+                 (unsigned int)state0c,
+                 (unsigned int)state0d,
+                 (unsigned int)state0e,
+                 state5c,
+                 (unsigned int)ownCount,
+                 (unsigned int)enemyCount,
+                 phaseWord,
+                 g_mockBattleRoleHpCurrent,
+                 g_mockBattleRoleHpMax,
+                 g_mockBattleEnemyHpCurrent,
+                 g_mockBattleEnemyHpMax,
+                 s_battleServerCmdTraceCount);
+
+    vm_net_trace_wt_field_table_detail(label ? label : "battle_server_cmd", packet, pc);
+    if (battleState != 0)
+        vm_net_trace_mem("trace_battle_server_cmd_state", battleState, 0x80);
+}
+
 static void vm_net_trace_battle_operate_subtype8_detail(const char *label, u32 pc)
 {
     static u32 s_battleOperateSubtype8TraceCount = 0;
@@ -8759,6 +9489,8 @@ static void vm_net_trace_battle_actioninfo_field_result_detail(const char *label
     }
     if (r4 != 0)
         vm_net_trace_mem("trace_battle_actioninfo_field_result_r4", r4, 96);
+    if (r6 != 0)
+        vm_net_trace_wt_field_table_detail(label ? label : "action_field_packet", r6, pc);
 }
 
 static void vm_net_trace_battle_actioninfo_wrapper_detail(const char *label, u32 pc)
@@ -8818,6 +9550,163 @@ static void vm_net_trace_battle_actioninfo_wrapper_detail(const char *label, u32
     vm_net_trace_mem("trace_battle_actioninfo_wrapper_stack", sp, 0x80);
     if (r5 != 0)
         vm_net_trace_mem("trace_battle_actioninfo_wrapper_reader", r5, 0x40);
+}
+
+static void vm_net_trace_battle_teaminfo_wrapper_detail(const char *label, u32 pc)
+{
+    static u32 s_battleTeaminfoWrapperTraceCount = 0;
+    u32 lr = 0, sp = 0, r0 = 0, r1 = 0, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r9 = 0;
+    u32 teamCount = 0;
+    u32 localBase = 0;
+    u32 teamLocal = 0;
+    u32 slotCountA = 0;
+    u32 slotCountB = 0;
+    u32 r12v = 0;
+    u32 slotId[4] = {0, 0, 0, 0};
+    u32 slotLink[4] = {0, 0, 0, 0};
+    u32 i = 0;
+
+    if (s_battleTeaminfoWrapperTraceCount >= 96)
+        return;
+
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+    uc_reg_read(MTK, UC_ARM_REG_R4, &r4);
+    uc_reg_read(MTK, UC_ARM_REG_R5, &r5);
+    uc_reg_read(MTK, UC_ARM_REG_R6, &r6);
+    uc_reg_read(MTK, UC_ARM_REG_R7, &r7);
+    uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+    uc_reg_read(MTK, UC_ARM_REG_R12, &r12v);
+
+    localBase = r9 + 0x2918u;
+    teamLocal = localBase + 0x9B0u;
+    (void)vm_net_trace_read_u32(sp + 0x04u, &teamCount);
+    (void)vm_net_trace_read_u8(localBase + 0x0Bu, (u8 *)&slotCountB);
+    (void)vm_net_trace_read_u8(localBase + 0x0Cu, (u8 *)&slotCountA);
+    for (i = 0; i < 4; ++i)
+    {
+        u32 slotBase = localBase + i * 0xC4u;
+        (void)vm_net_trace_read_u32(slotBase + 0x524u, &slotId[i]);
+        (void)vm_net_trace_read_u32(slotBase + 0x540u, &slotLink[i]);
+    }
+
+    ++s_battleTeaminfoWrapperTraceCount;
+    vm_net_trace("trace_battle_teaminfo_wrapper_detail label=%s pc=%08x lr=%08x caller=%08x last=%08x tick=%u"
+                 " r0=%08x r1=%08x r4=%08x r5=%08x r6=%08x r7=%08x r12=%08x r9=%08x sp=%08x"
+                 " teamCount=%u localBase=%08x teamLocal=%08x ownEnemyCounts=%u,%u"
+                 " slotIds=%08x,%08x,%08x,%08x slotLinks=%08x,%08x,%08x,%08x count=%u"
+                 " evidence=Battle.cbm:sub_6DBC_teaminfo_wrapper_and_slot_link_window_05188cdc_05188e82\n",
+                 label ? label : "unknown",
+                 pc,
+                 lr,
+                 lr & ~1u,
+                 lastAddress,
+                 g_schedulerTick,
+                 r0,
+                 r1,
+                 r4,
+                 r5,
+                 r6,
+                 r7,
+                 r12v,
+                 r9,
+                 sp,
+                 teamCount,
+                 localBase,
+                 teamLocal,
+                 slotCountA,
+                 slotCountB,
+                 slotId[0],
+                 slotId[1],
+                 slotId[2],
+                 slotId[3],
+                 slotLink[0],
+                 slotLink[1],
+                 slotLink[2],
+                 slotLink[3],
+                 s_battleTeaminfoWrapperTraceCount);
+
+    vm_net_trace_mem("trace_battle_teaminfo_wrapper_stack", sp, 0x80);
+    if (r4 != 0)
+        vm_net_trace_mem("trace_battle_teaminfo_wrapper_reader", r4, 0x40);
+    vm_net_trace_mem("trace_battle_teaminfo_wrapper_local", localBase, 0x80);
+    if (r6 != 0)
+        vm_net_trace_wt_field_table_detail(label ? label : "teaminfo_packet", r6, pc);
+}
+
+static void vm_net_trace_battle_actioninfo_loop_detail(const char *label, u32 pc)
+{
+    static u32 s_battleActioninfoLoopTraceCount = 0;
+    u32 lr = 0, sp = 0, r0 = 0, r1 = 0, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r9 = 0;
+    u32 loopIndex = 0;
+    u32 actionCount = 0;
+    u32 slotTable = 0;
+    u32 localBase = 0;
+    u32 activeBlock = 0;
+    u8 state0 = 0, state1 = 0, state2 = 0, state3 = 0, state4 = 0, stateE = 0;
+
+    if (s_battleActioninfoLoopTraceCount >= 96)
+        return;
+
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+    uc_reg_read(MTK, UC_ARM_REG_R4, &r4);
+    uc_reg_read(MTK, UC_ARM_REG_R5, &r5);
+    uc_reg_read(MTK, UC_ARM_REG_R6, &r6);
+    uc_reg_read(MTK, UC_ARM_REG_R7, &r7);
+    uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+
+    (void)vm_net_trace_read_u32(sp + 0x2Cu, &loopIndex);
+    (void)vm_net_trace_read_u32(sp + 0x30u, &actionCount);
+    (void)vm_net_trace_read_u32(sp + 0x34u, &slotTable);
+    localBase = r9 + 0x2918u;
+    activeBlock = localBase + 0xC4u * (u32)(state2);
+    (void)vm_net_trace_read_u8(localBase + 0x00u, &state0);
+    (void)vm_net_trace_read_u8(localBase + 0x01u, &state1);
+    (void)vm_net_trace_read_u8(localBase + 0x02u, &state2);
+    (void)vm_net_trace_read_u8(localBase + 0x03u, &state3);
+    (void)vm_net_trace_read_u8(localBase + 0x04u, &state4);
+    (void)vm_net_trace_read_u8(localBase + 0x0Eu, &stateE);
+    activeBlock = localBase + 0xC4u * (u32)state2;
+
+    ++s_battleActioninfoLoopTraceCount;
+    vm_net_trace("trace_battle_actioninfo_loop_detail label=%s pc=%08x lr=%08x caller=%08x last=%08x tick=%u"
+                 " r0=%08x r1=%08x r4=%08x r5=%08x r6=%08x r7=%08x r9=%08x sp=%08x"
+                 " loopIndex=%u actionCount=%u slotTable=%08x localState=%u,%u,%u,%u,%u,%u activeBlock=%08x count=%u"
+                 " evidence=Battle.cbm:sub_6EB0_actionnum_loop_and_return_window_05188f0c_05189104\n",
+                 label ? label : "unknown",
+                 pc,
+                 lr,
+                 lr & ~1u,
+                 lastAddress,
+                 g_schedulerTick,
+                 r0,
+                 r1,
+                 r4,
+                 r5,
+                 r6,
+                 r7,
+                 r9,
+                 sp,
+                 loopIndex,
+                 actionCount,
+                 slotTable,
+                 (unsigned int)state0,
+                 (unsigned int)state1,
+                 (unsigned int)state2,
+                 (unsigned int)state3,
+                 (unsigned int)state4,
+                 (unsigned int)stateE,
+                 activeBlock,
+                 s_battleActioninfoLoopTraceCount);
+
+    vm_net_trace_mem("trace_battle_actioninfo_loop_stack", sp, 0x50);
+    if (slotTable != 0)
+        vm_net_trace_mem("trace_battle_actioninfo_loop_slot_table", slotTable, 0x80);
 }
 
 static void vm_net_trace_battle_actioninfo_materialize_detail(const char *label, u32 pc)
@@ -8930,10 +9819,29 @@ static void vm_net_trace_battle_status7_combatinfo_detail(const char *label, u32
     u32 infoBuf = 0;
     u32 fbsBuf = 0;
     u32 fdataBuf = 0;
+    u32 streamWord0 = 0;
+    u32 streamWord4 = 0;
+    u32 streamWord8 = 0;
+    u32 streamWordC = 0;
+    u32 streamWord10 = 0;
+    u32 streamWord14 = 0;
+    u32 readerWord0 = 0;
+    u32 readerWord4 = 0;
+    u32 readerWord8 = 0;
+    u32 readerWordC = 0;
+    u32 readerWord10 = 0;
+    u32 readerWord14 = 0;
+    u32 readerCursor = 0;
+    u32 readerBlobObj = 0;
+    u32 readerBlobPtr = 0;
+    u32 readerBlobLen = 0;
+    u8 nextBytes[32];
+    char nextHex[3 * 16 + 1];
+    u32 nextReadLen = 0;
     u8 autoRevive = 0;
     u8 infoGate = 0;
 
-    if (s_battleStatus7CombatinfoTraceCount >= 80)
+    if (s_battleStatus7CombatinfoTraceCount >= 192)
         return;
 
     uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
@@ -8954,13 +9862,50 @@ static void vm_net_trace_battle_status7_combatinfo_detail(const char *label, u32
     fdataBuf = battleState + 0x38u;
     (void)vm_net_trace_read_u8(battleState + 0x0Au, &autoRevive);
     (void)vm_net_trace_read_u8(battleState + 0x0Bu, &infoGate);
+    memset(nextBytes, 0, sizeof(nextBytes));
+    nextHex[0] = 0;
+    if (r4 != 0)
+    {
+        (void)vm_net_trace_read_u32(r4 + 0x00u, &streamWord0);
+        (void)vm_net_trace_read_u32(r4 + 0x04u, &streamWord4);
+        (void)vm_net_trace_read_u32(r4 + 0x08u, &streamWord8);
+        (void)vm_net_trace_read_u32(r4 + 0x0Cu, &streamWordC);
+        (void)vm_net_trace_read_u32(r4 + 0x10u, &streamWord10);
+        (void)vm_net_trace_read_u32(r4 + 0x14u, &streamWord14);
+    }
+    if (r5 != 0)
+    {
+        (void)vm_net_trace_read_u32(r5 + 0x00u, &readerWord0);
+        (void)vm_net_trace_read_u32(r5 + 0x04u, &readerWord4);
+        (void)vm_net_trace_read_u32(r5 + 0x08u, &readerWord8);
+        (void)vm_net_trace_read_u32(r5 + 0x0Cu, &readerWordC);
+        (void)vm_net_trace_read_u32(r5 + 0x10u, &readerWord10);
+        (void)vm_net_trace_read_u32(r5 + 0x14u, &readerWord14);
+        (void)vm_net_trace_read_u32(r5 + 0x400u, &readerCursor);
+        (void)vm_net_trace_read_u32(r5 + 0x408u, &readerBlobObj);
+        if (readerBlobObj != 0)
+        {
+            (void)vm_net_trace_read_u32(readerBlobObj + 0x04u, &readerBlobPtr);
+            (void)vm_net_trace_read_u32(readerBlobObj + 0x08u, &readerBlobLen);
+        }
+    }
+    if (readerBlobPtr != 0 && readerCursor < readerBlobLen)
+    {
+        u32 avail = readerBlobLen - readerCursor;
+        nextReadLen = avail < sizeof(nextBytes) ? avail : sizeof(nextBytes);
+        if (uc_mem_read(MTK, readerBlobPtr + readerCursor, nextBytes, nextReadLen) == UC_ERR_OK)
+            vm_format_trace_bytes_hex(nextBytes, nextReadLen, nextHex, sizeof(nextHex));
+        else
+            nextReadLen = 0;
+    }
 
     ++s_battleStatus7CombatinfoTraceCount;
     vm_net_trace("trace_battle_status7_combatinfo_detail label=%s pc=%08x lr=%08x caller=%08x last=%08x tick=%u"
                  " regs=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x sp=%08x r9=%08x"
                  " parserObj=%08x stateObj=%08x battleState=%08x infoBuf=%08x fbsBuf=%08x fdataBuf=%08x"
-                 " autoRevive=%u infoGate=%u count=%u"
-                 " evidence=Battle.cbm:sub_743C_combatinfo_autorevive_info_fbs_fdata_window_05189930_05189a46\n",
+                 " autoRevive=%u infoGate=%u stream=%08x,%08x,%08x,%08x,%08x,%08x"
+                 " reader=%08x,%08x,%08x,%08x,%08x,%08x cursor=%u blobObj=%08x blobPtr=%08x blobLen=%u nextLen=%u next=%s count=%u"
+                 " evidence=Battle.cbm:HandleBattleSettleMsg_0x743C_combatinfo_reads_0x78F0_0x79D8\n",
                  label ? label : "unknown",
                  pc,
                  lr,
@@ -8985,13 +9930,42 @@ static void vm_net_trace_battle_status7_combatinfo_detail(const char *label, u32
                  fdataBuf,
                  (unsigned int)autoRevive,
                  (unsigned int)infoGate,
+                 streamWord0,
+                 streamWord4,
+                 streamWord8,
+                 streamWordC,
+                 streamWord10,
+                 streamWord14,
+                 readerWord0,
+                 readerWord4,
+                 readerWord8,
+                 readerWordC,
+                 readerWord10,
+                 readerWord14,
+                 (unsigned int)readerCursor,
+                 readerBlobObj,
+                 readerBlobPtr,
+                 (unsigned int)readerBlobLen,
+                 nextReadLen,
+                 nextHex,
                  s_battleStatus7CombatinfoTraceCount);
 
     if (r6 != 0)
+    {
+        vm_net_trace_wt_field_table_detail(label ? label : "status7_packet", r6, pc);
         vm_net_trace_mem("trace_battle_status7_combatinfo_obj", r6, 96);
+    }
     vm_net_trace_mem("trace_battle_status7_info_buf", infoBuf, 32);
     vm_net_trace_mem("trace_battle_status7_fbs_buf", fbsBuf, 32);
     vm_net_trace_mem("trace_battle_status7_fdata_buf", fdataBuf, 32);
+    if (r4 != 0)
+        vm_net_trace_mem("trace_battle_status7_combatinfo_streamobj", r4, 96);
+    if (r5 != 0)
+        vm_net_trace_mem("trace_battle_status7_combatinfo_reader", r5, 96);
+    if (readerBlobObj != 0)
+        vm_net_trace_mem("trace_battle_status7_combatinfo_blobobj", readerBlobObj, 32);
+    if (readerBlobPtr != 0)
+        vm_net_trace_mem("trace_battle_status7_combatinfo_blob", readerBlobPtr, 96);
 }
 
 static void vm_net_trace_battle_local_action_state(const char *label, u32 pc)
@@ -9195,6 +10169,143 @@ static void vm_net_trace_battle_damage_dispatch_detail(const char *label, u32 pc
         vm_net_trace_mem("trace_battle_damage_dispatch_arg1", r1, 0x40);
     if (activeActionBlock != 0)
         vm_net_trace_mem("trace_battle_damage_dispatch_active_action_block", activeActionBlock, 0x40);
+}
+
+static void vm_net_trace_battle_anim_effect_delta_detail(const char *label, u32 pc)
+{
+    static u32 s_battleAnimEffectDeltaTraceCount = 0;
+    static u32 s_battleAnimEffectDeltaDamageCount = 0;
+    static u32 s_battleAnimEffectDeltaState4Count = 0;
+    static u32 s_battleAnimEffectDeltaHighValueCount = 0;
+    u32 *selectedCount = &s_battleAnimEffectDeltaHighValueCount;
+    u32 selectedLimit = 192;
+    u32 lr = 0, sp = 0, r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r9 = 0;
+    u32 localBase = 0;
+    u32 activeSlot = 0;
+    u32 activeBlock = 0;
+    u32 activeActionBlock = 0;
+    u32 fighterBase = 0;
+    u32 actionValueA32 = 0;
+    u32 actionValueB32 = 0;
+    u32 actionTargetId = 0;
+    u32 ownHp = 0, ownMaxHp = 0, enemyHp = 0, enemyMaxHp = 0;
+    u32 scratch18 = 0, scratch1C = 0, scratch78 = 0, scratch7C = 0;
+    u16 pendingDeltaA = 0, pendingDeltaB = 0;
+    u8 activeSlot8 = 0;
+    u8 local0d = 0, local0e = 0;
+    u8 actionType = 0, actionByte5 = 0, actionByte6 = 0, actionByte8 = 0, actionFlagA = 0, actionFlagB = 0;
+
+    if (label && label[0] == 'd')
+    {
+        selectedCount = &s_battleAnimEffectDeltaDamageCount;
+        selectedLimit = 24;
+    }
+    else if (label && label[0] == 's')
+    {
+        selectedCount = &s_battleAnimEffectDeltaState4Count;
+        selectedLimit = 128;
+    }
+
+    if (*selectedCount >= selectedLimit)
+        return;
+
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+    uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+    uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+    uc_reg_read(MTK, UC_ARM_REG_R4, &r4);
+    uc_reg_read(MTK, UC_ARM_REG_R5, &r5);
+    uc_reg_read(MTK, UC_ARM_REG_R6, &r6);
+    uc_reg_read(MTK, UC_ARM_REG_R7, &r7);
+    uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+    if (r9 == 0)
+        return;
+
+    localBase = r9 + 0x2918u;
+    fighterBase = r9 + 0x374Cu;
+    (void)vm_net_trace_read_u8(localBase + 0x02u, &activeSlot8);
+    (void)vm_net_trace_read_u8(localBase + 0x0Du, &local0d);
+    (void)vm_net_trace_read_u8(localBase + 0x0Eu, &local0e);
+    activeSlot = (u32)activeSlot8;
+    activeBlock = localBase + activeSlot * 0xC4u;
+    activeActionBlock = activeBlock + 0x520u;
+
+    (void)vm_net_trace_read_u8(activeActionBlock + 0x04u, &actionType);
+    (void)vm_net_trace_read_u8(activeActionBlock + 0x05u, &actionByte5);
+    (void)vm_net_trace_read_u8(activeActionBlock + 0x06u, &actionByte6);
+    (void)vm_net_trace_read_u8(activeActionBlock + 0x08u, &actionByte8);
+    (void)vm_net_trace_read_u8(activeActionBlock + 0x0Au, &actionFlagA);
+    (void)vm_net_trace_read_u8(activeActionBlock + 0x0Bu, &actionFlagB);
+    (void)vm_net_trace_read_u32(activeActionBlock + 0x10u, &actionValueA32);
+    (void)vm_net_trace_read_u32(activeActionBlock + 0x18u, &actionValueB32);
+    (void)vm_net_trace_read_u32(activeActionBlock + 0x24u, &actionTargetId);
+    (void)vm_net_trace_read_u16(r9 + 0x34B4u, &pendingDeltaA);
+    (void)vm_net_trace_read_u16(r9 + 0x34B6u, &pendingDeltaB);
+    (void)vm_net_trace_read_u32(fighterBase + 0x10u, &ownHp);
+    (void)vm_net_trace_read_u32(fighterBase + 0x14u, &ownMaxHp);
+    (void)vm_net_trace_read_u32(fighterBase + 0xC4u + 0x10u, &enemyHp);
+    (void)vm_net_trace_read_u32(fighterBase + 0xC4u + 0x14u, &enemyMaxHp);
+    if (sp != 0)
+    {
+        (void)vm_net_trace_read_u32(sp + 0x618u, &scratch18);
+        (void)vm_net_trace_read_u32(sp + 0x61Cu, &scratch1C);
+        (void)vm_net_trace_read_u32(sp + 0x678u, &scratch78);
+        (void)vm_net_trace_read_u32(sp + 0x67Cu, &scratch7C);
+    }
+
+    ++(*selectedCount);
+    ++s_battleAnimEffectDeltaTraceCount;
+    vm_net_trace("trace_battle_anim_effect_delta_detail label=%s pc=%08x lr=%08x caller=%08x last=%08x tick=%u"
+                 " regs=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x sp=%08x r9=%08x"
+                 " localBase=%08x local0d=%u local0e=%u activeSlot=%u activeBlock=%08x activeActionBlock=%08x"
+                 " action=%u,%u,%u,%u flags=%u,%u valueAB=%u,%u targetId=%u pendingDelta=%d,%d"
+                 " ownHp=%u/%u enemyHp=%u/%u scratch=%08x,%08x,%08x,%08x count=%u labelCount=%u"
+                 " evidence=Battle.cbm:DrawBattleAnimEffect_state_windows_and_sub_4B38_pending_delta_consumer\n",
+                 label ? label : "unknown",
+                 pc,
+                 lr,
+                 lr & ~1u,
+                 lastAddress,
+                 g_schedulerTick,
+                 r0,
+                 r1,
+                 r2,
+                 r3,
+                 r4,
+                 r5,
+                 r6,
+                 r7,
+                 sp,
+                 r9,
+                 localBase,
+                 (unsigned int)local0d,
+                 (unsigned int)local0e,
+                 activeSlot,
+                 activeBlock,
+                 activeActionBlock,
+                 (unsigned int)actionType,
+                 (unsigned int)actionByte5,
+                 (unsigned int)actionByte6,
+                 (unsigned int)actionByte8,
+                 (unsigned int)actionFlagA,
+                 (unsigned int)actionFlagB,
+                 actionValueA32,
+                 actionValueB32,
+                 actionTargetId,
+                 (int)(short)pendingDeltaA,
+                 (int)(short)pendingDeltaB,
+                 ownHp,
+                 ownMaxHp,
+                 enemyHp,
+                 enemyMaxHp,
+                 scratch18,
+                 scratch1C,
+                 scratch78,
+                 scratch7C,
+                 s_battleAnimEffectDeltaTraceCount,
+                 *selectedCount);
 }
 
 static void vm_net_trace_battle_state4_detail(const char *label, u32 pc)
@@ -10111,6 +11222,33 @@ static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t
 
     switch (traceOff)
     {
+    case 0x6462:
+        vm_net_trace_battle_create_charlist_source("create_charlist_full_table_method_load", tracePc, traceCodeBase);
+        break;
+    case 0x6464:
+        vm_net_trace_battle_create_charlist_source("create_charlist_full_table_method_call", tracePc, traceCodeBase);
+        break;
+    case 0x646A:
+        vm_net_trace_battle_create_charlist_source("create_charlist_full_table_return_before_store", tracePc, traceCodeBase);
+        break;
+    case 0x646C:
+        vm_net_trace_battle_create_charlist_source("create_charlist_full_table_after_store", tracePc, traceCodeBase);
+        break;
+    case 0x65A8:
+        vm_net_trace_battle_create_charlist_source("create_charlist_compact_table_method_owner", tracePc, traceCodeBase);
+        break;
+    case 0x65AA:
+        vm_net_trace_battle_create_charlist_source("create_charlist_compact_table_method_load", tracePc, traceCodeBase);
+        break;
+    case 0x65AC:
+        vm_net_trace_battle_create_charlist_source("create_charlist_compact_table_method_call", tracePc, traceCodeBase);
+        break;
+    case 0x65AE:
+        vm_net_trace_battle_create_charlist_source("create_charlist_compact_table_return_before_store", tracePc, traceCodeBase);
+        break;
+    case 0x65B0:
+        vm_net_trace_battle_create_charlist_source("create_charlist_compact_table_after_store", tracePc, traceCodeBase);
+        break;
     case 0x04FE:
         vm_net_trace_battle_outgoing_request_source("battle_send_challenge_4_1_entry", tracePc, traceCodeBase);
         break;
@@ -10318,6 +11456,34 @@ static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t
         vm_net_trace_battle_pool_probe("sub_actioninfo_wrapper_record_ptr_len", tracePc, traceCodeBase);
         vm_net_trace_battle_actioninfo_wrapper_detail("record_ptr_len", tracePc);
         break;
+    case 0x6DBC:
+        vm_net_trace_battle_pool_probe("sub_teaminfo_wrapper_entry", tracePc, traceCodeBase);
+        vm_net_trace_battle_teaminfo_wrapper_detail("entry", tracePc);
+        break;
+    case 0x6DDC:
+        vm_net_trace_battle_pool_probe("sub_teaminfo_wrapper_field_found", tracePc, traceCodeBase);
+        vm_net_trace_battle_teaminfo_wrapper_detail("field_found", tracePc);
+        break;
+    case 0x6DF0:
+        vm_net_trace_battle_pool_probe("sub_teaminfo_wrapper_count_ready", tracePc, traceCodeBase);
+        vm_net_trace_battle_teaminfo_wrapper_detail("count_ready", tracePc);
+        break;
+    case 0x6E0A:
+        vm_net_trace_battle_pool_probe("sub_teaminfo_wrapper_member_id_read", tracePc, traceCodeBase);
+        vm_net_trace_battle_teaminfo_wrapper_detail("member_id_read", tracePc);
+        break;
+    case 0x6E24:
+        vm_net_trace_battle_pool_probe("sub_teaminfo_wrapper_link_value_read", tracePc, traceCodeBase);
+        vm_net_trace_battle_teaminfo_wrapper_detail("link_value_read", tracePc);
+        break;
+    case 0x6E46:
+        vm_net_trace_battle_pool_probe("sub_teaminfo_wrapper_slot_link_store", tracePc, traceCodeBase);
+        vm_net_trace_battle_teaminfo_wrapper_detail("slot_link_store", tracePc);
+        break;
+    case 0x6E5C:
+        vm_net_trace_battle_pool_probe("sub_teaminfo_wrapper_loop_compare", tracePc, traceCodeBase);
+        vm_net_trace_battle_teaminfo_wrapper_detail("loop_compare", tracePc);
+        break;
     case 0x743C:
         vm_net_trace_battle_pool_probe("sub_743C_status7_entry", tracePc, traceCodeBase);
         vm_net_trace_battle_local_action_state("sub_743C_status7_entry", tracePc);
@@ -10381,6 +11547,54 @@ static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t
         vm_net_trace_battle_status7_combatinfo_detail("combatinfo_stream_init", tracePc);
         vm_net_trace_battle_local_action_state("sub_743C_combatinfo_stream_init", tracePc);
         break;
+    case 0x7910:
+        vm_net_trace_battle_pool_probe("sub_743C_combatinfo_word0_store", tracePc, traceCodeBase);
+        vm_net_trace_battle_status7_combatinfo_detail("combatinfo_word0_store", tracePc);
+        break;
+    case 0x791E:
+        vm_net_trace_battle_pool_probe("sub_743C_combatinfo_word1_store", tracePc, traceCodeBase);
+        vm_net_trace_battle_status7_combatinfo_detail("combatinfo_word1_store", tracePc);
+        break;
+    case 0x792E:
+        vm_net_trace_battle_pool_probe("sub_743C_combatinfo_word2_store", tracePc, traceCodeBase);
+        vm_net_trace_battle_status7_combatinfo_detail("combatinfo_word2_store", tracePc);
+        break;
+    case 0x793E:
+        vm_net_trace_battle_pool_probe("sub_743C_combatinfo_word3_store", tracePc, traceCodeBase);
+        vm_net_trace_battle_status7_combatinfo_detail("combatinfo_word3_store", tracePc);
+        break;
+    case 0x794E:
+        vm_net_trace_battle_pool_probe("sub_743C_combatinfo_word4_store", tracePc, traceCodeBase);
+        vm_net_trace_battle_status7_combatinfo_detail("combatinfo_word4_store", tracePc);
+        break;
+    case 0x795E:
+        vm_net_trace_battle_pool_probe("sub_743C_combatinfo_word5_store", tracePc, traceCodeBase);
+        vm_net_trace_battle_status7_combatinfo_detail("combatinfo_word5_store", tracePc);
+        break;
+    case 0x796E:
+        vm_net_trace_battle_pool_probe("sub_743C_combatinfo_half0_store", tracePc, traceCodeBase);
+        vm_net_trace_battle_status7_combatinfo_detail("combatinfo_half0_store", tracePc);
+        break;
+    case 0x797E:
+        vm_net_trace_battle_pool_probe("sub_743C_combatinfo_half1_store", tracePc, traceCodeBase);
+        vm_net_trace_battle_status7_combatinfo_detail("combatinfo_half1_store", tracePc);
+        break;
+    case 0x798E:
+        vm_net_trace_battle_pool_probe("sub_743C_combatinfo_flag_store", tracePc, traceCodeBase);
+        vm_net_trace_battle_status7_combatinfo_detail("combatinfo_flag_store", tracePc);
+        break;
+    case 0x79A6:
+        vm_net_trace_battle_pool_probe("sub_743C_combatinfo_bonus_gold_read", tracePc, traceCodeBase);
+        vm_net_trace_battle_status7_combatinfo_detail("combatinfo_bonus_gold_read", tracePc);
+        break;
+    case 0x79BA:
+        vm_net_trace_battle_pool_probe("sub_743C_combatinfo_bonus_half0_store", tracePc, traceCodeBase);
+        vm_net_trace_battle_status7_combatinfo_detail("combatinfo_bonus_half0_store", tracePc);
+        break;
+    case 0x79CE:
+        vm_net_trace_battle_pool_probe("sub_743C_combatinfo_bonus_half1_store", tracePc, traceCodeBase);
+        vm_net_trace_battle_status7_combatinfo_detail("combatinfo_bonus_half1_store", tracePc);
+        break;
     case 0x7A10:
         vm_net_trace_battle_pool_probe("sub_743C_autorevive_read", tracePc, traceCodeBase);
         vm_net_trace_battle_status7_combatinfo_detail("autorevive_read", tracePc);
@@ -10425,9 +11639,35 @@ static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t
         break;
     case 0x7BD0:
         vm_net_trace_battle_pool_probe("sub_7BD0_kind4_dispatch_entry", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("dispatch_entry", tracePc);
         break;
     case 0x7BF6:
         vm_net_trace_battle_pool_probe("sub_7BD0_subtype_switch", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("subtype_switch", tracePc);
+        break;
+    case 0x7C16:
+        vm_net_trace_battle_pool_probe("sub_7BD0_case11_result_read", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case11_result_read", tracePc);
+        break;
+    case 0x7C20:
+        vm_net_trace_battle_pool_probe("sub_7BD0_case11_result_after_read", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case11_result_after_read", tracePc);
+        break;
+    case 0x7C30:
+        vm_net_trace_battle_pool_probe("sub_7BD0_case11_type_after_read", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case11_type_after_read", tracePc);
+        break;
+    case 0x7C9A:
+        vm_net_trace_battle_pool_probe("sub_7BD0_case11_failure", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case11_failure", tracePc);
+        break;
+    case 0x7CB2:
+        vm_net_trace_battle_pool_probe("sub_7BD0_case1_9_result_read", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case1_9_result_read", tracePc);
+        break;
+    case 0x7CBA:
+        vm_net_trace_battle_pool_probe("sub_7BD0_case1_9_result_after_read", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case1_9_result_after_read", tracePc);
         break;
     case 0x6EB0:
         vm_net_trace_battle_pool_probe("sub_actioninfo_parser_entry", tracePc, traceCodeBase);
@@ -10457,6 +11697,10 @@ static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t
         vm_net_trace_battle_pool_probe("sub_actioninfo_parser_actionnum_result", tracePc, traceCodeBase);
         vm_net_trace_battle_actioninfo_field_result_detail("actionnum_result", tracePc);
         break;
+    case 0x6F0C:
+        vm_net_trace_battle_pool_probe("sub_actioninfo_parser_loop_init", tracePc, traceCodeBase);
+        vm_net_trace_battle_actioninfo_loop_detail("loop_init", tracePc);
+        break;
     case 0x6E6A:
         vm_net_trace_battle_pool_probe("sub_actioninfo_parser_type_branch_check", tracePc, traceCodeBase);
         vm_net_trace_battle_actioninfo_parser_detail("type_branch_check", tracePc);
@@ -10476,6 +11720,30 @@ static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t
     case 0x6F38:
         vm_net_trace_battle_pool_probe("sub_actioninfo_parser_header_type_read", tracePc, traceCodeBase);
         vm_net_trace_battle_actioninfo_stream_read_detail("header_type_read", tracePc);
+        break;
+    case 0x31FA:
+        vm_net_trace_battle_pool_probe("draw_battle_anim_effect_entry", tracePc, traceCodeBase);
+        vm_net_trace_battle_anim_effect_delta_detail("anim_entry", tracePc);
+        break;
+    case 0x3448:
+        vm_net_trace_battle_pool_probe("draw_battle_anim_effect_after_action_slots", tracePc, traceCodeBase);
+        vm_net_trace_battle_anim_effect_delta_detail("anim_after_action_slots", tracePc);
+        break;
+    case 0x3492:
+        vm_net_trace_battle_pool_probe("draw_battle_anim_effect_optional_counter_gate", tracePc, traceCodeBase);
+        vm_net_trace_battle_anim_effect_delta_detail("anim_optional_counter_gate", tracePc);
+        break;
+    case 0x34BC:
+        vm_net_trace_battle_pool_probe("draw_battle_anim_effect_before_effect_count", tracePc, traceCodeBase);
+        vm_net_trace_battle_anim_effect_delta_detail("anim_before_effect_count", tracePc);
+        break;
+    case 0x34E4:
+        vm_net_trace_battle_pool_probe("draw_battle_anim_effect_effect_count_check", tracePc, traceCodeBase);
+        vm_net_trace_battle_anim_effect_delta_detail("anim_effect_count_check", tracePc);
+        break;
+    case 0x4582:
+        vm_net_trace_battle_pool_probe("battle_damage_number_effect_entry", tracePc, traceCodeBase);
+        vm_net_trace_battle_anim_effect_delta_detail("damage_number_effect_entry", tracePc);
         break;
     case 0x6F44:
         vm_net_trace_battle_pool_probe("sub_actioninfo_parser_header_actor_map", tracePc, traceCodeBase);
@@ -10529,6 +11797,19 @@ static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t
         vm_net_trace_battle_actioninfo_materialize_detail("type2_after_callback", tracePc);
         vm_net_trace_battle_local_action_state("type2_after_callback", tracePc);
         break;
+    case 0x70FA:
+        vm_net_trace_battle_pool_probe("sub_actioninfo_parser_loop_compare", tracePc, traceCodeBase);
+        vm_net_trace_battle_actioninfo_loop_detail("loop_compare", tracePc);
+        break;
+    case 0x7100:
+        vm_net_trace_battle_pool_probe("sub_actioninfo_parser_loop_exit_check", tracePc, traceCodeBase);
+        vm_net_trace_battle_actioninfo_loop_detail("loop_exit_check", tracePc);
+        break;
+    case 0x7104:
+        vm_net_trace_battle_pool_probe("sub_actioninfo_parser_return", tracePc, traceCodeBase);
+        vm_net_trace_battle_actioninfo_loop_detail("return", tracePc);
+        vm_net_trace_battle_local_action_state("sub_actioninfo_parser_return", tracePc);
+        break;
     case 0x4D74:
         vm_net_trace_battle_pool_probe("battle_damage_dispatch_type6_prepare", tracePc, traceCodeBase);
         vm_net_trace_battle_damage_dispatch_detail("type6_prepare", tracePc);
@@ -10576,11 +11857,25 @@ static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t
     case 0x4B4C:
         vm_net_trace_battle_pool_probe("battle_action_state_machine_state4_before_apply", tracePc, traceCodeBase);
         vm_net_trace_battle_local_action_state("state4_before_apply", tracePc);
+        vm_net_trace_battle_anim_effect_delta_detail("state4_before_apply", tracePc);
+        break;
+    case 0x4B50:
+        vm_net_trace_battle_pool_probe("battle_action_state_machine_state4_delta_base", tracePc, traceCodeBase);
+        vm_net_trace_battle_anim_effect_delta_detail("state4_delta_base", tracePc);
         break;
     case 0x4B6C:
         vm_net_trace_battle_pool_probe("battle_action_state_machine_state4_apply_call", tracePc, traceCodeBase);
         vm_net_trace_battle_local_action_state("state4_apply_call", tracePc);
         vm_net_trace_battle_apply_detail("state4_apply_call", tracePc);
+        vm_net_trace_battle_anim_effect_delta_detail("state4_apply_call", tracePc);
+        break;
+    case 0x4B72:
+        vm_net_trace_battle_pool_probe("battle_action_state_machine_state4_after_hp_a_store", tracePc, traceCodeBase);
+        vm_net_trace_battle_anim_effect_delta_detail("state4_after_hp_a_store", tracePc);
+        break;
+    case 0x4B90:
+        vm_net_trace_battle_pool_probe("battle_action_state_machine_state4_after_hp_b_store", tracePc, traceCodeBase);
+        vm_net_trace_battle_anim_effect_delta_detail("state4_after_hp_b_store", tracePc);
         break;
     case 0x4BAC:
         vm_net_trace_battle_pool_probe("battle_action_state_machine_state3_or_4_followup", tracePc, traceCodeBase);
@@ -10594,10 +11889,6 @@ static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t
     case 0x4B5C:
         vm_net_trace_battle_pool_probe("battle_action_state_machine_state4_gate_state4cc", tracePc, traceCodeBase);
         vm_net_trace_battle_state4_detail("state4_gate_state4cc", tracePc);
-        break;
-    case 0x4B72:
-        vm_net_trace_battle_pool_probe("battle_action_state_machine_state4_countdown_result", tracePc, traceCodeBase);
-        vm_net_trace_battle_state4_detail("state4_countdown_result", tracePc);
         break;
     case 0x4B7E:
         vm_net_trace_battle_pool_probe("battle_action_state_machine_state4_callback8_call", tracePc, traceCodeBase);
@@ -10633,52 +11924,98 @@ static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t
         break;
     case 0x7CD0:
         vm_net_trace_battle_pool_probe("sub_7BD0_4_2_result1_gate", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case1_9_result1_gate", tracePc);
         break;
     case 0x7CE8:
         vm_net_trace_battle_pool_probe("sub_7BD0_4_2_result2_message", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case1_9_result2_message", tracePc);
         break;
     case 0x7CFA:
         vm_net_trace_battle_pool_probe("sub_7BD0_4_2_result4_message", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case1_9_result4_message", tracePc);
         break;
     case 0x7D0C:
         vm_net_trace_battle_pool_probe("sub_7BD0_4_2_result5_message", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case1_9_result5_message", tracePc);
         break;
     case 0x7D1E:
         vm_net_trace_battle_pool_probe("sub_7BD0_4_2_result3_message", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case1_9_result3_message", tracePc);
         break;
     case 0x7D30:
         vm_net_trace_battle_pool_probe("sub_7BD0_4_2_result7_message", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case1_9_result7_message", tracePc);
         break;
     case 0x7D48:
         vm_net_trace_battle_pool_probe("sub_7BD0_4_2_result0_or_6_or_ge8_cleanup", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case1_9_result_cleanup", tracePc);
+        break;
+    case 0x7D66:
+        vm_net_trace_battle_pool_probe("sub_7BD0_case5_10_battle_start_entry", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case5_10_battle_start_entry", tracePc);
         break;
     case 0x7E12:
         vm_net_trace_battle_pool_probe("sub_7BD0_subtype8_info_ptr_read", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case8_info_ptr_read", tracePc);
         vm_net_trace_battle_operate_subtype8_detail("info_ptr_read", tracePc);
         break;
     case 0x7E1A:
         vm_net_trace_battle_pool_probe("sub_7BD0_subtype8_info_ptr_stored", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case8_info_ptr_stored", tracePc);
         vm_net_trace_battle_operate_subtype8_detail("info_ptr_stored", tracePc);
         break;
     case 0x7E1C:
         vm_net_trace_battle_pool_probe("sub_7BD0_subtype8_info_len_read", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case8_info_len_read", tracePc);
         vm_net_trace_battle_operate_subtype8_detail("info_len_read", tracePc);
         break;
     case 0x7E28:
         vm_net_trace_battle_pool_probe("sub_7BD0_subtype8_result_ready", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case8_result_ready", tracePc);
         vm_net_trace_battle_operate_subtype8_detail("result_ready", tracePc);
         break;
     case 0x7E58:
         vm_net_trace_battle_pool_probe("sub_7BD0_subtype8_info_copy_call", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case8_info_copy_call", tracePc);
         vm_net_trace_battle_operate_subtype8_detail("info_copy_call", tracePc);
         break;
     case 0x7E62:
         vm_net_trace_battle_pool_probe("sub_7BD0_subtype8_apply_gate_check", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case8_apply_gate_check", tracePc);
         vm_net_trace_battle_operate_subtype8_detail("apply_gate_check", tracePc);
         break;
     case 0x7E94:
         vm_net_trace_battle_pool_probe("sub_7BD0_subtype8_apply_call", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case8_apply_call", tracePc);
         vm_net_trace_battle_operate_subtype8_detail("apply_call", tracePc);
+        break;
+    case 0x7F06:
+        vm_net_trace_battle_pool_probe("sub_7BD0_case4_mode2_gate", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case4_mode2_gate", tracePc);
+        break;
+    case 0x7F14:
+        vm_net_trace_battle_pool_probe("sub_7BD0_case4_result_after_read", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case4_result_after_read", tracePc);
+        break;
+    case 0x7F18:
+        vm_net_trace_battle_pool_probe("sub_7BD0_case4_success_cleanup", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case4_success_cleanup", tracePc);
+        break;
+    case 0x7F4C:
+        vm_net_trace_battle_pool_probe("sub_7BD0_case4_failure", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case4_failure", tracePc);
+        break;
+    case 0x7F64:
+        vm_net_trace_battle_pool_probe("sub_7BD0_case6_action_entry", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case6_action_entry", tracePc);
+        break;
+    case 0x7F76:
+        vm_net_trace_battle_pool_probe("sub_7BD0_case6_before_action_parser", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case6_before_action_parser", tracePc);
+        break;
+    case 0x7F84:
+        vm_net_trace_battle_pool_probe("sub_7BD0_case6_after_action_phase_set", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case6_after_action_phase_set", tracePc);
         break;
     case 0x2C50:
         vm_net_trace_battle_pool_probe("sub_4B70_battle_apply_entry", tracePc, traceCodeBase);
@@ -10722,19 +12059,24 @@ static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t
         break;
     case 0x7DF0:
         vm_net_trace_battle_pool_probe("sub_7BD0_before_4_10_parser", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("before_4_10_parser", tracePc);
         break;
     case 0x7DF4:
         vm_net_trace_battle_pool_probe("sub_7BD0_after_4_10_parser", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("after_4_10_parser", tracePc);
         vm_net_trace_battle_module_state("sub_7BD0_after_4_10_parser", tracePc);
         break;
     case 0x805C:
         vm_net_trace_battle_pool_probe("sub_7BD0_status7_result_check", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("case7_settle_result_check", tracePc);
         break;
     case 0x806C:
         vm_net_trace_battle_pool_probe("sub_7BD0_before_status7_parser", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("before_status7_parser", tracePc);
         break;
     case 0x8070:
         vm_net_trace_battle_pool_probe("sub_7BD0_after_status7_parser", tracePc, traceCodeBase);
+        vm_net_trace_battle_server_cmd_detail("after_status7_parser", tracePc);
         vm_net_trace_battle_module_state("sub_7BD0_after_status7_parser", tracePc);
         break;
     case 0x8996:
@@ -11550,19 +12892,122 @@ static void vm_net_mock_get_scene_change_target(const u8 *request, u32 requestLe
 
 static bool vm_net_mock_append_group_info_object(u8 *out, u32 outCap, u32 *pos, u32 leadId)
 {
-    static const u8 emptyGroupInfo[] = {0};
+    u8 groupInfo[128];
+    u32 groupInfoLen = 0;
+    u32 templateId = vm_net_mock_env_u32("CBE_GROUPINFO_TEMPLATE_ID", 105);
+    u32 templateHp = vm_net_mock_env_u32("CBE_GROUPINFO_TEMPLATE_HP", 20);
+    u32 templateMaxHp = vm_net_mock_env_u32("CBE_GROUPINFO_TEMPLATE_MAX_HP", templateHp);
+    u32 templateMp = vm_net_mock_env_u32("CBE_GROUPINFO_TEMPLATE_MP", 20);
+    u32 templateMaxMp = vm_net_mock_env_u32("CBE_GROUPINFO_TEMPLATE_MAX_MP", templateMp);
+    u8 templateByte0 = vm_net_mock_env_u8("CBE_GROUPINFO_TEMPLATE_BYTE0", 1);
+    u8 templateByte1 = vm_net_mock_env_u8("CBE_GROUPINFO_TEMPLATE_BYTE1", 0);
+    u8 templateByte2 = vm_net_mock_env_u8("CBE_GROUPINFO_TEMPLATE_BYTE2", 0);
+    const char *templateName = vm_net_mock_env_str("CBE_GROUPINFO_TEMPLATE_NAME", "Monster");
+    bool seedTemplate = vm_net_mock_env_u8("CBE_GROUPINFO_TEMPLATE_SEED", 0) != 0 && templateId != 0;
+    u8 num = 0;
     u32 objectStart = 0;
+
+    if (seedTemplate)
+    {
+        if (!vm_net_mock_put_be32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateId))
+            return false;
+        if (!vm_net_mock_seq_put_string(groupInfo, sizeof(groupInfo), &groupInfoLen, templateName))
+            return false;
+        if (!vm_net_mock_seq_put_u8(groupInfo, sizeof(groupInfo), &groupInfoLen, templateByte0))
+            return false;
+        if (!vm_net_mock_seq_put_u8(groupInfo, sizeof(groupInfo), &groupInfoLen, templateByte1))
+            return false;
+        if (!vm_net_mock_seq_put_u8(groupInfo, sizeof(groupInfo), &groupInfoLen, templateByte2))
+            return false;
+        if (!vm_net_mock_put_be32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateHp))
+            return false;
+        if (!vm_net_mock_put_be32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateMaxHp))
+            return false;
+        if (!vm_net_mock_put_be32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateMp))
+            return false;
+        if (!vm_net_mock_put_be32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateMaxMp))
+            return false;
+        num = 1;
+    }
+
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 5, 10, &objectStart))
         return false;
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", 1))
         return false;
-    if (!vm_net_mock_put_object_u8(out, outCap, pos, "num", 0))
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "num", num))
         return false;
-    if (!vm_net_mock_put_object_blob(out, outCap, pos, "groupinfo", emptyGroupInfo, 0))
+    if (!vm_net_mock_put_object_blob(out, outCap, pos, "groupinfo", groupInfo, groupInfoLen))
         return false;
     if (!vm_net_mock_put_object_u32(out, outCap, pos, "leadid", leadId))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    vm_net_trace("mock_group_info_template_seed enabled=%u leadId=%u num=%u templateId=%u name=%s bytes=%u,%u,%u stats=%u,%u,%u,%u groupinfoLen=%u"
+                 " evidence=IDA:net_handle_group_info_0x01011F3A_reads_num_groupinfo_leadid_and_calls_AddRoleToList_0x01011E1E\n",
+                 seedTemplate ? 1 : 0,
+                 leadId,
+                 num,
+                 templateId,
+                 templateName ? templateName : "",
+                 templateByte0,
+                 templateByte1,
+                 templateByte2,
+                 templateHp,
+                 templateMaxHp,
+                 templateMp,
+                 templateMaxMp,
+                 groupInfoLen);
+    return true;
+}
+
+static bool vm_net_mock_append_battle_enemy_template_prefill_object(u8 *out, u32 outCap,
+                                                                    u32 *pos, u32 templateId)
+{
+    u8 groupInfo[128];
+    u32 groupInfoLen = 0;
+    u32 templateHp = vm_net_mock_env_u32("CBE_BATTLE_PREFILL_TEMPLATE_HP", 20);
+    u32 templateMaxHp = vm_net_mock_env_u32("CBE_BATTLE_PREFILL_TEMPLATE_MAX_HP", templateHp);
+    u32 templateMp = vm_net_mock_env_u32("CBE_BATTLE_PREFILL_TEMPLATE_MP", 20);
+    u32 templateMaxMp = vm_net_mock_env_u32("CBE_BATTLE_PREFILL_TEMPLATE_MAX_MP", templateMp);
+    u8 rowByte34 = vm_net_mock_env_u8("CBE_BATTLE_PREFILL_TEMPLATE_BYTE34", 1);
+    u8 rowByte35 = vm_net_mock_env_u8("CBE_BATTLE_PREFILL_TEMPLATE_BYTE35", 0);
+    const char *templateName = vm_net_mock_env_str("CBE_BATTLE_PREFILL_TEMPLATE_NAME", "Monster");
+    u32 objectStart = 0;
+
+    if (templateId == 0)
+        return false;
+
+    if (!vm_net_mock_put_be32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateId))
+        return false;
+    if (!vm_net_mock_seq_put_string(groupInfo, sizeof(groupInfo), &groupInfoLen, templateName))
+        return false;
+    if (!vm_net_mock_seq_put_u8(groupInfo, sizeof(groupInfo), &groupInfoLen, rowByte34))
+        return false;
+    if (!vm_net_mock_seq_put_u8(groupInfo, sizeof(groupInfo), &groupInfoLen, rowByte35))
+        return false;
+    if (!vm_net_mock_seq_put_u32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateHp))
+        return false;
+    if (!vm_net_mock_seq_put_u32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateMaxHp))
+        return false;
+    if (!vm_net_mock_seq_put_u32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateMp))
+        return false;
+    if (!vm_net_mock_seq_put_u32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateMaxMp))
+        return false;
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 5, 5, &objectStart))
+        return false;
+    if (!vm_net_mock_put_object_blob(out, outCap, pos, "groupinfo", groupInfo, groupInfoLen))
+        return false;
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    vm_net_trace("mock_battle_enemy_template_prefill response=5/5 templateId=%u name=%s grammar=raw_id_seq_string_seq_u8_seq_u8_seq_u32x4 bytes=%u,%u stats=%u,%u,%u,%u groupinfoLen=%u evidence=runtime:trace_groupinfo_case5_reader_0101209e_cursor0_blob_starts_innerLen_then_id,runtime:trace_groupinfo_case5_reader_after_id_cursor6_showed_removed_pre_name_byte_was_making_name_len_zero,IDA:net_handle_group_info_subtype5_case5_0x0101208C_reads_groupinfo_via_slots_20_2c_1c_28_28_20x4_then_calls_AddRoleToList_0x01012116\n",
+                 templateId,
+                 templateName ? templateName : "",
+                 rowByte34,
+                 rowByte35,
+                 templateHp,
+                 templateMaxHp,
+                 templateMp,
+                 templateMaxMp,
+                 groupInfoLen);
     return true;
 }
 
@@ -12138,6 +13583,23 @@ static u32 vm_net_mock_build_scene_default_event_response(u8 *out, u32 outCap)
                      pos);
         return pos;
     }
+    if (g_mockBattleOperateSessionFinished != 0)
+    {
+        g_mockBattleOperateSessionFinished = 0;
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x0a, 0x11, &objectStart))
+            return 0;
+        if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
+            return 0;
+        if (!vm_net_mock_put_object_u32(out, outCap, &pos, "lastexp", 1))
+            return 0;
+        if (!vm_net_mock_put_object_u32(out, outCap, &pos, "curexp", 1))
+            return 0;
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        vm_net_mock_finish_wt_packet(out, pos, 1);
+        vm_net_trace("mock_scene_default_event_response response=10/17 result=1 battleTerminalAck=1 len=%u evidence=runtime:25_5_result1_still_dispatches_kind25_subtype5_into_Battle_sub17AC_generic_branch,docs/re/battle-flow.md_battle_end_response_cmd10_subcmd17_result1_victory\n",
+                     pos);
+        return pos;
+    }
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x19, 5, &objectStart))
         return 0;
     /*
@@ -12151,7 +13613,7 @@ static u32 vm_net_mock_build_scene_default_event_response(u8 *out, u32 outCap)
         return 0;
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);
-    vm_net_trace("mock_scene_default_event_response response=25/5 result=4 len=%u evidence=scene_resource_followup_same_subtype_safe_shell_and_battle_25_12_global_clear_negative\n", pos);
+    vm_net_trace("mock_scene_default_event_response response=25/5 result=4 battleTerminalAck=0 len=%u evidence=scene_resource_followup_same_subtype_safe_shell_and_battle_25_12_global_clear_negative\n", pos);
     return pos;
 }
 
@@ -12914,7 +14376,7 @@ static u32 vm_net_mock_build_battle_start_info_blob(u8 *out, u32 outCap, u32 rol
     u32 roleMaxHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_HP", roleHp);
     u32 roleMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MP", 40);
     u32 roleMaxMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_MP", roleMp);
-    u32 enemyHp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", 80);
+    u32 enemyHp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", 20);
     u32 enemyMaxHp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MAX_HP", enemyHp);
     u32 enemyMp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MP", 20);
     u32 enemyMaxMp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MAX_MP", enemyMp);
@@ -12999,6 +14461,15 @@ static u32 vm_net_mock_resolve_battle_enemy_id(u32 requestedId, u32 *tableBaseOu
             firstNonzero = id;
     }
 
+    /*
+     * A request id that is not already present in Battle.cbm's enemy template
+     * table is not render-safe: sub_66CC takes the lookup-failed path and the
+     * later fighter draw loop calls a zero callback. Keep the table id as the
+     * default crash-safe server contract; force the request id only for focused
+     * experiments while recovering the upstream template-population contract.
+     */
+    if (requestedId != 0 && vm_net_mock_env_u32("CBE_BATTLE_FORCE_REQUEST_ENEMY_ID", 0) != 0)
+        return requestedId;
     return firstNonzero ? firstNonzero : requestedId;
 }
 
@@ -13057,6 +14528,15 @@ static bool vm_net_mock_append_battle_actioninfo_record(u8 *actionInfo, u32 acti
                                                         u8 childFlag, u32 valueA,
                                                         u32 valueBSeed)
 {
+    char valueText[16];
+    const char *blobText = "";
+
+    if (actionType == 1)
+    {
+        snprintf(valueText, sizeof(valueText), "%u", valueA);
+        blobText = valueText;
+    }
+
     return vm_net_mock_seq_put_u8(actionInfo, actionInfoCap, actionInfoLen, actionType) &&
            vm_net_mock_seq_put_u8(actionInfo, actionInfoCap, actionInfoLen, mappedActorWireSlot) &&
            vm_net_mock_seq_put_u8(actionInfo, actionInfoCap, actionInfoLen, 1) &&
@@ -13065,10 +14545,27 @@ static bool vm_net_mock_append_battle_actioninfo_record(u8 *actionInfo, u32 acti
            vm_net_mock_seq_put_u32(actionInfo, actionInfoCap, actionInfoLen, valueA) &&
            vm_net_mock_seq_put_u32(actionInfo, actionInfoCap, actionInfoLen, valueBSeed) &&
            vm_net_mock_seq_put_u32(actionInfo, actionInfoCap, actionInfoLen, 0) &&
-           vm_net_mock_seq_put_string(actionInfo, actionInfoCap, actionInfoLen, "") &&
+           vm_net_mock_seq_put_string(actionInfo, actionInfoCap, actionInfoLen, blobText) &&
            vm_net_mock_seq_put_u8(actionInfo, actionInfoCap, actionInfoLen, 0) &&
            vm_net_mock_seq_put_u8(actionInfo, actionInfoCap, actionInfoLen, 0) &&
            vm_net_mock_seq_put_u8(actionInfo, actionInfoCap, actionInfoLen, 0);
+}
+
+static bool vm_net_mock_put_battle_action_companion_fields(u8 *out, u32 outCap, u32 *pos)
+{
+    (void)out;
+    (void)outCap;
+    (void)pos;
+    /*
+     * Battle.cbm subtype-6 statically reads iteminfo and teaminfo before
+     * actioninfo/actionnum. Runtime negatives showed that raw empty fields,
+     * raw tagged-empty fields, and empty WT blob fields all make the item/team
+     * wrappers read through neighboring object metadata. Static sub_6DBC also
+     * shows that a present teaminfo field is consumed as N current-team records,
+     * not as an optional zero-record stream. Omit these fields until the real
+     * record grammar is recovered.
+     */
+    return true;
 }
 
 static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requestLen,
@@ -13084,11 +14581,24 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
     u32 actionInfoLen = 0;
     u8 actorSlot = 1;
     u8 enemySlot = 0;
-    const u32 attackDamageValue = 12;
+    u8 firstRecordWireActorUsed = 0;
+    u8 firstRecordWireTargetUsed = 0;
+    u32 attackDamageValue = 12;
+    u32 counterDamageValue = 10;
     u8 actionCount = 1;
     bool bundleWholeRound = false;
     u8 firstRecordActorWireSlot = 1;
     u8 firstRecordChildFlag = 0;
+    u32 firstRecordValueB = 0;
+    u32 counterRecordValueB = 0;
+    bool type1ValueBRemainingHp = vm_net_mock_env_u32("CBE_BATTLE_TYPE1_VALUEB_REMAINING_HP", 1) != 0;
+    bool battleEndsThisRound = false;
+    bool allowCounterattack = false;
+    bool terminalFollowup = false;
+    u8 actionType = (u8)vm_net_mock_env_u32("CBE_BATTLE_ACTION_TYPE", 1);
+    u8 firstActionType = (u8)vm_net_mock_env_u32("CBE_BATTLE_FIRST_ACTION_TYPE", actionType);
+    u8 counterActionType = (u8)vm_net_mock_env_u32("CBE_BATTLE_COUNTER_ACTION_TYPE", actionType);
+    bool type1BundleCounter = vm_net_mock_env_u32("CBE_BATTLE_TYPE1_BUNDLE_COUNTER", 0) != 0;
 
     if (outCap < pos || !vm_net_mock_is_battle_operate_request(request, requestLen))
     {
@@ -13119,11 +14629,75 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
      * hand-written raw 43-byte layout.
      */
     actorSlot = (u8)(index & 0xFFu);
-    bundleWholeRound = (g_mockBattleOperateSessionArmed != 0 &&
-                        operate == 0);
+    terminalFollowup = (g_mockBattleOperateSessionFinished != 0);
+    if (terminalFollowup)
+        bundleWholeRound = false;
+    else
+        bundleWholeRound = (g_mockBattleOperateSessionArmed != 0 &&
+                            operate == 0);
     firstRecordActorWireSlot = (index == 0) ? 2u : actorSlot;
     firstRecordChildFlag = (index == 0) ? 1u : 0u;
-
+    if (!terminalFollowup && g_mockBattleEnemyHpCurrent == 0)
+        g_mockBattleEnemyHpCurrent = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", 20);
+    if (!terminalFollowup && g_mockBattleRoleHpCurrent == 0)
+        g_mockBattleRoleHpCurrent = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP", 120);
+    if (terminalFollowup)
+    {
+        attackDamageValue = 0;
+        counterDamageValue = 0;
+        actionCount = 0;
+    }
+    else
+    {
+        attackDamageValue = vm_net_mock_min_u32(12u, g_mockBattleEnemyHpCurrent);
+        if (attackDamageValue == 0)
+            attackDamageValue = 1;
+        if (g_mockBattleEnemyHpCurrent >= attackDamageValue)
+            g_mockBattleEnemyHpCurrent -= attackDamageValue;
+        else
+            g_mockBattleEnemyHpCurrent = 0;
+        allowCounterattack = bundleWholeRound && g_mockBattleEnemyHpCurrent > 0 && g_mockBattleRoleHpCurrent > 0;
+        if (firstActionType == 1 && !type1BundleCounter)
+            allowCounterattack = false;
+        if (allowCounterattack)
+        {
+            counterDamageValue = vm_net_mock_min_u32(10u, g_mockBattleRoleHpCurrent);
+            if (counterDamageValue == 0)
+                counterDamageValue = 1;
+            if (g_mockBattleRoleHpCurrent >= counterDamageValue)
+                g_mockBattleRoleHpCurrent -= counterDamageValue;
+            else
+                g_mockBattleRoleHpCurrent = 0;
+        }
+        battleEndsThisRound = (g_mockBattleEnemyHpCurrent == 0 || g_mockBattleRoleHpCurrent == 0);
+    }
+    if (!terminalFollowup && type1ValueBRemainingHp)
+    {
+        if (firstActionType == 1)
+            firstRecordValueB = g_mockBattleEnemyHpCurrent;
+        if (counterActionType == 1)
+            counterRecordValueB = g_mockBattleRoleHpCurrent;
+    }
+    firstRecordValueB = vm_net_mock_env_u32("CBE_BATTLE_FIRST_VALUE_B", firstRecordValueB);
+    counterRecordValueB = vm_net_mock_env_u32("CBE_BATTLE_COUNTER_VALUE_B", counterRecordValueB);
+    if (terminalFollowup)
+    {
+        if (!vm_net_mock_append_battle_status7_object(out, outCap, &pos) ||
+            !vm_net_mock_append_battle_terminal_subtype8_object(out, outCap, &pos) ||
+            !vm_net_mock_append_battle_terminal_case11_object(out, outCap, &pos) ||
+            !vm_net_mock_append_battle_terminal_case9_object(out, outCap, &pos))
+            return 0;
+        vm_net_mock_finish_wt_packet(out, pos, 4);
+        vm_net_trace("mock_battle_operate_response response=4/7+4/8+4/11+4/9 terminalFollowup=1 result=1 case8_result=1 case8_autorevive=1 case11_result=1 case11_type=1 case9_result=1 roleHp=%u/%u enemyHp=%u/%u session=%u turn=%u len=%u evidence=runtime:latest_inline_4_7_4_11_4_9_passes_subtype9_gate_but_stays_on_Battle_auto_prompt,runtime:prior_4_7_4_8_reaches_case8_apply_call_05189DB4_and_sub_4B70_send25_call,runtime:prior_4_7_4_8_4_11_still_consumes_case11_and_writes_mainObj_0x474_1_at_pc_05189B66,Battle.cbm:sub_7BD0_subtype8_requires_mode2_before_apply_Battle_cbm_05189D16_05189DB4,Battle.cbm:sub_7BD0_subtype9_result1_gate_checks_mainObj_0x474_or_0x470_before_05189C04\n",
+                     g_mockBattleRoleHpCurrent,
+                     g_mockBattleRoleHpMax,
+                     g_mockBattleEnemyHpCurrent,
+                     g_mockBattleEnemyHpMax,
+                     g_mockBattleOperateSessionSerial,
+                     g_mockBattleOperateTurnCounter,
+                     pos);
+        return pos;
+    }
     memset(actionInfo, 0, sizeof(actionInfo));
     /*
      * Latest negative evidence (2026-06-12 rerun):
@@ -13148,20 +14722,30 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
      * - keep the raw target byte at 0 and all other fields unchanged
      * - goal is to see whether Battle now materializes actor arg 1 while
      *   preserving the current parser-safe single-record family
-     */
+    */
     {
-        const u8 actionType = 2u;
-        const u8 mappedTargetWireSlot = enemySlot;
-        const u32 valueBSeed = 0u;
+        u8 mappedActorWireSlot = firstRecordActorWireSlot;
+        u8 mappedTargetWireSlot = enemySlot;
+
+        if (firstActionType == 1)
+        {
+            mappedActorWireSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_TYPE1_FIRST_ACTOR_WIRE_SLOT", 1);
+            mappedTargetWireSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_TYPE1_FIRST_TARGET_WIRE_SLOT", 0);
+        }
+        firstRecordWireActorUsed = mappedActorWireSlot;
+        firstRecordWireTargetUsed = mappedTargetWireSlot;
 
         /* record 0 stays on the current live no-crash baseline. */
-        if (!vm_net_mock_append_battle_actioninfo_record(actionInfo, sizeof(actionInfo),
-                                                         &actionInfoLen, actionType,
-                                                         firstRecordActorWireSlot,
-                                                         mappedTargetWireSlot,
-                                                         firstRecordChildFlag, attackDamageValue,
-                                                         valueBSeed))
-            return 0;
+        if (!terminalFollowup)
+        {
+            if (!vm_net_mock_append_battle_actioninfo_record(actionInfo, sizeof(actionInfo),
+                                                             &actionInfoLen, firstActionType,
+                                                             mappedActorWireSlot,
+                                                             mappedTargetWireSlot,
+                                                             firstRecordChildFlag, attackDamageValue,
+                                                             firstRecordValueB))
+                return 0;
+        }
 
         /*
          * Narrow 2026-06-12 follow-up:
@@ -13180,18 +14764,23 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
          * Therefore bundle the safe second record for every armed `operate=0`
          * attack request, not just the first tracked turn.
          */
-        if (bundleWholeRound)
+        if (allowCounterattack)
         {
+            u8 counterActorWireSlot = 2u;
+            if (counterActionType == 1)
+                counterActorWireSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_TYPE1_COUNTER_ACTOR_WIRE_SLOT", 0);
             actionCount = 2;
             if (!vm_net_mock_append_battle_actioninfo_record(actionInfo, sizeof(actionInfo),
-                                                             &actionInfoLen, actionType,
-                                                             2u, 1u, 1u,
-                                                             attackDamageValue, valueBSeed))
+                                                             &actionInfoLen, counterActionType,
+                                                             counterActorWireSlot, 1u, 1u,
+                                                             counterDamageValue, counterRecordValueB))
                 return 0;
         }
     }
 
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 4, 6, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_battle_action_companion_fields(out, outCap, &pos))
         return 0;
     if (!vm_net_mock_put_object_u8(out, outCap, &pos, "actionnum", actionCount))
         return 0;
@@ -13202,22 +14791,39 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
     vm_net_mock_finish_wt_packet(out, pos, 1);
     if (g_mockBattleOperateSessionArmed != 0)
         ++g_mockBattleOperateTurnCounter;
+    if (battleEndsThisRound)
+    {
+        g_mockBattleOperateSessionArmed = 0;
+        g_mockBattleOperateSessionFinished = 1;
+    }
     vm_net_trace_bytes("mock_battle_operate_actioninfo_payload", actionInfo, actionInfoLen);
-    vm_net_trace("mock_battle_operate_response response=4/6 actionnum=%u actioninfoLen=%u actioninfoField=raw encoding=tagged_seq recordType=%u actorSlots=%u wireMapped=%u_to_%u index=%u operate=%u childFlag=%u damageValue=%u valueBSeed=%u session=%u turn=%u bundleWholeRound=%u len=%u evidence=Battle.cbm:sub_6EB0_header_reads_use_stream_read_i8_tagged_01033AAD_and_child_values_use_tagged_reader_table_callbacks,Battle.cbm:sub_4582_0x4582_type2_only_effect_while_type1_reads_damage_popup_fields,Battle.cbm:0x05189018_0x05189022_loops_over_actionnum_and_reenters_0x05188e30,runtime:latest_logs_show_every_live_attack_request_is_4_2_index0_operate0_so_bundle_gate_now_keys_on_operate0_instead_of_first_turn_only\n",
-                 (unsigned int)actionCount,
-                 actionInfoLen,
-                 2u,
+    vm_net_trace("mock_battle_operate_response response=%s actionnum=%u actioninfoLen=%u actioninfoField=raw companionFields=omitted_until_teaminfo_record_grammar encoding=tagged_seq firstRecordType=%u counterRecordType=%u actorSlots=%u wireMapped=%u_to_%u index=%u operate=%u childFlag=%u damageValue=%u firstValueB=%u counterDamageValue=%u counterValueB=%u roleHp=%u/%u enemyHp=%u/%u session=%u turn=%u bundleWholeRound=%u type1BundleCounter=%u valueBRemainingHp=%u battleEnds=%u terminalFollowup=%u len=%u evidence=runtime:latest_type1_single_record_no_crash_reaches_damage_dispatch_but_enemy0_stays_20_20_with_valueB0,Battle.cbm:sub_6EB0_materializes_type1_valueA_valueB_fields_05188f96_05188fbc,Battle.cbm:sub_6D12_reads_iteminfo_before_actioninfo,Battle.cbm:sub_6DBC_reads_teaminfo_before_actioninfo,Battle.cbm:sub_6DBC_present_teaminfo_consumes_current_team_record_count_not_zero_record_stream,Battle.cbm:sub_6EB0_header_reads_use_stream_read_i8_tagged_01033AAD_and_child_values_use_tagged_reader_table_callbacks,Battle.cbm:sub_4582_0x4582_type2_only_effect_while_type1_reads_damage_popup_fields,Battle.cbm:0x05189018_0x05189022_loops_over_actionnum_and_reenters_0x05188e30,Battle.cbm:sub_7BD0_subtype9_result1_gate_checks_mainObj_0x474_or_0x470_before_05189C04\n",
+                  battleEndsThisRound ? "4/6(lethal-local-ko-pending)" : "4/6",
+                  (unsigned int)actionCount,
+                  actionInfoLen,
+                  (unsigned int)firstActionType,
+                  (unsigned int)counterActionType,
                  (unsigned int)actorSlot,
-                 (unsigned int)firstRecordActorWireSlot,
-                 (unsigned int)enemySlot,
+                 (unsigned int)firstRecordWireActorUsed,
+                 (unsigned int)firstRecordWireTargetUsed,
                  (unsigned int)index,
                  (unsigned int)operate,
                  (unsigned int)firstRecordChildFlag,
                  attackDamageValue,
-                 0u,
+                 firstRecordValueB,
+                 counterDamageValue,
+                 counterRecordValueB,
+                 g_mockBattleRoleHpCurrent,
+                 g_mockBattleRoleHpMax,
+                 g_mockBattleEnemyHpCurrent,
+                 g_mockBattleEnemyHpMax,
                  g_mockBattleOperateSessionSerial,
                  g_mockBattleOperateTurnCounter,
                  bundleWholeRound ? 1u : 0u,
+                 type1BundleCounter ? 1u : 0u,
+                 type1ValueBRemainingHp ? 1u : 0u,
+                 battleEndsThisRound ? 1u : 0u,
+                 terminalFollowup ? 1u : 0u,
                  pos);
     return pos;
 }
@@ -13237,11 +14843,24 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
     u8 requestSubtype = 0;
     u8 actorSlot = 1;
     const u8 enemySlot = 0;
-    const u32 attackDamageValue = 12;
+    u8 firstRecordWireActorUsed = 0;
+    u8 firstRecordWireTargetUsed = 0;
+    u32 attackDamageValue = 12;
+    u32 counterDamageValue = 10;
     u8 actionCount = 1;
     bool bundleWholeRound = false;
     u8 firstRecordActorWireSlot = 1;
     u8 firstRecordChildFlag = 0;
+    u32 firstRecordValueB = 0;
+    u32 counterRecordValueB = 0;
+    bool type1ValueBRemainingHp = vm_net_mock_env_u32("CBE_BATTLE_TYPE1_VALUEB_REMAINING_HP", 1) != 0;
+    bool battleEndsThisRound = false;
+    bool allowCounterattack = false;
+    bool terminalFollowup = false;
+    u8 actionType = (u8)vm_net_mock_env_u32("CBE_BATTLE_ACTION_TYPE", 1);
+    u8 firstActionType = (u8)vm_net_mock_env_u32("CBE_BATTLE_FIRST_ACTION_TYPE", actionType);
+    u8 counterActionType = (u8)vm_net_mock_env_u32("CBE_BATTLE_COUNTER_ACTION_TYPE", actionType);
+    bool type1BundleCounter = vm_net_mock_env_u32("CBE_BATTLE_TYPE1_BUNDLE_COUNTER", 0) != 0;
 
     if (outCap < pos)
         return 0;
@@ -13262,36 +14881,113 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
         operate = operate8;
 
     actorSlot = (u8)(index & 0xFFu);
-    bundleWholeRound = (g_mockBattleOperateSessionArmed != 0 &&
-                        operate == 0);
+    terminalFollowup = (g_mockBattleOperateSessionFinished != 0);
+    if (terminalFollowup)
+        bundleWholeRound = false;
+    else
+        bundleWholeRound = (g_mockBattleOperateSessionArmed != 0 &&
+                            operate == 0);
     firstRecordActorWireSlot = (index == 0) ? 2u : actorSlot;
     firstRecordChildFlag = (index == 0) ? 1u : 0u;
+    if (!terminalFollowup && g_mockBattleEnemyHpCurrent == 0)
+        g_mockBattleEnemyHpCurrent = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", 20);
+    if (!terminalFollowup && g_mockBattleRoleHpCurrent == 0)
+        g_mockBattleRoleHpCurrent = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP", 120);
+    if (terminalFollowup)
+    {
+        attackDamageValue = 0;
+        counterDamageValue = 0;
+        actionCount = 0;
+    }
+    else
+    {
+        attackDamageValue = vm_net_mock_min_u32(12u, g_mockBattleEnemyHpCurrent);
+        if (attackDamageValue == 0)
+            attackDamageValue = 1;
+        if (g_mockBattleEnemyHpCurrent >= attackDamageValue)
+            g_mockBattleEnemyHpCurrent -= attackDamageValue;
+        else
+            g_mockBattleEnemyHpCurrent = 0;
+        allowCounterattack = bundleWholeRound && g_mockBattleEnemyHpCurrent > 0 && g_mockBattleRoleHpCurrent > 0;
+        if (firstActionType == 1 && !type1BundleCounter)
+            allowCounterattack = false;
+        if (allowCounterattack)
+        {
+            counterDamageValue = vm_net_mock_min_u32(10u, g_mockBattleRoleHpCurrent);
+            if (counterDamageValue == 0)
+                counterDamageValue = 1;
+            if (g_mockBattleRoleHpCurrent >= counterDamageValue)
+                g_mockBattleRoleHpCurrent -= counterDamageValue;
+            else
+                g_mockBattleRoleHpCurrent = 0;
+        }
+        battleEndsThisRound = (g_mockBattleEnemyHpCurrent == 0 || g_mockBattleRoleHpCurrent == 0);
+    }
+    if (!terminalFollowup && type1ValueBRemainingHp)
+    {
+        if (firstActionType == 1)
+            firstRecordValueB = g_mockBattleEnemyHpCurrent;
+        if (counterActionType == 1)
+            counterRecordValueB = g_mockBattleRoleHpCurrent;
+    }
+    firstRecordValueB = vm_net_mock_env_u32("CBE_BATTLE_FIRST_VALUE_B", firstRecordValueB);
+    counterRecordValueB = vm_net_mock_env_u32("CBE_BATTLE_COUNTER_VALUE_B", counterRecordValueB);
+    if (terminalFollowup)
+    {
+        if (!vm_net_mock_append_battle_status7_object(out, outCap, &pos) ||
+            !vm_net_mock_append_battle_terminal_subtype8_object(out, outCap, &pos) ||
+            !vm_net_mock_append_battle_terminal_case11_object(out, outCap, &pos) ||
+            !vm_net_mock_append_battle_terminal_case9_object(out, outCap, &pos))
+            return 0;
+        vm_net_mock_finish_wt_packet(out, pos, 4);
+        vm_net_trace("mock_battle_operate_response_fallback response=4/7+4/8+4/11+4/9 terminalFollowup=1 result=1 case8_result=1 case8_autorevive=1 case11_result=1 case11_type=1 case9_result=1 roleHp=%u/%u enemyHp=%u/%u session=%u turn=%u len=%u evidence=runtime:latest_inline_4_7_4_11_4_9_passes_subtype9_gate_but_stays_on_Battle_auto_prompt,runtime:prior_4_7_4_8_reaches_case8_apply_call_05189DB4_and_sub_4B70_send25_call,runtime:prior_4_7_4_8_4_11_still_consumes_case11_and_writes_mainObj_0x474_1_at_pc_05189B66,Battle.cbm:sub_7BD0_subtype8_requires_mode2_before_apply_Battle_cbm_05189D16_05189DB4,Battle.cbm:sub_7BD0_subtype9_result1_gate_checks_mainObj_0x474_or_0x470_before_05189C04\n",
+                     g_mockBattleRoleHpCurrent,
+                     g_mockBattleRoleHpMax,
+                     g_mockBattleEnemyHpCurrent,
+                     g_mockBattleEnemyHpMax,
+                     g_mockBattleOperateSessionSerial,
+                     g_mockBattleOperateTurnCounter,
+                     pos);
+        return pos;
+    }
     memset(actionInfo, 0, sizeof(actionInfo));
     {
-        const u8 actionType = 2u;
-        const u8 mappedTargetWireSlot = enemySlot;
-        const u32 valueBSeed = 0u;
-        if (!vm_net_mock_append_battle_actioninfo_record(actionInfo, sizeof(actionInfo),
-                                                         &actionInfoLen, actionType,
-                                                         firstRecordActorWireSlot,
-                                                         mappedTargetWireSlot,
-                                                         firstRecordChildFlag, attackDamageValue,
-                                                         valueBSeed))
+        u8 mappedActorWireSlot = firstRecordActorWireSlot;
+        u8 mappedTargetWireSlot = enemySlot;
+        if (firstActionType == 1)
         {
-            vm_net_trace("mock_battle_operate_response_fallback reject=actioninfo_build_failed cap=%u partialLen=%u index=%u operate=%u evidence=runtime:two_record_tagged_seq_payload_exceeded_or_failed_before_packet_assembly\n",
-                         (unsigned int)sizeof(actionInfo),
-                         actionInfoLen,
-                         (unsigned int)index,
-                         (unsigned int)operate);
-            return 0;
+            mappedActorWireSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_TYPE1_FIRST_ACTOR_WIRE_SLOT", 1);
+            mappedTargetWireSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_TYPE1_FIRST_TARGET_WIRE_SLOT", 0);
         }
-        if (bundleWholeRound)
+        firstRecordWireActorUsed = mappedActorWireSlot;
+        firstRecordWireTargetUsed = mappedTargetWireSlot;
+        if (!terminalFollowup)
         {
+            if (!vm_net_mock_append_battle_actioninfo_record(actionInfo, sizeof(actionInfo),
+                                                             &actionInfoLen, firstActionType,
+                                                             mappedActorWireSlot,
+                                                             mappedTargetWireSlot,
+                                                             firstRecordChildFlag, attackDamageValue,
+                                                             firstRecordValueB))
+            {
+                vm_net_trace("mock_battle_operate_response_fallback reject=actioninfo_build_failed cap=%u partialLen=%u index=%u operate=%u evidence=runtime:two_record_tagged_seq_payload_exceeded_or_failed_before_packet_assembly\n",
+                             (unsigned int)sizeof(actionInfo),
+                             actionInfoLen,
+                             (unsigned int)index,
+                             (unsigned int)operate);
+                return 0;
+            }
+        }
+        if (allowCounterattack)
+        {
+            u8 counterActorWireSlot = 2u;
+            if (counterActionType == 1)
+                counterActorWireSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_TYPE1_COUNTER_ACTOR_WIRE_SLOT", 0);
             actionCount = 2;
             if (!vm_net_mock_append_battle_actioninfo_record(actionInfo, sizeof(actionInfo),
-                                                             &actionInfoLen, actionType,
-                                                             2u, 1u, 1u,
-                                                             attackDamageValue, valueBSeed))
+                                                             &actionInfoLen, counterActionType,
+                                                             counterActorWireSlot, 1u, 1u,
+                                                             counterDamageValue, counterRecordValueB))
             {
                 vm_net_trace("mock_battle_operate_response_fallback reject=round_bundle_record1_build_failed cap=%u partialLen=%u index=%u operate=%u evidence=runtime:operate0_round_bundle_second_safe_record_could_not_be_encoded_in_fallback_builder\n",
                              (unsigned int)sizeof(actionInfo),
@@ -13304,6 +15000,7 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
     }
 
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 4, 6, &objectStart) ||
+        !vm_net_mock_put_battle_action_companion_fields(out, outCap, &pos) ||
         !vm_net_mock_put_object_u8(out, outCap, &pos, "actionnum", actionCount) ||
         !vm_net_mock_put_object_raw(out, outCap, &pos, "actioninfo", actionInfo, (u16)actionInfoLen))
     {
@@ -13320,17 +15017,35 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
     vm_net_mock_finish_wt_packet(out, pos, 1);
     if (g_mockBattleOperateSessionArmed != 0)
         ++g_mockBattleOperateTurnCounter;
+    if (battleEndsThisRound)
+    {
+        g_mockBattleOperateSessionArmed = 0;
+        g_mockBattleOperateSessionFinished = 1;
+    }
     vm_net_trace_bytes("mock_battle_operate_actioninfo_payload_fallback", actionInfo, actionInfoLen);
-    vm_net_trace("mock_battle_operate_response_fallback response=4/6 actionnum=%u actioninfoLen=%u index=%u operate=%u childFlag=%u damageValue=%u session=%u turn=%u bundleWholeRound=%u evidence=runtime:4_2_request_regressed_to_unhandled_packet_assert_so_dispatcher_now_forces_parser_safe_battle_reply_after_second_record_null_owner_crash_at_05188fd0,Battle.cbm:sub_6EB0_type2_callback_receives_selected_effect_template_from_record_5c,Battle.cbm:sub_4582_0x4582_type2_only_effect_while_type1_reads_damage_popup_fields,Battle.cbm:0x05189018_0x05189022_loops_over_actionnum_and_reenters_0x05188e30,runtime:latest_logs_show_every_live_attack_request_is_4_2_index0_operate0_so_bundle_gate_now_keys_on_operate0_instead_of_first_turn_only\n",
-                 (unsigned int)actionCount,
-                 actionInfoLen,
+    vm_net_trace("mock_battle_operate_response_fallback response=%s actionnum=%u actioninfoLen=%u companionFields=omitted_until_teaminfo_record_grammar wireMapped=%u_to_%u index=%u operate=%u childFlag=%u damageValue=%u firstValueB=%u counterDamageValue=%u counterValueB=%u roleHp=%u/%u enemyHp=%u/%u session=%u turn=%u bundleWholeRound=%u valueBRemainingHp=%u battleEnds=%u terminalFollowup=%u evidence=runtime:latest_type1_single_record_no_crash_reaches_damage_dispatch_but_enemy0_stays_20_20_with_valueB0,runtime:4_2_request_regressed_to_unhandled_packet_assert_so_dispatcher_now_forces_parser_safe_battle_reply_after_second_record_null_owner_crash_at_05188fd0,Battle.cbm:sub_6D12_reads_iteminfo_before_actioninfo,Battle.cbm:sub_6DBC_reads_teaminfo_before_actioninfo,Battle.cbm:sub_6DBC_present_teaminfo_consumes_current_team_record_count_not_zero_record_stream,Battle.cbm:sub_6EB0_materializes_type1_valueA_valueB_fields_05188f96_05188fbc,Battle.cbm:sub_4582_0x4582_type2_only_effect_while_type1_reads_damage_popup_fields,Battle.cbm:0x05189018_0x05189022_loops_over_actionnum_and_reenters_0x05188e30,Battle.cbm:sub_7BD0_subtype9_result1_gate_checks_mainObj_0x474_or_0x470_before_05189C04\n",
+                  battleEndsThisRound ? "4/6(lethal-local-ko-pending)" : "4/6",
+                  (unsigned int)actionCount,
+                  actionInfoLen,
+                 (unsigned int)firstRecordWireActorUsed,
+                 (unsigned int)firstRecordWireTargetUsed,
                  (unsigned int)index,
                  (unsigned int)operate,
                  (unsigned int)firstRecordChildFlag,
                  attackDamageValue,
+                 firstRecordValueB,
+                 counterDamageValue,
+                 counterRecordValueB,
+                 g_mockBattleRoleHpCurrent,
+                 g_mockBattleRoleHpMax,
+                 g_mockBattleEnemyHpCurrent,
+                 g_mockBattleEnemyHpMax,
                  g_mockBattleOperateSessionSerial,
                  g_mockBattleOperateTurnCounter,
-                 bundleWholeRound ? 1u : 0u);
+                 bundleWholeRound ? 1u : 0u,
+                 type1ValueBRemainingHp ? 1u : 0u,
+                 battleEndsThisRound ? 1u : 0u,
+                 terminalFollowup ? 1u : 0u);
     return pos;
 }
 
@@ -13354,7 +15069,7 @@ static u32 vm_net_mock_build_battle_operate_response_raw82(const u8 *request, u3
 static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *pos)
 {
     u32 objectStart = 0;
-    u32 roleHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP", 120);
+    u32 roleHp = g_mockBattleRoleHpMax != 0 ? g_mockBattleRoleHpCurrent : vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP", 120);
     u32 roleMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MP", 40);
     const u32 statusLastExp = 1;
     const u32 statusCurExp = 1;
@@ -13411,6 +15126,87 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
     return true;
 }
 
+static bool vm_net_mock_append_battle_terminal_subtype8_object(u8 *out, u32 outCap, u32 *pos)
+{
+    static const u8 terminalInfo[12] = {
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x01,
+    };
+    u32 objectStart = 0;
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 4, 8, &objectStart))
+        return false;
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", 1))
+        return false;
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "autorevive", 1))
+        return false;
+    if (!vm_net_mock_put_object_raw(out, outCap, pos, "info", terminalInfo, sizeof(terminalInfo)))
+        return false;
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
+static bool vm_net_mock_append_battle_terminal_case4_object(u8 *out, u32 outCap, u32 *pos)
+{
+    u32 objectStart = 0;
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 4, 4, &objectStart))
+        return false;
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", 1))
+        return false;
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
+static bool vm_net_mock_append_battle_terminal_case9_object(u8 *out, u32 outCap, u32 *pos)
+{
+    u32 objectStart = 0;
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 4, 9, &objectStart))
+        return false;
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", 1))
+        return false;
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
+static bool vm_net_mock_append_battle_terminal_case11_object(u8 *out, u32 outCap, u32 *pos)
+{
+    u32 objectStart = 0;
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 4, 11, &objectStart))
+        return false;
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", 1))
+        return false;
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "type", 1))
+        return false;
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
+static u32 vm_net_mock_build_battle_auto12_ack_response(const u8 *request, u32 requestLen,
+                                                        u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u8 kind = 0;
+    u8 subtype = 0;
+
+    if (outCap < pos ||
+        !vm_net_mock_get_wt_header_kind_subtype(request, requestLen, &kind, &subtype) ||
+        kind != 4 || subtype != 12)
+        return 0;
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 4, 12, &objectStart))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    vm_net_trace("mock_battle_auto12_ack_response response=4/12 empty len=%u evidence=runtime:after_terminal_4_7_4_11_4_9_client_sends_empty_4_12_before_assert,Battle.cbm:sub_7BD0_kind4_dispatch_cmp_subtype_0x0c_bhs_return_so_4_12_response_is_parser_safe_noop,Battle.cbm:outgoing_request_builder_05184A70_emits_kind4_subtype12_after_phase8\n",
+                 pos);
+    return pos;
+}
+
 static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u32 requestLen,
                                                             u8 *out, u32 outCap)
 {
@@ -13428,6 +15224,8 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
     u32 index = 0;
     u32 posx = 0;
     u32 posy = 0;
+    bool prefillEnemyTemplate = false;
+    u32 responseObjectCount = 1;
 
     if (outCap < pos || !vm_net_mock_is_challenge_interaction_request(request, requestLen))
         return 0;
@@ -13440,10 +15238,20 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
     (void)vm_net_mock_get_object_u32_field(request, requestLen, "posy", &posy);
 
     enemyWireId = vm_net_mock_resolve_battle_enemy_id(id, &enemyTable, enemyTableIds);
+    prefillEnemyTemplate = vm_net_mock_env_u8("CBE_BATTLE_PREFILL_ENEMY_TEMPLATE", 1) != 0 &&
+                           id != 0 && id != 10001 && enemyWireId != id;
+    if (prefillEnemyTemplate)
+        enemyWireId = id;
     battleInfoLen = vm_net_mock_build_battle_start_info_blob(battleInfo, sizeof(battleInfo), 10001, enemyWireId);
     if (battleInfoLen == 0 || battleInfoLen > 0xffff)
         return 0;
 
+    if (prefillEnemyTemplate)
+    {
+        if (!vm_net_mock_append_battle_enemy_template_prefill_object(out, outCap, &pos, id))
+            return 0;
+        ++responseObjectCount;
+    }
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 4, 10, &objectStart))
         return 0;
     /*
@@ -13461,13 +15269,27 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
     if (!vm_net_mock_put_object_raw(out, outCap, &pos, "battleinfo", battleInfo, (u16)battleInfoLen))
         return 0;
     vm_net_mock_finish_wt_object(out, objectStart, pos);
-    if (hasMoveinfo && !vm_net_mock_append_actor_moveinfo_empty_ack_object(out, outCap, &pos))
-        return 0;
-    vm_net_mock_finish_wt_packet(out, pos, hasMoveinfo ? 2 : 1);
+    if (hasMoveinfo)
+    {
+        if (!vm_net_mock_append_actor_moveinfo_empty_ack_object(out, outCap, &pos))
+            return 0;
+        ++responseObjectCount;
+    }
+    vm_net_mock_finish_wt_packet(out, pos, responseObjectCount);
     g_mockBattleOperateSessionArmed = 1;
+    g_mockBattleOperateSessionFinished = 0;
     g_mockBattleOperateTurnCounter = 0;
     ++g_mockBattleOperateSessionSerial;
-    vm_net_trace("mock_challenge_interaction_response response=4/10 side=0 battleinfoEncoding=raw-typed-stream battleinfoLen=%u requestEnemyId=%u enemyWireId=%u enemyTable=%08x enemyTableIds=%u,%u,%u,%u index=%u pos=%u,%u status7=0 moveinfoAck=%u moveinfoLen=%u first=%02x,%02x,%02x,%02x len=%u evidence=Battle.cbm:sub_7BD0/sub_66CC,sub_66A4_enemy_lookup hypothesis=enemy_id_must_match_client_template_table runtime_negative=%s\n",
+    g_mockBattleRoleHpCurrent = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP", 120);
+    g_mockBattleRoleHpMax = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_HP", g_mockBattleRoleHpCurrent);
+    if (g_mockBattleRoleHpMax < g_mockBattleRoleHpCurrent)
+        g_mockBattleRoleHpMax = g_mockBattleRoleHpCurrent;
+    g_mockBattleEnemyHpCurrent = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", 20);
+    g_mockBattleEnemyHpMax = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MAX_HP", g_mockBattleEnemyHpCurrent);
+    if (g_mockBattleEnemyHpMax < g_mockBattleEnemyHpCurrent)
+        g_mockBattleEnemyHpMax = g_mockBattleEnemyHpCurrent;
+    vm_net_trace("mock_challenge_interaction_response response=%s side=0 battleinfoEncoding=raw-typed-stream battleinfoLen=%u requestEnemyId=%u enemyWireId=%u enemyTable=%08x enemyTableIds=%u,%u,%u,%u prefillEnemyTemplate=%u responseObjects=%u index=%u pos=%u,%u roleHp=%u/%u enemyHp=%u/%u status7=0 moveinfoAck=%u moveinfoLen=%u first=%02x,%02x,%02x,%02x len=%u evidence=Battle.cbm:sub_7BD0/sub_66CC,sub_66A4_enemy_lookup,IDA:net_handle_group_info_subtype5_0x0101208C_to_AddRoleToList_0x01012116 hypothesis=same_packet_5_5_prefill_can_populate_client_template_table_before_4_10 runtime_negative=%s\n",
+                 prefillEnemyTemplate ? "5/5+4/10" : "4/10",
                  (unsigned int)battleInfoLen,
                  (unsigned int)id,
                  (unsigned int)enemyWireId,
@@ -13476,9 +15298,15 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
                  enemyTableIds[1],
                  enemyTableIds[2],
                  enemyTableIds[3],
+                 prefillEnemyTemplate ? 1u : 0u,
+                 responseObjectCount,
                  (unsigned int)index,
                  (unsigned int)posx,
                  (unsigned int)posy,
+                 g_mockBattleRoleHpCurrent,
+                 g_mockBattleRoleHpMax,
+                 g_mockBattleEnemyHpCurrent,
+                 g_mockBattleEnemyHpMax,
                  hasMoveinfo ? 1u : 0u,
                  (unsigned int)moveInfoLen,
                  hasMoveinfo && moveInfoLen > 0 ? moveInfo[0] : 0,
@@ -13488,10 +15316,16 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
                  pos,
                  (enemyWireId == 10001 && id != 10001) ?
                      "enemy_template_fallback_is_player_character" :
-                     "4_10_only_render_null_callback_pending");
-    vm_net_trace("mock_battle_operate_session arm=1 serial=%u turnCounter=%u evidence=runtime:4_10_battle_start_response_is_the_nearest_server_boundary_before_first_4_2_operate_request\n",
+                     (prefillEnemyTemplate ?
+                          "prefill_template_experiment_pending_runtime_confirmation" :
+                          "4_10_only_render_null_callback_pending"));
+    vm_net_trace("mock_battle_operate_session arm=1 serial=%u turnCounter=%u roleHp=%u/%u enemyHp=%u/%u evidence=runtime:4_10_battle_start_response_is_the_nearest_server_boundary_before_first_4_2_operate_request\n",
                  g_mockBattleOperateSessionSerial,
-                 g_mockBattleOperateTurnCounter);
+                 g_mockBattleOperateTurnCounter,
+                 g_mockBattleRoleHpCurrent,
+                 g_mockBattleRoleHpMax,
+                 g_mockBattleEnemyHpCurrent,
+                 g_mockBattleEnemyHpMax);
     return pos;
 }
 
@@ -13524,18 +15358,22 @@ static u32 vm_net_mock_build_special_scene_interaction_response(const u8 *reques
     (void)vm_net_mock_get_object_u32_field(request, requestLen, "posy", &posy);
 
     /*
-     * Runtime evidence on 2026-06-09: these single-object 4/1 requests are
-     * emitted from settled Taohuadao scenes without a later mapID packet.
-     * Treat only the known portal-like hotspots as server-decided scene entry.
+     * Runtime evidence on 2026-06-13: id=105 is also used by monsters. A broad
+     * id/index/posy gate steals battle challenges, so only answer the known
+     * portal rectangles recovered from the same-class scene table.
      */
-    if (id == 105 && index == 4 && posy >= 400 && strcmp(scene, sourceScene01) == 0)
+    if (id == 105 && index == 4 &&
+        posx >= 208 && posx <= 256 && posy >= 432 && posy <= 448 &&
+        strcmp(scene, sourceScene01) == 0)
     {
         targetScene = targetScene02;
         targetX = 80;
         targetY = 60;
         saveImmediately = true;
     }
-    else if (id == 4 && index == 4 && posy >= 400 && strcmp(scene, sourceScene03) == 0)
+    else if (id == 4 && index == 4 &&
+             posx >= 160 && posx <= 240 && posy >= 553 && posy <= 570 &&
+             strcmp(scene, sourceScene03) == 0)
     {
         targetScene = targetScene04;
         targetX = 42;
@@ -15114,6 +16952,14 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     {
         vm_net_trace("mock_default source=builtin-battle-operate-fallback len=%u\n", hookedLen);
         vm_net_log_handled_packet("builtin-battle-operate-fallback", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_battle_auto12_ack_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_trace("mock_default source=builtin-battle-auto12-ack len=%u\n", hookedLen);
+        vm_net_log_handled_packet("builtin-battle-auto12-ack", request, requestLen, hookedLen);
         return hookedLen;
     }
 
@@ -22469,6 +24315,66 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     if (address == 0x10124AA)
     {
         vm_net_trace_sub_1010228_callsite("net_handle_group_info", (u32)address);
+    }
+    if (address == 0x101209E || address == 0x10120A4 || address == 0x10120AE || address == 0x10120B4 ||
+        address == 0x10120BA || address == 0x10120C0 || address == 0x10120C2 || address == 0x10120C8 ||
+        address == 0x10120CE || address == 0x10120D4 || address == 0x10120DA || address == 0x10120E0 ||
+        address == 0x10120E2 || address == 0x10120E8 || address == 0x10120EA || address == 0x10120F0 ||
+        address == 0x10120F2 || address == 0x10120F8 || address == 0x1012116)
+    {
+        const char *label = "case5_unknown";
+        if (address == 0x101209E)
+            label = "after_stream_init_before_id";
+        else if (address == 0x10120A4)
+            label = "after_id";
+        else if (address == 0x10120AE)
+            label = "before_peek_name_len";
+        else if (address == 0x10120B4)
+            label = "after_peek_name_len";
+        else if (address == 0x10120BA)
+            label = "before_name_ptr";
+        else if (address == 0x10120C0)
+            label = "after_name_ptr";
+        else if (address == 0x10120C2)
+            label = "before_byte34";
+        else if (address == 0x10120C8)
+            label = "after_byte34";
+        else if (address == 0x10120CE)
+            label = "before_byte35";
+        else if (address == 0x10120D4)
+            label = "after_byte35";
+        else if (address == 0x10120DA)
+            label = "before_stat0";
+        else if (address == 0x10120E0)
+            label = "after_stat0";
+        else if (address == 0x10120E2)
+            label = "before_stat1";
+        else if (address == 0x10120E8)
+            label = "after_stat1";
+        else if (address == 0x10120EA)
+            label = "before_stat2";
+        else if (address == 0x10120F0)
+            label = "after_stat2";
+        else if (address == 0x10120F2)
+            label = "before_stat3";
+        else if (address == 0x10120F8)
+            label = "after_stat3";
+        else if (address == 0x1012116)
+            label = "before_AddRoleToList";
+        vm_net_trace_groupinfo_case5_reader(label, (u32)address);
+    }
+    if (address == 0x1011E1E || address == 0x1011E62 || address == 0x1011E84 || address == 0x1011EA4)
+    {
+        const char *label = "unknown";
+        if (address == 0x1011E1E)
+            label = "entry";
+        else if (address == 0x1011E62)
+            label = "before_id_store";
+        else if (address == 0x1011E84)
+            label = "after_active_store";
+        else if (address == 0x1011EA4)
+            label = "return";
+        vm_net_trace_add_role_to_list(label, (u32)address);
     }
     if (address == 0x1037ECC || address == 0x1037ECE || address == 0x1037ED4)
     {
