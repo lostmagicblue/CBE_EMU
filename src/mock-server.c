@@ -15317,9 +15317,13 @@ static u32 vm_net_mock_build_login_response(const u8 *request, u32 requestLen, u
 {
     const char *mode = vm_net_mock_env_str("CBE_LOGIN_RESPONSE", "");
     char userName[64];
+    char password[64];
     bool haveUserName = vm_net_mock_get_object_string_field(request, requestLen, "userName", userName, sizeof(userName));
+    bool havePassword = false;
+    memset(password, 0, sizeof(password));
     if (!haveUserName)
         haveUserName = vm_net_mock_get_object_string_field(request, requestLen, "username", userName, sizeof(userName));
+    havePassword = vm_net_mock_get_object_string_field(request, requestLen, "password", password, sizeof(password));
 
     if (haveUserName && strcmp(userName, "1234") == 0)
     {
@@ -15356,6 +15360,21 @@ static u32 vm_net_mock_build_login_response(const u8 *request, u32 requestLen, u
                      (u32)g_netMockTitleServerListPending,
                      (u32)g_netMockTitleServerSelectConfirmed);
         return vm_net_mock_build_login_primary_validation_response(out, outCap);
+    }
+
+    if (requestSubtype == 12 &&
+        haveUserName && userName[0] == 0 &&
+        havePassword && password[0] == 0 &&
+        g_netMockTitleServerListPending &&
+        !g_netMockTitleServerSelectConfirmed &&
+        (mode == NULL || mode[0] == 0 ||
+         strcmp(mode, "staged-rolelist") == 0 ||
+         strcmp(mode, "staged") == 0))
+    {
+        vm_net_trace("mock_login_alt12_gate requestSubtype=12 result=1 reason=empty_credential_repeat_after_serverlist user=<empty> phase=%u/%u evidence=runtime:repeat_1_12_after_result4_left_stageFlag4_altPrompt1_serverCount1,packet:len86_username_password_empty IDA:login_alt_result_dispatch_0x19C2_result1_calls_login_stage_success_dispatch,login_stage_success_dispatch_0x1956_stageFlag4_routes_to_targetSlot4C\n",
+                     (u32)g_netMockTitleServerListPending,
+                     (u32)g_netMockTitleServerSelectConfirmed);
+        return vm_net_mock_build_login_alt12_success_response(out, outCap);
     }
 
     if (requestSubtype == 12 &&
