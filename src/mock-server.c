@@ -16,6 +16,12 @@ typedef struct
     u32 responseLen;
 } vm_net_mock_rule;
 
+static u8 g_netMockTitleServerListPending = 0;
+static u8 g_netMockTitleServerSelectConfirmed = 0;
+static u32 g_netMockTitleServerListTick = 0;
+static u32 g_netMockTitleServerSelectTick = 0;
+static u32 g_netMockTitleSelectedServerId = 0;
+
 static bool vm_net_mock_request_contains(const u8 *request, u32 requestLen, const char *needle)
 {
     u32 needleLen = needle ? (u32)strlen(needle) : 0;
@@ -243,25 +249,70 @@ static u32 vm_net_mock_min_u32(u32 a, u32 b)
     return (a < b) ? a : b;
 }
 
-static bool vm_net_mock_is_title_rolelist_combo_request(const u8 *request, u32 requestLen)
+static bool vm_net_mock_is_title_server_select_request(const u8 *request, u32 requestLen)
 {
     if (request == NULL || requestLen < 4)
         return false;
 
-    if (!vm_net_mock_request_contains_object(request, requestLen, 1, 1, 4) ||
-        !vm_net_mock_request_contains_object(request, requestLen, 1, 1, 16))
-    {
+    if (!vm_net_mock_request_contains_object(request, requestLen, 1, 1, 4))
         return false;
-    }
 
     /*
-     * Observed live title/login composite request carries server-selection
-     * state on 1/1/4 (`serverID`, `moneytype`) plus an empty 1/1/16 stage
-     * trigger. Keep this detector narrow so unrelated mixed packets do not
-     * accidentally reuse the role-list stage reply.
+     * Server/area confirmation carries server-selection state on 1/1/4.
+     * Do not answer this with title role-list actorinfo: mmTitle sub_3544()
+     * treats actorinfo on subtype 4 as the role-list payload, which belongs
+     * behind the later explicit 1/1/16 role-list request.
      */
     return vm_net_mock_request_contains(request, requestLen, "serverID") &&
            vm_net_mock_request_contains(request, requestLen, "moneytype");
+}
+
+static bool vm_net_mock_is_title_rolelist_stage_request(const u8 *request, u32 requestLen)
+{
+    u8 kind = 0;
+    u8 subtype = 0;
+    if (!vm_net_mock_get_wt_header_kind_subtype(request, requestLen, &kind, &subtype))
+        return false;
+    return kind == 1 &&
+           subtype == 16 &&
+           vm_net_mock_request_contains_object(request, requestLen, 1, 1, 16) &&
+           !vm_net_mock_is_title_server_select_request(request, requestLen);
+}
+
+static bool vm_net_mock_is_title_role_select_request(const u8 *request, u32 requestLen)
+{
+    u8 kind = 0;
+    u8 subtype = 0;
+    if (!vm_net_mock_get_wt_header_kind_subtype(request, requestLen, &kind, &subtype))
+        return false;
+    return kind == 1 &&
+           subtype == 6 &&
+           vm_net_mock_request_contains_object(request, requestLen, 1, 1, 6) &&
+           vm_net_mock_request_contains(request, requestLen, "actorID");
+}
+
+static bool vm_net_mock_is_login_validation_request(const u8 *request, u32 requestLen, u8 *requestSubtype)
+{
+    u8 kind = 0;
+    u8 subtype = 0;
+    if (!vm_net_mock_get_wt_header_kind_subtype(request, requestLen, &kind, &subtype))
+        return false;
+    if (kind != 1)
+        return false;
+    if (!vm_net_mock_request_contains_object(request, requestLen, 1, 1, subtype))
+        return false;
+    if (!vm_net_mock_request_contains(request, requestLen, "coreVer") ||
+        !vm_net_mock_request_contains(request, requestLen, "appVer") ||
+        !(vm_net_mock_request_contains(request, requestLen, "username") ||
+          vm_net_mock_request_contains(request, requestLen, "userName")) ||
+        !vm_net_mock_request_contains(request, requestLen, "password") ||
+        !vm_net_mock_request_contains(request, requestLen, "imsi"))
+    {
+        return false;
+    }
+    if (requestSubtype)
+        *requestSubtype = subtype;
+    return true;
 }
 
 static void vm_net_ensure_business_callback(const char *reason)
@@ -469,6 +520,56 @@ static bool vm_net_mock_put_u8(u8 *out, u32 outCap, u32 *pos, u8 value);
 static u8 vm_net_mock_env_u8(const char *name, u8 fallback);
 static const char *vm_net_mock_env_str(const char *name, const char *fallback);
 static const char *vm_net_mock_actor_preview_image_name(u8 actorJob, u8 actorSex);
+
+static bool vm_net_mock_title_login_requires_server_select(void)
+{
+    const char *spec = getenv("CBE_LOGIN_REQUIRE_SERVER_SELECT");
+    if (spec != NULL && spec[0] == '0' && spec[1] == '\0')
+        return false;
+    return true;
+}
+
+static void vm_net_mock_title_login_phase_reset(const char *reason)
+{
+    if (g_netMockTitleServerListPending || g_netMockTitleServerSelectConfirmed || g_netMockTitleSelectedServerId)
+    {
+        vm_net_trace("mock_title_login_phase_reset reason=%s pending=%u confirmed=%u serverID=%u listTick=%u selectTick=%u\n",
+                     reason ? reason : "?",
+                     (u32)g_netMockTitleServerListPending,
+                     (u32)g_netMockTitleServerSelectConfirmed,
+                     g_netMockTitleSelectedServerId,
+                     g_netMockTitleServerListTick,
+                     g_netMockTitleServerSelectTick);
+    }
+    g_netMockTitleServerListPending = 0;
+    g_netMockTitleServerSelectConfirmed = 0;
+    g_netMockTitleServerListTick = 0;
+    g_netMockTitleServerSelectTick = 0;
+    g_netMockTitleSelectedServerId = 0;
+}
+
+static void vm_net_mock_title_login_phase_mark_server_list(void)
+{
+    g_netMockTitleServerListPending = 1;
+    g_netMockTitleServerSelectConfirmed = 0;
+    g_netMockTitleServerListTick = g_schedulerTick;
+    g_netMockTitleServerSelectTick = 0;
+    g_netMockTitleSelectedServerId = 0;
+    vm_net_trace("mock_title_login_phase server_list pending=1 confirmed=0 tick=%u evidence=runtime:builtin_login_serverinfo_response_without_1_4_confirm\n",
+                 g_schedulerTick);
+}
+
+static void vm_net_mock_title_login_phase_mark_server_select(u32 serverId)
+{
+    g_netMockTitleServerListPending = 1;
+    g_netMockTitleServerSelectConfirmed = 1;
+    g_netMockTitleServerSelectTick = g_schedulerTick;
+    g_netMockTitleSelectedServerId = serverId;
+    vm_net_trace("mock_title_login_phase server_select pending=1 confirmed=1 serverID=%u tick=%u listTick=%u evidence=runtime:client_sent_1_4_serverID_moneytype\n",
+                 serverId,
+                 g_schedulerTick,
+                 g_netMockTitleServerListTick);
+}
 
 static const char *vm_net_mock_actor_ui_motion_name(u8 actorJob, u8 actorSex)
 {
@@ -806,6 +907,20 @@ static bool vm_net_trace_is_battle_g6_relevant(const char *text)
            vm_net_trace_prefix_is(text, "trace_battle_local_action_state label=sub_4B70") ||
            vm_net_trace_prefix_is(text, "trace_battle_local_action_state label=state4") ||
            vm_net_trace_prefix_is(text, "trace_battle_local_action_state label=type1_") ||
+           vm_net_trace_prefix_is(text, "trace_title_") ||
+           vm_net_trace_prefix_is(text, "trace_outgoing_wt_send_context") ||
+           vm_net_trace_prefix_is(text, "mock_title_") ||
+           vm_net_trace_prefix_is(text, "mock_login_") ||
+           vm_net_trace_prefix_is(text, "mock_default source=builtin-login") ||
+           vm_net_trace_prefix_is(text, "mock_default source=builtin-title") ||
+           vm_net_trace_prefix_is(text, "handled_packet source=builtin-login") ||
+           vm_net_trace_prefix_is(text, "handled_packet source=builtin-title") ||
+           vm_net_trace_prefix_is(text, "send ") ||
+           vm_net_trace_prefix_is(text, "mock_response") ||
+           vm_net_trace_prefix_is(text, "queue_data_event") ||
+           vm_net_trace_prefix_is(text, "fire_event") ||
+           vm_net_trace_prefix_is(text, "touch_dispatch") ||
+           vm_net_trace_prefix_is(text, "mouse_event") ||
            vm_net_trace_prefix_is(text, "unhandled_packet");
 }
 
@@ -982,10 +1097,18 @@ static void vm_net_packet_log_exchange(const u8 *request, u32 requestLen, const 
 
     vm_net_packet_trace("游戏请求数据包\n");
     vm_net_packet_trace_bytes("send_payload", request, requestLen);
-    vm_net_packet_trace("主机处理信息 tick=%u source=%s responseLen=%u %s\n",
+    vm_net_packet_trace("主机处理信息 tick=%u source=%s responseLen=%u phase=%u/%u serverID=%u phaseTick=%u/%u last=%08x active=%08x current=%08x %s\n",
                         g_schedulerTick,
                         g_netLastHandledSource,
                         g_netLastHandledResponseLen,
+                        (u32)g_netMockTitleServerListPending,
+                        (u32)g_netMockTitleServerSelectConfirmed,
+                        g_netMockTitleSelectedServerId,
+                        g_netMockTitleServerListTick,
+                        g_netMockTitleServerSelectTick,
+                        lastAddress,
+                        vmAddedScreen,
+                        g_currentScreenThis,
                         g_netLastHandledSummary);
     vm_net_packet_trace("主机响应数据包\n");
     vm_net_packet_trace_bytes("mock_response_payload", response, responseLen);
@@ -1042,7 +1165,12 @@ static void vm_net_trace_outgoing_wt_send_context(const u8 *request, u32 request
     }
     if (!((firstKind == 4 && firstSubtype == 1) ||
           (firstKind == 4 && firstSubtype == 2) ||
-          (firstKind == 2 && firstSubtype == 10)))
+          (firstKind == 2 && firstSubtype == 10) ||
+          (firstKind == 1 && (firstSubtype == 1 ||
+                              firstSubtype == 4 ||
+                              firstSubtype == 6 ||
+                              firstSubtype == 12 ||
+                              firstSubtype == 16))))
     {
         return;
     }
@@ -2000,7 +2128,18 @@ static void vm_net_trace_title_login_state(const char *label)
     u32 target54Cb14 = 0;
     u32 listPtr = 0;
     u8 listCount = 0;
+    u32 serverListPtr = 0;
+    u8 serverListCount = 0;
+    u8 serverListResult = 0;
+    u8 serverListNewVer = 0;
+    u32 serverListColor0 = 0;
+    char serverListName0[96];
+    char serverListStatus0[96];
     u32 roleFamily = 0;
+    u32 screenMgr = 0;
+    u8 stageFlag = 0;
+    u8 altPromptGate = 0;
+    u8 altPromptConfirm = 0;
 
     (void)uc_mem_read(MTK, base + 10728, &state0, 1);
     (void)uc_mem_read(MTK, base + 10730, &focus, 1);
@@ -2016,7 +2155,13 @@ static void vm_net_trace_title_login_state(const char *label)
     (void)uc_mem_read(MTK, base + 10808, &target50, 4);
     (void)uc_mem_read(MTK, base + 10812, &target54, 4);
     (void)uc_mem_read(MTK, base + 10788, &listPtr, 4);
+    (void)uc_mem_read(MTK, base + 10780, &serverListPtr, 4);
     (void)uc_mem_read(MTK, base + 11108, &roleFamily, 4);
+    (void)uc_mem_read(MTK, base + 8276, &screenMgr, 4);
+    (void)uc_mem_read(MTK, base + 10668, &altPromptGate, 1);
+    (void)uc_mem_read(MTK, base + 10669, &altPromptConfirm, 1);
+    if (screenMgr)
+        (void)uc_mem_read(MTK, screenMgr + 357, &stageFlag, 1);
     if (modeObjPtr)
     {
         (void)uc_mem_read(MTK, modeObjPtr + 0x00, &modeObjCb0, 4);
@@ -2039,14 +2184,30 @@ static void vm_net_trace_title_login_state(const char *label)
         (void)uc_mem_read(MTK, target54 + 0x14, &target54Cb14, 4);
     if (listPtr)
         (void)uc_mem_read(MTK, listPtr, &listCount, 1);
+    memset(serverListName0, 0, sizeof(serverListName0));
+    memset(serverListStatus0, 0, sizeof(serverListStatus0));
+    if (serverListPtr)
+    {
+        (void)uc_mem_read(MTK, serverListPtr, &serverListCount, 1);
+        (void)uc_mem_read(MTK, serverListPtr + 1, &serverListResult, 1);
+        (void)uc_mem_read(MTK, serverListPtr + 2, &serverListNewVer, 1);
+        if (serverListCount > 0)
+        {
+            vm_net_read_guest_gbk_label(serverListPtr + 3, serverListName0, sizeof(serverListName0));
+            vm_net_read_guest_gbk_label(serverListPtr + 303, serverListStatus0, sizeof(serverListStatus0));
+            (void)uc_mem_read(MTK, serverListPtr + 448, &serverListColor0, 4);
+        }
+    }
 
     vm_net_trace("trace_title_login_state label=%s base=%08x state0=%u focus=%u saveDefault=%u mode=%u sel=%u,%u"
                  " modeObj=%08x cb0=%08x cb4=%08x cb8=%08x cb10=%08x cb14=%08x"
                  " choice1=%08x cb14=%08x choice2=%08x cb14=%08x"
                  " target48=%08x target4c=%08x target50=%08x target54=%08x"
                  " targetCb14=%08x,%08x,%08x,%08x"
-                 " listPtr=%08x listCount=%u roleFamily=%u"
-                 " activeScreen=%08x currentThis=%08x tick=%u last=%08x\n",
+                 " listPtr=%08x listCount=%u roleFamily=%u stageFlag=%u altPrompt=%u,%u"
+                 " activeScreen=%08x currentThis=%08x tick=%u last=%08x"
+                 " serverListPtr=%08x serverCount=%u serverResult=%u serverNewVer=%u"
+                 " server0.name=%s server0.status=%s server0.color=%08x\n",
                  label ? label : "?",
                  base,
                  state0,
@@ -2076,10 +2237,58 @@ static void vm_net_trace_title_login_state(const char *label)
                  listPtr,
                  (u32)listCount,
                  roleFamily,
+                 (u32)stageFlag,
+                 (u32)altPromptGate,
+                 (u32)altPromptConfirm,
                  vmAddedScreen,
                  g_currentScreenThis,
                  g_schedulerTick,
+                 lastAddress,
+                 serverListPtr,
+                 (u32)serverListCount,
+                 (u32)serverListResult,
+                 (u32)serverListNewVer,
+                 serverListName0[0] ? serverListName0 : "<empty>",
+                 serverListStatus0[0] ? serverListStatus0 : "<empty>",
+                 serverListColor0);
+}
+
+static void vm_net_trace_title_login_site(const char *label, u32 pc)
+{
+    u32 lr = 0;
+    u32 r0 = 0;
+    u32 r1 = 0;
+    u32 r2 = 0;
+    u32 r3 = 0;
+    u32 r9 = 0;
+
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+    uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+    uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+    uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+    vm_net_trace("trace_title_login_site label=%s pc=%08x lr=%08x regs=%08x,%08x,%08x,%08x r9=%08x"
+                 " input=key(%d,%d) touch(down=%d up=%d drag=%d xy=%d,%d) tick=%u last=%08x"
+                 " evidence=IDA:mmTitle_net_build_login_request_0x1B9C_n5_stage,login_form_submit_0x1E5C,server_select_0x2F62,login_action_0x553C\n",
+                 label ? label : "?",
+                 pc,
+                 lr,
+                 r0,
+                 r1,
+                 r2,
+                 r3,
+                 r9,
+                 simulateKey,
+                 simulatePress,
+                 simulateTouchDown,
+                 simulateTouchUp,
+                 simulateTouchDrag,
+                 simulateTouchX,
+                 simulateTouchY,
+                 g_schedulerTick,
                  lastAddress);
+    vm_net_trace_title_login_state(label);
 }
 
 static void vm_net_trace_scene_owner_site(const char *label, u32 pc)
@@ -8940,6 +9149,36 @@ static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t
         uc_reg_write(uc, UC_ARM_REG_R9, &moduleR9);
     }
 
+    switch (tracePc)
+    {
+    case 0x05015B9C:
+        vm_net_trace_title_login_site("net_build_login_request_1b9c", tracePc);
+        break;
+    case 0x05015E5C:
+        vm_net_trace_title_login_site("login_form_submit_1e5c", tracePc);
+        break;
+    case 0x05016A50:
+        vm_net_trace_title_login_site("login_alt_response_dispatch_2a50", tracePc);
+        break;
+    case 0x05016D8E:
+        vm_net_trace_title_login_site("login_primary_response_dispatch_2d8e", tracePc);
+        break;
+    case 0x05016F62:
+        vm_net_trace_title_login_site("server_select_request_2f62", tracePc);
+        break;
+    case 0x05016F92:
+        vm_net_trace_title_login_site("server_or_role_list_action_2f92", tracePc);
+        break;
+    case 0x05017544:
+        vm_net_trace_title_login_site("title_rolelist_parser_3544", tracePc);
+        break;
+    case 0x0501953C:
+        vm_net_trace_title_login_site("login_screen_action_553c", tracePc);
+        break;
+    default:
+        break;
+    }
+
     if (s_battleSub17acExpectNextPcActive)
     {
         vm_net_trace("trace_battle_sub17ac_next_pc from=%08x next=%08x off=%04x last=%08x tick=%u active=%u kind=%u subtype=%u evidence=Battle.cbm:post_17f8_actual_next_pc\n",
@@ -10533,6 +10772,15 @@ static bool vm_net_mock_seq_put_u32(u8 *out, u32 outCap, u32 *pos, u32 value)
     return vm_net_mock_put_u8(out, outCap, pos, 0) &&
            vm_net_mock_put_u8(out, outCap, pos, 4) &&
            vm_net_mock_put_be32(out, outCap, pos, value);
+}
+
+static bool vm_net_mock_seq_put_u24(u8 *out, u32 outCap, u32 *pos, u32 value)
+{
+    return vm_net_mock_put_u8(out, outCap, pos, 0) &&
+           vm_net_mock_put_u8(out, outCap, pos, 4) &&
+           vm_net_mock_put_u8(out, outCap, pos, (u8)(value >> 16)) &&
+           vm_net_mock_put_u8(out, outCap, pos, (u8)(value >> 8)) &&
+           vm_net_mock_put_u8(out, outCap, pos, (u8)value);
 }
 
 static bool vm_net_mock_seq_put_u8(u8 *out, u32 outCap, u32 *pos, u8 value)
@@ -14446,9 +14694,42 @@ static u32 vm_net_mock_build_login_serverinfo_blob(u8 *out, u32 outCap)
         return 0;
     if (!vm_net_mock_seq_put_string(out, outCap, &pos, serverLabel))
         return 0;
+    /* Keep the runtime-stable serverinfo shape: the title parser consumes the
+     * first server attribute as a 32-bit field, but the trailing display color
+     * is a 24-bit value. Using a visible color here avoids an "empty" looking
+     * list when the server row is present but rendered with black-on-black. */
     if (!vm_net_mock_seq_put_u32(out, outCap, &pos, 1))
         return 0;
-    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, 0))
+    if (!vm_net_mock_seq_put_u24(out, outCap, &pos, 0x00FFFFFF))
+        return 0;
+
+    return pos;
+}
+
+static u32 vm_net_mock_build_title_servconf_blob(u8 *out, u32 outCap)
+{
+    u32 pos = 0;
+
+    /*
+     * mmTitleMstarWqvga.cbm sub_3544() reads servconf through sub_1490(),
+     * which consumes a 5-byte tagged blob and copies bytes 2..4 into the
+     * server-selection state. Reuse the same compact color-shape encoding here.
+     */
+    if (!vm_net_mock_seq_put_u24(out, outCap, &pos, 0x00FFFFFF))
+        return 0;
+
+    return pos;
+}
+
+static u32 vm_net_mock_build_login_color_blob(u8 *out, u32 outCap)
+{
+    u32 pos = 0;
+
+    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 1))
+        return 0;
+    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 1))
+        return 0;
+    if (!vm_net_mock_seq_put_u24(out, outCap, &pos, 0x00FFFFFF))
         return 0;
 
     return pos;
@@ -14539,13 +14820,19 @@ static u32 vm_net_mock_build_login_primary_validation_response(u8 *out, u32 outC
     u32 objectStart = 0;
     u8 serverInfo[128];
     u32 serverInfoLen = 0;
+    u8 colorBlob[16];
+    u32 colorBlobLen = 0;
 
     if (outCap < pos)
         return 0;
 
     memset(serverInfo, 0, sizeof(serverInfo));
+    memset(colorBlob, 0, sizeof(colorBlob));
     serverInfoLen = vm_net_mock_build_login_serverinfo_blob(serverInfo, sizeof(serverInfo));
     if (serverInfoLen == 0)
+        return 0;
+    colorBlobLen = vm_net_mock_build_login_color_blob(colorBlob, sizeof(colorBlob));
+    if (colorBlobLen == 0)
         return 0;
 
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 1, 1, &objectStart))
@@ -14554,13 +14841,29 @@ static u32 vm_net_mock_build_login_primary_validation_response(u8 *out, u32 outC
         return 0;
     if (!vm_net_mock_put_object_entry(out, outCap, &pos, "serverinfo", serverInfo, (u16)serverInfoLen))
         return 0;
-    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "servernum", 1))
+    if (!vm_net_mock_put_object_entry(out, outCap, &pos, "color", colorBlob, (u16)colorBlobLen))
+        return 0;
+    /*
+     * IDA: mmTitle net_handle_login_response(0x16DC) reads "servernum"
+     * through accessor slot [18], while "result"/"newVer" use [19].
+     * Runtime disproved both the original u8 encoding and a later u32 trial:
+     * the client still left serverCount==0 while result/newVer parsed. Use a
+     * u16 field here as the next narrow contract probe for accessor[18].
+     */
+    if (!vm_net_mock_put_object_u16(out, outCap, &pos, "servernum", 1))
         return 0;
     if (!vm_net_mock_put_object_u8(out, outCap, &pos, "newVer", 0))
         return 0;
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);
-    vm_net_trace("mock_login_primary_validation_response top=1,1,1 servernum=1 len=%u\n", pos);
+    if (!g_netMockTitleServerSelectConfirmed)
+        vm_net_mock_title_login_phase_mark_server_list();
+    vm_net_trace("mock_login_primary_validation_response top=1,1,1 result=1 serverinfo_len=%u color_len=%u servernum_u16=1 len=%u phase=%u/%u evidence=runtime:direct_1_1_can_enter_title_list_screen_but_1_16_is_gated_until_1_4,trace_title_login_state_serverResult49_serverCount0_after_u8_and_u32 IDA:mmTitle_net_handle_login_response_0x16DC_reads_servernum_via_accessor18_and_result_newVer_via_accessor19,IDA:mmTitle_login_response_parse_server_color_table_0x14F4_optional_color_blob\n",
+                 serverInfoLen,
+                 colorBlobLen,
+                 pos,
+                 (u32)g_netMockTitleServerListPending,
+                 (u32)g_netMockTitleServerSelectConfirmed);
     return pos;
 }
 
@@ -14584,6 +14887,54 @@ static u32 vm_net_mock_build_login_failure_response(u8 requestSubtype, const cha
     vm_net_mock_finish_wt_packet(out, pos, 1);
     vm_net_trace("mock_login_failure_response top=1,1,%u result=2 info=%s len=%u\n",
                  responseSubtype, message, pos);
+    return pos;
+}
+
+static u32 vm_net_mock_build_login_primary_wait_server_response(u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u8 serverInfo[128];
+    u32 serverInfoLen = 0;
+    u8 colorBlob[16];
+    u32 colorBlobLen = 0;
+
+    if (outCap < pos)
+        return 0;
+
+    memset(serverInfo, 0, sizeof(serverInfo));
+    memset(colorBlob, 0, sizeof(colorBlob));
+    serverInfoLen = vm_net_mock_build_login_serverinfo_blob(serverInfo, sizeof(serverInfo));
+    if (serverInfoLen == 0)
+        return 0;
+    colorBlobLen = vm_net_mock_build_login_color_blob(colorBlob, sizeof(colorBlob));
+    if (colorBlobLen == 0)
+        return 0;
+
+    /*
+     * The primary login parser only accepts result '1' as the success path
+     * that continues on to parse serverinfo/servernum/newVer. Keep this reply
+     * narrow: server list metadata only, no actorinfo/role payload.
+     */
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 1, 1, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_ascii_digit(out, outCap, &pos, "result", 1))
+        return 0;
+    if (!vm_net_mock_put_object_entry(out, outCap, &pos, "serverinfo", serverInfo, (u16)serverInfoLen))
+        return 0;
+    if (!vm_net_mock_put_object_entry(out, outCap, &pos, "color", colorBlob, (u16)colorBlobLen))
+        return 0;
+    if (!vm_net_mock_put_object_u16(out, outCap, &pos, "servernum", 1))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "newVer", 0))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    vm_net_mock_title_login_phase_mark_server_list();
+    vm_net_trace("mock_login_primary_wait_server_response top=1,1,1 result=1 serverinfo_len=%u color_len=%u servernum_u16=1 len=%u evidence=IDA:mmTitle_net_handle_login_response_0x16DC_primary_path_reads_serverinfo_servernum_newVer,IDA:mmTitle_login_response_parse_server_color_table_0x14F4_optional_color_blob,IDA:mmTitle_net_handle_login_response_0x16DC_reads_servernum_via_accessor18 runtime:serverlist_hold_must_use_result1_or_serverinfo_is_skipped,trace_title_login_state_serverResult49_serverCount0_after_u8_and_u32\n",
+                 serverInfoLen,
+                 colorBlobLen,
+                 pos);
     return pos;
 }
 
@@ -14656,6 +15007,49 @@ static u32 vm_net_mock_build_title_mode15_response(u8 *out, u32 outCap)
     return pos;
 }
 
+static u32 vm_net_mock_build_title_server_select_response(const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u32 serverId = 0;
+    u32 moneyType = 0;
+    u8 servConf[8];
+    u32 servConfLen = 0;
+    u8 actorInfo[128];
+    u32 actorInfoLen = 0;
+
+    if (outCap < pos)
+        return 0;
+
+    (void)vm_net_mock_get_object_u32_field(request, requestLen, "serverID", &serverId);
+    (void)vm_net_mock_get_object_u32_field(request, requestLen, "moneytype", &moneyType);
+    memset(servConf, 0, sizeof(servConf));
+    servConfLen = vm_net_mock_build_title_servconf_blob(servConf, sizeof(servConf));
+    if (servConfLen == 0)
+        return 0;
+    actorInfoLen = vm_net_mock_build_title_role_list_actorinfo(actorInfo, sizeof(actorInfo));
+    if (actorInfoLen == 0)
+        return 0;
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 1, 4, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_ascii_digit(out, outCap, &pos, "result", 1))
+        return 0;
+    if (!vm_net_mock_put_object_entry(out, outCap, &pos, "servconf", servConf, (u16)servConfLen))
+        return 0;
+    if (!vm_net_mock_put_object_entry(out, outCap, &pos, "actorinfo", actorInfo, (u16)actorInfoLen))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    vm_net_mock_title_login_phase_mark_server_select(serverId);
+    vm_net_trace("mock_title_server_select_response top=1,1,4 result=1 servconf_len=%u actorinfo_len=%u serverID=%u moneytype=%u len=%u evidence=IDA:mmTitle_sub_3544_subtype4_reads_servconf_before_role_table,IDA:mmTitle_sub_3544_subtype4_role_table_payload_later runtime:server_select_request_fields_serverID_moneytype\n",
+                 servConfLen,
+                 actorInfoLen,
+                 serverId,
+                 moneyType,
+                 pos);
+    return pos;
+}
+
 static u32 vm_net_mock_build_title_rolelist_stage_response(u8 *out, u32 outCap)
 {
     u32 pos = 5;
@@ -14683,8 +15077,39 @@ static u32 vm_net_mock_build_title_rolelist_stage_response(u8 *out, u32 outCap)
     vm_net_mock_finish_wt_object(out, objectStart, pos);
 
     vm_net_mock_finish_wt_packet(out, pos, 2);
-    vm_net_trace("mock_title_rolelist_stage_response top=1,1,16+1,1,4 actorinfo_len=%u len=%u\n",
+    vm_net_trace("mock_title_rolelist_stage_response top=1,1,16+1,1,4 actorinfo_len=%u len=%u evidence=runtime:client_sends_explicit_1_16_after_login_ack IDA:mmTitle_title_handle_role_list_response_0x3544_reads_16_result_then_4_actorinfo\n",
                  actorinfoLen, pos);
+    return pos;
+}
+
+static u32 vm_net_mock_build_title_rolelist_wait_server_select_response(u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+
+    if (outCap < pos)
+        return 0;
+
+    /*
+     * role_list_screen_render() can emit the 1/1/16 role-list request as soon
+     * as primary login success moves into the title list screen. Until the
+     * client has sent the explicit 1/1/4 serverID/moneytype confirmation, keep
+     * this as a parser-safe no-op reply. The actual actorinfo object is only
+     * valid after server selection, and subtype 16 result '1' is the cached
+     * success latch that the title parser expects before it accepts subtype 4
+     * actorinfo. Keep this reply minimal so it only advances the state machine
+     * and does not mix the later role payload into the same packet.
+     */
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 1, 16, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    vm_net_trace("mock_title_rolelist_wait_server_select_response top=1,1,16 result=1 len=%u phase=%u/%u evidence=IDA:mmTitle_sub_3544_subtype16_result1_caches_success_before_subtype4_actorinfo runtime:1_16_is_parser_safe_only_when_it_does_not_carry_actorinfo\n",
+                 pos,
+                 (u32)g_netMockTitleServerListPending,
+                 (u32)g_netMockTitleServerSelectConfirmed);
     return pos;
 }
 
@@ -14718,6 +15143,86 @@ static u32 vm_net_mock_build_title_role_select_response(const u8 *request, u32 r
     vm_net_trace("mock_title_role_select_response top=1,1,6(full)+1,1,15 actorID=%u actorinfo_len=%u len=%u\n",
                  actorId,
                  actorInfoLen,
+                 pos);
+    return pos;
+}
+
+static u32 vm_net_mock_build_login_alt12_server_list_response(const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u8 serverInfo[128];
+    u32 serverInfoLen = 0;
+    u8 colorBlob[16];
+    u32 colorBlobLen = 0;
+    char userName[64];
+    char password[64];
+    bool haveUserName = false;
+    bool havePassword = false;
+    u8 resultCode = vm_net_mock_env_u8("CBE_ALT12_SERVERLIST_RESULT", 4);
+    bool echoCredentials = vm_net_mock_env_u8("CBE_ALT12_ECHO_CREDENTIALS", 0) != 0;
+
+    if (outCap < pos)
+        return 0;
+
+    memset(serverInfo, 0, sizeof(serverInfo));
+    memset(colorBlob, 0, sizeof(colorBlob));
+    memset(userName, 0, sizeof(userName));
+    memset(password, 0, sizeof(password));
+    serverInfoLen = vm_net_mock_build_login_serverinfo_blob(serverInfo, sizeof(serverInfo));
+    if (serverInfoLen == 0)
+        return 0;
+    colorBlobLen = vm_net_mock_build_login_color_blob(colorBlob, sizeof(colorBlob));
+    if (colorBlobLen == 0)
+        return 0;
+
+    haveUserName = vm_net_mock_get_object_string_field(request, requestLen, "username", userName, sizeof(userName));
+    if (!haveUserName)
+        haveUserName = vm_net_mock_get_object_string_field(request, requestLen, "userName", userName, sizeof(userName));
+    havePassword = vm_net_mock_get_object_string_field(request, requestLen, "password", password, sizeof(password));
+
+    if (resultCode != 3 && resultCode != 4)
+        resultCode = 4;
+
+    /*
+     * mmTitle net_handle_login_response(0x16DC) treats subtype-12 result '1'
+     * as a staged success and login_alt_result_dispatch(0x19C2) immediately
+     * enters the stageFlag==4 role-list target. Result '3'/'4' on the subtype
+     * 12 path is the parser branch that still consumes serverinfo/servernum.
+     * Runtime showed result '3' can loop back through the sub_5916 success
+     * callback path; prefer result '4', whose sub_5922 callback checks the
+     * title confirmation byte before calling login_stage_success_dispatch().
+     */
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 1, 12, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_ascii_digit(out, outCap, &pos, "result", resultCode))
+        return 0;
+    if (!vm_net_mock_put_object_entry(out, outCap, &pos, "serverinfo", serverInfo, (u16)serverInfoLen))
+        return 0;
+    if (!vm_net_mock_put_object_entry(out, outCap, &pos, "color", colorBlob, (u16)colorBlobLen))
+        return 0;
+    if (!vm_net_mock_put_object_u16(out, outCap, &pos, "servernum", 1))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "newVer", 0))
+        return 0;
+    if (!vm_net_mock_put_object_string(out, outCap, &pos, "information", "select server"))
+        return 0;
+    if (echoCredentials)
+    {
+        if (!vm_net_mock_put_object_string(out, outCap, &pos, "username", haveUserName ? userName : ""))
+            return 0;
+        if (!vm_net_mock_put_object_string(out, outCap, &pos, "password", havePassword ? password : ""))
+            return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    vm_net_mock_title_login_phase_mark_server_list();
+    vm_net_trace("mock_login_alt12_server_list_response top=1,1,12 result=%u serverinfo_len=%u color_len=%u servernum_u16=1 credentialEcho=%u user=%s len=%u evidence=IDA:mmTitle_net_handle_login_response_0x16DC_result3_or_4_alt_path_parses_serverinfo_and_later_reads_credential_fields,IDA:mmTitle_login_response_parse_server_color_table_0x14F4_optional_color_blob,IDA:mmTitle_net_handle_login_response_0x16DC_reads_servernum_via_accessor18,IDA:net_build_login_request_0x1B9C_separates_n5_12_server_list_n5_4_server_select_n5_1_primary_login runtime:result4_serverinfo_then_unexpected_1_1_without_observed_1_4\n",
+                 (u32)resultCode,
+                 serverInfoLen,
+                 colorBlobLen,
+                 echoCredentials ? 1u : 0u,
+                 haveUserName ? userName : "<missing>",
                  pos);
     return pos;
 }
@@ -14823,41 +15328,61 @@ static u32 vm_net_mock_build_login_response(const u8 *request, u32 requestLen, u
         return vm_net_mock_build_login_failure_response(requestSubtype, "password error", out, outCap);
     }
 
-    vm_net_trace("mock_login_account_gate account=%s requestSubtype=%u result=1\n",
+    vm_net_trace("mock_login_account_gate account=%s requestSubtype=%u account_ok=1 evidence=runtime:login_request_contains_coreVer_appVer_password_imsi IDA:mmTitle_login_alt_response_dispatch_wrapper_0x2A50_dispatch_depends_on_response_result_code\n",
                  haveUserName ? userName : "<missing>",
                  requestSubtype);
+
+    if (requestSubtype == 1 &&
+        mode != NULL &&
+        strcmp(mode, "serverlist-hold") == 0)
+    {
+        vm_net_trace("mock_login_primary_gate requestSubtype=1 result=1 reason=primary_login_wait_server_list user=%s phase=%u/%u evidence=runtime:explicit_serverlist_hold_only IDA:mmTitle_login_response_result_dispatch_0x23C0_result1_enters_success_path_and_parses_server_list\n",
+                     haveUserName ? userName : "<missing>",
+                     (u32)g_netMockTitleServerListPending,
+                     (u32)g_netMockTitleServerSelectConfirmed);
+        return vm_net_mock_build_login_primary_wait_server_response(out, outCap);
+    }
 
     if (requestSubtype == 1 &&
         (mode == NULL || mode[0] == 0 ||
          strcmp(mode, "staged-rolelist") == 0 ||
          strcmp(mode, "staged") == 0 ||
+         strcmp(mode, "primary-validate") == 0 ||
          strcmp(mode, "roles") == 0 ||
-         strcmp(mode, "rolelist") == 0 ||
-         strcmp(mode, "primary-validate") == 0))
+         strcmp(mode, "rolelist") == 0))
     {
+        vm_net_trace("mock_login_primary_gate requestSubtype=1 result=1 reason=primary_login_submit user=%s phase=%u/%u evidence=runtime:latest_result4_primary_hold_caused_repeated_1_1_no_1_4,IDA:mmTitle_login_response_result_dispatch_0x23C0_result1_enters_list_screen_and_role_list_screen_render_0x31D4_emits_1_16\n",
+                     haveUserName ? userName : "<missing>",
+                     (u32)g_netMockTitleServerListPending,
+                     (u32)g_netMockTitleServerSelectConfirmed);
         return vm_net_mock_build_login_primary_validation_response(out, outCap);
     }
 
     if (requestSubtype == 12 &&
         (mode == NULL || mode[0] == 0 ||
          strcmp(mode, "staged-rolelist") == 0 ||
-         strcmp(mode, "staged") == 0 ||
+         strcmp(mode, "staged") == 0))
+    {
+        return vm_net_mock_build_login_alt12_server_list_response(request, requestLen, out, outCap);
+    }
+
+    if (requestSubtype == 12 &&
+        (strcmp(mode, "alt12-success") == 0 ||
          strcmp(mode, "roles") == 0 ||
          strcmp(mode, "rolelist") == 0))
     {
         return vm_net_mock_build_login_alt12_success_response(out, outCap);
     }
 
-    /* Current best static reading is staged rather than same-packet mixing:
-     * keep the normal login-success object intact here, then optionally queue
-     * a separate title role-list stage-4 response immediately after login.
-     * Retain the older mixed object modes for regression comparison.
+    /* Current static/runtime reading is staged rather than same-packet mixing:
+     * login validation returns only the login/server-list contract, then the
+     * client sends the next request (1/1/16 for title role list, 1/1/6 for role
+     * select). Retain older mixed object modes only for explicit regression
+     * comparison through CBE_LOGIN_RESPONSE.
      */
     if (mode == NULL || mode[0] == 0 ||
         strcmp(mode, "staged-rolelist") == 0 ||
-        strcmp(mode, "staged") == 0 ||
-        strcmp(mode, "roles") == 0 ||
-        strcmp(mode, "rolelist") == 0)
+        strcmp(mode, "staged") == 0)
     {
         return vm_net_mock_build_login_actor_response(requestSubtype, out, outCap);
     }
@@ -14872,17 +15397,7 @@ static u32 vm_net_mock_build_login_response(const u8 *request, u32 requestLen, u
     if (strcmp(mode, "actor") == 0)
         return vm_net_mock_build_login_actor_response(requestSubtype, out, outCap);
 
-    return vm_net_mock_build_login_role_list_only_response(out, outCap);
-}
-
-static bool vm_net_mock_login_mode_queues_title_mode15(void)
-{
-    const char *mode = vm_net_mock_env_str("CBE_LOGIN_RESPONSE", "");
-    return mode == NULL || mode[0] == 0 ||
-           strcmp(mode, "staged-rolelist") == 0 ||
-           strcmp(mode, "staged") == 0 ||
-           strcmp(mode, "roles") == 0 ||
-           strcmp(mode, "rolelist") == 0;
+    return vm_net_mock_build_login_actor_response(requestSubtype, out, outCap);
 }
 
 static u32 vm_net_mock_build_enter_game_response(u8 *out, u32 outCap)
@@ -15335,13 +15850,13 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         }
     }
 
-    if (vm_net_mock_is_title_rolelist_combo_request(request, requestLen))
+    if (vm_net_mock_is_title_server_select_request(request, requestLen))
     {
-        hookedLen = vm_net_mock_build_title_rolelist_stage_response(out, outCap);
+        hookedLen = vm_net_mock_build_title_server_select_response(request, requestLen, out, outCap);
         if (hookedLen)
         {
-            vm_net_trace("mock_default source=builtin-title-rolelist-combo len=%u\n", hookedLen);
-            vm_net_log_handled_packet("builtin-title-rolelist-combo", request, requestLen, hookedLen);
+            vm_net_trace("mock_default source=builtin-title-server-select len=%u\n", hookedLen);
+            vm_net_log_handled_packet("builtin-title-server-select", request, requestLen, hookedLen);
             return hookedLen;
         }
     }
@@ -15350,7 +15865,7 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     u8 requestSubtype = 0;
     if (vm_net_mock_get_wt_header_kind_subtype(request, requestLen, &requestKind, &requestSubtype))
     {
-        if (requestKind == 1 && requestSubtype == 6)
+        if (vm_net_mock_is_title_role_select_request(request, requestLen))
         {
             hookedLen = vm_net_mock_build_title_role_select_response(request, requestLen, out, outCap);
             if (hookedLen)
@@ -15360,13 +15875,13 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
                 return hookedLen;
             }
         }
-        if (requestKind == 1 && requestSubtype == 16)
+        if (vm_net_mock_is_title_rolelist_stage_request(request, requestLen))
         {
-            hookedLen = vm_net_mock_build_title_rolelist_stage_response(out, outCap);
+            hookedLen = vm_net_mock_build_title_rolelist_wait_server_select_response(out, outCap);
             if (hookedLen)
             {
-                vm_net_trace("mock_default source=builtin-title-rolelist-stage len=%u\n", hookedLen);
-                vm_net_log_handled_packet("builtin-title-rolelist-stage", request, requestLen, hookedLen);
+                vm_net_trace("mock_default source=builtin-title-rolelist-wait-server-select len=%u\n", hookedLen);
+                vm_net_log_handled_packet("builtin-title-rolelist-wait-server-select", request, requestLen, hookedLen);
                 return hookedLen;
             }
         }
@@ -15382,12 +15897,7 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         }
     }
 
-    if (vm_net_mock_request_contains(request, requestLen, "coreVer") &&
-        vm_net_mock_request_contains(request, requestLen, "appVer") &&
-        (vm_net_mock_request_contains(request, requestLen, "username") ||
-         vm_net_mock_request_contains(request, requestLen, "userName")) &&
-        vm_net_mock_request_contains(request, requestLen, "password") &&
-        vm_net_mock_request_contains(request, requestLen, "imsi"))
+    if (vm_net_mock_is_login_validation_request(request, requestLen, &requestSubtype))
     {
         vm_net_ensure_business_callback("login-request");
         hookedLen = vm_net_mock_load_response_file("net_mocks/login.bin", out, outCap);
@@ -15429,6 +15939,7 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
 
     if (vm_net_mock_request_contains(request, requestLen, "version"))
     {
+        vm_net_mock_title_login_phase_reset("version-handshake");
         hookedLen = vm_net_mock_build_version_response(out, outCap);
         if (hookedLen)
         {
@@ -15517,44 +16028,13 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
      * requests blocked. Queue it like a normal async network response instead.
      */
     bool immediateFlushAfterData = false;
-    bool queueTitleRoleStage4 = false;
-    bool queueTitleRoleStage4AfterMain = false;
     u32 responseEventType = 7;
-    u32 queuedRoleStage4Len = 0;
-    u32 queuedRoleStage4Ptr = 0;
-    u8 queuedRoleStage4[256];
-    u8 requestKind = 0;
-    u8 requestSubtype = 0;
-
-    memset(queuedRoleStage4, 0, sizeof(queuedRoleStage4));
-    vm_net_mock_get_wt_header_kind_subtype(request, readLen, &requestKind, &requestSubtype);
 
     g_netMockResponseLen = vm_net_mock_build_response(request, readLen, g_netMockResponse, sizeof(g_netMockResponse));
     g_netMockResponseOffset = 0;
     g_netUpLinkData += dataLen;
     if (g_netMockResponseLen == 0)
         return;
-
-    if (vm_net_mock_login_mode_queues_title_mode15() &&
-        requestKind == 1 && requestSubtype == 12 &&
-        vm_net_mock_request_contains(request, readLen, "coreVer") &&
-        vm_net_mock_request_contains(request, readLen, "appVer") &&
-        (vm_net_mock_request_contains(request, readLen, "username") ||
-         vm_net_mock_request_contains(request, readLen, "userName")) &&
-        vm_net_mock_request_contains(request, readLen, "password") &&
-        vm_net_mock_request_contains(request, readLen, "imsi"))
-    {
-        queuedRoleStage4Len = vm_net_mock_build_title_mode15_response(queuedRoleStage4, sizeof(queuedRoleStage4));
-        if (queuedRoleStage4Len != 0)
-        {
-            queuedRoleStage4Ptr = vm_net_mock_sync_buffer_to_vm(queuedRoleStage4, queuedRoleStage4Len);
-            if (queuedRoleStage4Ptr != 0)
-            {
-                queueTitleRoleStage4 = true;
-                queueTitleRoleStage4AfterMain = (requestKind == 1 && requestSubtype == 12);
-            }
-        }
-    }
 
     u32 responsePtr = vm_net_mock_sync_response_to_vm();
     if (responsePtr == 0)
@@ -15566,30 +16046,8 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
     vm_net_channel *channel = scheduler_find_net_channel(connectId);
     if (channel && channel->callback)
     {
-        if (queueTitleRoleStage4 && !queueTitleRoleStage4AfterMain)
-        {
-            vm_net_trace("queue_login_followup_event connect=%u cb=%08x ctx=%08x event=7 len=%u label=title-mode15\n",
-                         connectId, channel->callback, channel->context, queuedRoleStage4Len);
-            scheduler_queue_net_event(7,
-                                      queuedRoleStage4Ptr,
-                                      queuedRoleStage4Len,
-                                      queuedRoleStage4Len,
-                                      channel->callback,
-                                      channel->context);
-        }
         vm_net_trace("queue_data_event connect=%u cb=%08x ctx=%08x event=%u len=%u\n", connectId, channel->callback, channel->context, responseEventType, g_netMockResponseLen);
         scheduler_queue_net_event(responseEventType, responsePtr, g_netMockResponseLen, g_netMockResponseLen, channel->callback, channel->context);
-        if (queueTitleRoleStage4 && queueTitleRoleStage4AfterMain)
-        {
-            vm_net_trace("queue_login_followup_event connect=%u cb=%08x ctx=%08x event=7 len=%u label=title-mode15-after-main\n",
-                         connectId, channel->callback, channel->context, queuedRoleStage4Len);
-            scheduler_queue_net_event(7,
-                                      queuedRoleStage4Ptr,
-                                      queuedRoleStage4Len,
-                                      queuedRoleStage4Len,
-                                      channel->callback,
-                                      channel->context);
-        }
         if (immediateFlushAfterData && g_netTaskDispatchDepth == 0)
         {
             vm_net_trace("queue_data_event_immediate_flush connect=%u cb=%08x ctx=%08x len=%u tick=%u\n",

@@ -25,3 +25,4 @@ samples/
 tmp/
 tools/
 bin/nvram/
+ida_dump/
