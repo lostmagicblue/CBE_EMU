@@ -11222,15 +11222,32 @@ static bool vm_net_mock_append_scene_enter_object(u8 *out, u32 outCap, u32 *pos)
                                                           vm_net_mock_scene_spawn_y());
 }
 
+static bool vm_net_mock_scene_is_penglai02(const char *scene);
+
 static bool vm_net_mock_append_scene_room_npc_object(u8 *out, u32 outCap, u32 *pos)
 {
+    typedef struct
+    {
+        u32 actorId;
+        u32 x;
+        u32 y;
+        u32 sceneType;
+        const char *actorResource;
+        const char *displayName;
+        const char *scriptName;
+    } vm_net_mock_scene_npcinfo_seed;
     u32 objectStart = 0;
     u8 roomList[128];
+    u8 npcInfo[256];
     u8 colNames[64];
     u32 roomListLen = 0;
+    u32 npcInfoLen = 0;
     u32 colNamesLen = 0;
+    u8 npcNum = 0;
     static const char *const roomColumns[] = {"id", "room", "scene", "state"};
-    static const u8 emptyNpcInfo[] = {0};
+    const char *scene = vm_net_mock_current_scene_name();
+    bool seedSceneNpcInfo = vm_net_mock_scene_is_penglai02(scene) &&
+                            vm_net_mock_env_u8("CBE_GROUP_TYPE1_SCENE_NPCINFO", 1) != 0;
     if (!vm_net_mock_seq_put_string_list(colNames, sizeof(colNames), &colNamesLen, roomColumns, 4))
         return false;
     if (!vm_net_mock_seq_put_u32(roomList, sizeof(roomList), &roomListLen, 1001))
@@ -11241,6 +11258,40 @@ static bool vm_net_mock_append_scene_room_npc_object(u8 *out, u32 outCap, u32 *p
         return false;
     if (!vm_net_mock_seq_put_string(roomList, sizeof(roomList), &roomListLen, "Scene"))
         return false;
+    if (seedSceneNpcInfo)
+    {
+        static const vm_net_mock_scene_npcinfo_seed penglai02NpcInfoSeeds[] = {
+            {20020, 70, 38, 8, "n_swordmaster.actor", "\xc5\xb7\xd2\xb1\xd7\xd3", ""},
+            {20021, 108, 38, 8, "e_monkey.actor", "\xd0\xa1\xba\xef\xd7\xd3", ""},
+        };
+        size_t i;
+        for (i = 0; i < sizeof(penglai02NpcInfoSeeds) / sizeof(penglai02NpcInfoSeeds[0]); ++i)
+        {
+            const vm_net_mock_scene_npcinfo_seed *seed = &penglai02NpcInfoSeeds[i];
+            /*
+             * scene_parse_npcinfo_and_spawn_npcs() consumes, per row:
+             *   u32 id, u32 x, u32 y, str display, str actor, str script,
+             *   str optional_lookup_name, u32 sceneType.
+             */
+            if (!vm_net_mock_seq_put_u32(npcInfo, sizeof(npcInfo), &npcInfoLen, seed->actorId))
+                return false;
+            if (!vm_net_mock_seq_put_u32(npcInfo, sizeof(npcInfo), &npcInfoLen, seed->x))
+                return false;
+            if (!vm_net_mock_seq_put_u32(npcInfo, sizeof(npcInfo), &npcInfoLen, seed->y))
+                return false;
+            if (!vm_net_mock_seq_put_string(npcInfo, sizeof(npcInfo), &npcInfoLen, seed->displayName))
+                return false;
+            if (!vm_net_mock_seq_put_string(npcInfo, sizeof(npcInfo), &npcInfoLen, seed->actorResource))
+                return false;
+            if (!vm_net_mock_seq_put_string(npcInfo, sizeof(npcInfo), &npcInfoLen, seed->scriptName))
+                return false;
+            if (!vm_net_mock_seq_put_string(npcInfo, sizeof(npcInfo), &npcInfoLen, ""))
+                return false;
+            if (!vm_net_mock_seq_put_u32(npcInfo, sizeof(npcInfo), &npcInfoLen, seed->sceneType))
+                return false;
+            npcNum += 1;
+        }
+    }
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 0x1e, 3, &objectStart))
         return false;
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "curpage", 1))
@@ -11255,11 +11306,16 @@ static bool vm_net_mock_append_scene_room_npc_object(u8 *out, u32 outCap, u32 *p
         return false;
     if (!vm_net_mock_put_object_raw(out, outCap, pos, "roomlist", roomList, (u16)roomListLen))
         return false;
-    if (!vm_net_mock_put_object_u8(out, outCap, pos, "npcnum", 0))
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "npcnum", npcNum))
         return false;
-    if (!vm_net_mock_put_object_raw(out, outCap, pos, "npcinfo", emptyNpcInfo, 0))
+    if (!vm_net_mock_put_object_raw(out, outCap, pos, "npcinfo", npcInfo, (u16)npcInfoLen))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    vm_net_trace("mock_scene_room_npc_object scene=%s roomnum=1 npcnum=%u npcinfoLen=%u seedSceneNpcInfo=%u evidence=main:scene_parse_npcinfo_and_spawn_npcs_01037998_row_u32_u32_u32_str_str_str_str_u32\n",
+                 scene ? scene : "?",
+                 (unsigned int)npcNum,
+                 (unsigned int)npcInfoLen,
+                 seedSceneNpcInfo ? 1u : 0u);
     return true;
 }
 
@@ -11313,7 +11369,9 @@ static u32 vm_net_mock_build_group_type1_response(const u8 *request, u32 request
     bool hasGroup10 = false;
     bool hasType1 = false;
     bool enableMiscSync8 = vm_net_mock_env_u8("CBE_GROUP_TYPE1_MISC_SYNC8", 0) != 0;
-    bool includeRoomNpc = vm_net_mock_env_u8("CBE_GROUP_TYPE1_ROOM_NPC", 0) != 0;
+    bool includeRoomNpc = vm_net_mock_env_u8("CBE_GROUP_TYPE1_ROOM_NPC", 0) != 0 ||
+                          (vm_net_mock_scene_is_penglai02(vm_net_mock_current_scene_name()) &&
+                           vm_net_mock_env_u8("CBE_GROUP_TYPE1_SCENE_NPCINFO", 1) != 0);
     bool includeRoomRoles = vm_net_mock_env_u8("CBE_GROUP_TYPE1_ROOM_ROLES", 0) != 0;
     bool includeFbTargetClear = false;
     u32 offset = 4;
@@ -11855,6 +11913,115 @@ static bool vm_net_mock_append_actor_other_empty10_object(u8 *out, u32 outCap, u
     return true;
 }
 
+typedef struct
+{
+    u32 actorId;
+    u16 x;
+    u16 y;
+    u8 kind;
+    const char *actorResource;
+    u8 sceneType;
+    const char *displayName;
+    u8 scriptType;
+    const char *scriptName;
+} vm_net_mock_scene_npc_seed;
+
+static bool vm_net_mock_scene_is_penglai02(const char *scene)
+{
+    return scene != NULL &&
+           (strcmp(scene, "\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x32") == 0 ||
+            strcmp(scene, "\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x32\x2e\x73\x63\x65") == 0);
+}
+
+static bool vm_net_mock_scene_is_penglai04(const char *scene)
+{
+    return scene != NULL &&
+           (strcmp(scene, "\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x34") == 0 ||
+            strcmp(scene, "\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x34\x2e\x73\x63\x65") == 0);
+}
+
+static bool vm_net_mock_seq_put_actor_other_scene_npc(u8 *out, u32 outCap, u32 *pos,
+                                                      const vm_net_mock_scene_npc_seed *seed)
+{
+    if (seed == NULL)
+        return false;
+
+    return vm_net_mock_seq_put_u32(out, outCap, pos, seed->actorId) &&
+           vm_net_mock_seq_put_i16(out, outCap, pos, seed->x) &&
+           vm_net_mock_seq_put_i16(out, outCap, pos, seed->y) &&
+           vm_net_mock_seq_put_u8(out, outCap, pos, seed->kind) &&
+           vm_net_mock_seq_put_string(out, outCap, pos, seed->actorResource) &&
+           vm_net_mock_seq_put_i16(out, outCap, pos, 0) &&
+           vm_net_mock_seq_put_i16(out, outCap, pos, 0) &&
+           vm_net_mock_seq_put_u8(out, outCap, pos, seed->sceneType) &&
+           vm_net_mock_seq_put_string(out, outCap, pos, seed->displayName) &&
+           vm_net_mock_seq_put_u8(out, outCap, pos, seed->scriptType) &&
+           vm_net_mock_seq_put_string(out, outCap, pos, seed->scriptName) &&
+           vm_net_mock_seq_put_i16(out, outCap, pos, seed->x) &&
+           vm_net_mock_seq_put_i16(out, outCap, pos, seed->y);
+}
+
+static bool vm_net_mock_append_actor_other_scene_npcs10_object(u8 *out, u32 outCap, u32 *pos,
+                                                              const char *scene,
+                                                              u32 *npcCountOut,
+                                                              u32 *otherInfoLenOut)
+{
+    static const vm_net_mock_scene_npc_seed penglai02Seeds[] = {
+        {20020, 70, 38, 8, "n_swordmaster.actor", 0, "\xc5\xb7\xd2\xb1\xd7\xd3", 0, ""},
+        {20021, 108, 38, 8, "e_monkey.actor", 0, "\xd0\xa1\xba\xef\xd7\xd3", 0, ""},
+    };
+    static const vm_net_mock_scene_npc_seed penglai04Seeds[] = {
+        {20011, 166, 280, 4, "n_doctor.actor", 0, "\xd2\xa9\xca\xa6", 0, "task11.xse"},
+        {20013, 478, 91, 5, "n_assissonmaster.actor", 3, "\xbe\xf8\xc8\xd0\x2d\xbb\xc3\xbd\xa3", 0, "task13.xse"},
+        {20014, 239, 75, 5, "n_magemaster.actor", 4, "\xd2\xa9\xcd\xf5\x2d\xb9\xed\xb5\xc0", 0, "task14.xse"},
+    };
+    const vm_net_mock_scene_npc_seed *seeds = NULL;
+    u32 seedCount = 0;
+    u8 otherInfo[1024];
+    u32 otherInfoLen = 0;
+    u32 objectStart = 0;
+
+    if (npcCountOut)
+        *npcCountOut = 0;
+    if (otherInfoLenOut)
+        *otherInfoLenOut = 0;
+
+    if (vm_net_mock_scene_is_penglai02(scene))
+    {
+        seeds = penglai02Seeds;
+        seedCount = (u32)(sizeof(penglai02Seeds) / sizeof(penglai02Seeds[0]));
+    }
+    else if (vm_net_mock_scene_is_penglai04(scene))
+    {
+        seeds = penglai04Seeds;
+        seedCount = (u32)(sizeof(penglai04Seeds) / sizeof(penglai04Seeds[0]));
+    }
+
+    if (seeds == NULL || seedCount == 0)
+        return vm_net_mock_append_actor_other_empty10_object(out, outCap, pos);
+
+    memset(otherInfo, 0, sizeof(otherInfo));
+    for (u32 i = 0; i < seedCount; ++i)
+    {
+        if (!vm_net_mock_seq_put_actor_other_scene_npc(otherInfo, sizeof(otherInfo), &otherInfoLen, &seeds[i]))
+            return false;
+    }
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 2, 10, &objectStart))
+        return false;
+    if (!vm_net_mock_put_object_u32(out, outCap, pos, "othernum", seedCount))
+        return false;
+    if (!vm_net_mock_put_object_blob(out, outCap, pos, "otherinfo", otherInfo, (u16)otherInfoLen))
+        return false;
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+
+    if (npcCountOut)
+        *npcCountOut = seedCount;
+    if (otherInfoLenOut)
+        *otherInfoLenOut = otherInfoLen;
+    return true;
+}
+
 static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *pos);
 
 static bool vm_net_mock_is_actor_other_only10_request(const u8 *request, u32 requestLen)
@@ -11928,6 +12095,29 @@ static u32 vm_net_mock_build_actor_other_only10_response(const u8 *request, u32 
                      pos);
         return pos;
     }
+
+    if (hasType && requestType == 1 && vm_net_mock_env_u32("CBE_SCENE_NPC_OTHERINFO", 0) != 0)
+    {
+        const char *scene = vm_net_mock_current_scene_name();
+        u32 npcCount = 0;
+        u32 otherInfoLen = 0;
+
+        if (!vm_net_mock_append_actor_other_scene_npcs10_object(out, outCap, &pos,
+                                                               scene, &npcCount, &otherInfoLen))
+            return 0;
+        if (npcCount > 0)
+        {
+            vm_net_mock_finish_wt_packet(out, pos, 1);
+            vm_net_trace("mock_actor_other_scene_npc_response requestType=1 scene=%s othernum=%u otherinfoLen=%u len=%u evidence=scene_local_marker_or_actor_seed,main:sub_1012958_otherinfo_scene_node_find_or_create\n",
+                         scene ? scene : "?",
+                         (unsigned int)npcCount,
+                         (unsigned int)otherInfoLen,
+                         pos);
+            return pos;
+        }
+        pos = 5;
+    }
+
     if (!vm_net_mock_append_actor_other_empty10_object(out, outCap, &pos))
         return 0;
     vm_net_mock_finish_wt_packet(out, pos, 1);

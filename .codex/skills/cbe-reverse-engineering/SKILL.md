@@ -1,84 +1,110 @@
 ---
 name: cbe-reverse-engineering
-description: Use when working on this repository's CBE firmware analysis, emulator behavior, packet/protocol recovery, Jianghu OL network mocking, or future private-server implementation. Covers how to inspect evidence, where to record findings, and how to turn reverse-engineering results into emulator or server code changes.
+description: Reverse engineer CBE feature-phone games and build request-driven server/mock support for Jianghu OL or similar RPG CBE titles. Use when working with IDA-opened .CBE/.cbm ARM binaries, emulator network hooks, WT packets, mock-server responses, protocol reconstruction, or gameplay progression that must be driven by response packets instead of patching client logic or forcing CBE global variables.
 ---
 
 # CBE Reverse Engineering
 
-Use this skill for any task involving:
+## Operating rule
 
-- firmware inspection and unpacking
-- CBE or VM code analysis
-- protocol reconstruction
-- emulator runtime behavior in `src/`
-- future server work in `server/`
-- current server mainline in `docs/re/server-mainline.md`
+Build server behavior around the client contract. Let the CBE advance because it parses valid response packets and receives normal network events.
 
-## First Pass
+Do not patch game logic, bypass branch conditions, or force gameplay by writing CBE globals such as `Global_R9` offsets, scene gates, battle state, role state, or screen-manager internals. Do not add one-off register/memory writes to "unstick" the client. If state changes are needed, discover the packet field or event order that naturally causes the client to perform them.
 
-1. Read `AGENTS.md`.
-2. Read `docs/re/README.md`.
-3. For private-server or network mock work, read `docs/re/server-mainline.md` and the tail of
-   `docs/re/session-log.md` before opening long protocol notes.
-4. Read only the most relevant reverse-engineering note:
-   - battle work: `docs/re/battle-mainline.md`
-   - protocol work: `docs/net_mock_protocol.md` and `docs/re/protocol.md`
-   - runtime behavior: `docs/re/runtime-contracts.md`
-   - firmware layout: `docs/re/firmware-map.md`
-   - unresolved work: `docs/re/open-questions.md`
-5. Inspect only the code or tools directly related to the request.
+Allowed host-side writes are limited to emulator framework mechanics already required for I/O: allocating/copying response buffers with `vm_malloc`/`uc_mem_write`, queueing scheduler network events, and read-only tracing/instrumentation. Treat existing compatibility shims as legacy surface; do not expand them as a solution pattern.
 
-## Working Style
+## First pass
 
-- Preserve a clear boundary between evidence and hypothesis.
-- Prefer extracting facts from strings, xrefs, traces, and repeatable runtime behavior.
-- Implement the minimum emulator or server behavior needed to validate the next step.
-- Reuse existing helpers before adding one-off logic.
+1. Inspect local context before guessing:
+   - `src/mock-server.c` for request detectors, packet builders, and response dispatch order.
+   - `src/main.c` around network manager hooks, `scheduler_queue_net_event`, `scheduler_dispatch_net_tasks`, and trace helpers.
+   - `logs/net_trace.log`, packet logs, and any unhandled packet dumps after running the emulator.
+   - `docs/re/` and `当前工作记录.txt` for prior protocol notes.
+2. Identify the exact boundary:
+   - Incoming request bytes from `vm_net_mock_on_send`.
+   - Existing detector or missing detector in `vm_net_mock_build_response`.
+   - Callback/event type expected by the client, usually queued as normal data event `7`.
+   - Client parser function in IDA that consumes the response.
+3. State the current hypothesis with evidence. Prefer `runtime trace + request bytes + IDA parser path` over a single observation.
 
-## Repository Conventions
+## IDA workflow
 
-- `src/` is the emulator/runtime implementation.
-- `tools/` holds repeatable helper scripts.
-- `docs/re/` is the durable memory for findings.
-- `firmware/` stores firmware-related inputs and manifests.
-- `samples/` stores supporting evidence such as captures and screenshots.
-- `server/` is reserved for private-server code and protocol harnesses.
+Use IDA MCP when IDA is open. Start with `list_instances`; for Jianghu OL the active CBE instance is the one whose `binary_name` is `江湖OL.CBE`. Instance IDs change, so do not hardcode them in documentation or scripts.
 
-## Reverse-Engineering Workflow
+Use compact calls first:
+   - `analyze_function` for one parser or request builder.
+   - `analyze_batch` for a small set of related functions.
+   - `decompile` only after choosing a function.
+   - `decompile_to_file` only for a bounded set of addresses, not whole binaries unless explicitly needed.
 
-For a new problem:
+Do not bulk-decompile huge binaries as a first move. Follow xrefs from strings, WT kind/subtype dispatch, packet field names, callback addresses, and trace PCs.
 
-1. locate the narrowest entry point
-2. identify data flow and side effects
-3. document confirmed findings in `docs/re/`
-4. make the smallest code/tooling change needed
-5. validate with a rebuild or repeatable run when possible
+## Packet-driven implementation pattern
 
-For server work:
+When adding server behavior:
 
-1. start from the current request in packet logs or an unhandled WT summary
-2. map it to the smallest `src/mock-server.c` mock builder
-3. recover the exact client parser contract before inventing fields
-4. validate inside the embedded mock first
-5. extract to `server/` only after the packet family is stable enough to test
+1. Add a narrow detector near related handlers in `vm_net_mock_build_response`.
+   - Match WT header kind/subtype when available.
+   - Also match stable semantic fields, object counts, or request body markers to avoid hijacking unrelated packets.
+2. Add a named builder:
+   - Name it by client phase and packet contract, for example `vm_net_mock_build_scene_resource_followup_response`.
+   - Use existing helpers for WT headers, objects, typed fields, sequence fields, strings, blobs, and length finalization.
+   - Keep packet construction deterministic and bounds-checked.
+3. Log the evidence:
+   - Emit a `vm_net_trace` line with source name, key fields, length, and parser evidence.
+   - Call `vm_net_log_handled_packet` for handled requests.
+   - Let unhandled cases reach `vm_net_log_unhandled_packet` while investigating.
+4. Queue response through existing network flow:
+   - Return bytes from `vm_net_mock_build_response`.
+   - Let `vm_net_mock_on_send` allocate/copy the response and call `scheduler_queue_net_event`.
+   - Do not call game callbacks directly unless the existing scheduler path cannot represent the real event.
 
-## Documentation Targets
+## Reverse engineering checklist
 
-- packet shape or sequence -> `docs/re/protocol.md`
-- battle parser/state model or experiment gates -> `docs/re/battle-mainline.md`
-- current server target or extraction boundary -> `docs/re/server-mainline.md`
-- emulator/platform semantics -> `docs/re/runtime-contracts.md`
-- firmware/container/offset facts -> `docs/re/firmware-map.md`
-- unresolved threads -> `docs/re/open-questions.md`
-- brief dated progress -> `docs/re/session-log.md`
+For each newly supported phase, document:
 
-## Existing Project-Specific Context
+- Request signature: WT header, object kinds/subtypes, key fields, sample length.
+- Response contract: top-level WT header, objects, typed fields, arrays, strings, blob lengths.
+- Client parser evidence: IDA function address/name, dispatch case, relevant field reads, failure branch.
+- Runtime evidence: trace line, packet dump name, screen/battle/menu transition produced by the client.
+- Negative evidence: what malformed or missing field caused an assert, stall, or wrong screen.
 
-- The repository already contains a Unicorn-based CBE emulator in `src/`.
-- `docs/net_mock_protocol.md` contains verified Jianghu OL mock-server behavior and should be treated as a primary source.
-- `tools/disasm_thumb.py` is the first built-in helper to reuse for Thumb code inspection.
+## Debugging rules
 
-## When To Read References
+Prefer read-only observation:
 
-- Read `references/repo-layout.md` when you need a quick reminder of how artifacts should be organized.
-- Read `references/task-recipes.md` when you need concrete workflows for firmware, protocol, runtime, or server tasks.
+- Add temporary trace helpers that read registers/memory and log.
+- Add watch logs for writes only to explain what the client did, not to change it.
+- Use GDB breakpoints/watchpoints for investigation.
+- Remove or gate noisy tracing after the packet contract is understood.
+
+Avoid these shortcuts:
+
+- Writing `Global_R9 + offset` to flip a gate.
+- Changing PC/LR/R0 return values to skip parser failures.
+- Patching CBE code bytes.
+- Injecting screen changes, battle outcomes, or role state directly.
+- Making broad packet detectors that return a "safe" generic packet without parser evidence.
+
+## Validation
+
+After edits:
+
+1. Build with the repo's existing command, usually `make`.
+2. Run the emulator from `bin` so relative assets and `CBE/江湖OL.CBE` resolve.
+3. Confirm trace progression:
+   - Request is detected by the intended source.
+   - Response length is nonzero and logged.
+   - Scheduler queues a normal data event.
+   - Client reaches the next screen/state without forced memory writes.
+4. If the emulator asserts, preserve the unhandled packet and trace context, then return to IDA parser evidence.
+
+## Reporting
+
+When reporting results, include:
+
+- Files changed and phase supported.
+- The exact packet/source name added.
+- The IDA and runtime evidence used.
+- Build/run status.
+- Any remaining uncertain fields or placeholders.
