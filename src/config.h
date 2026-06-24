@@ -71,7 +71,7 @@
 #define VM_DreamFactoryResourceBuffer_ADDRESS (VM_DreamFactory_MemoryBlock_ADDRESS + 4)
 #define VM_DreamFactory_CharBuffer_ADDRESS (VM_DreamFactoryResourceBuffer_ADDRESS + 4)
 #define VM_CURR_APP_INFO_ADDRESS (VM_DreamFactory_CharBuffer_ADDRESS + 1024)
-#define VM_LOG_TRACE_ADDRESS (VM_CURR_APP_INFO_ADDRESS + 512)
+#define VM_LOG_NOOP_ADDRESS (VM_CURR_APP_INFO_ADDRESS + 512)
 
 // 0x4000000开始是函数实现地址
 #define VM_MANAGER_FUNC_LIST_SIZE 0x400

@@ -15,344 +15,6 @@ FILE *openFileList[16];
 static char openFileNames[16][256];
 
 static void vm_read_string_by_ptr_limited(u32 ptr, char *dst, size_t dstSize);
-static void vm_trace_ensure_log_dir(void);
-
-static const char *vm_storage_trace_path(void)
-{
-    vm_trace_ensure_log_dir();
-    return "logs/storage_trace.log";
-}
-
-static void vm_trace_ensure_log_dir(void)
-{
-    static int initDone = 0;
-    if (!initDone)
-    {
-#ifdef _WIN32
-        _mkdir("logs");
-#else
-        mkdir("logs", 0755);
-#endif
-        initDone = 1;
-    }
-}
-
-static void vm_trace_write_net_session_marker(FILE *fp)
-{
-    static int wroteMarker = 0;
-    if (fp != NULL && !wroteMarker)
-    {
-        fprintf(fp, "\n==== session_start channel=net ====\n");
-        wroteMarker = 1;
-    }
-}
-
-static void vm_trace_write_storage_session_marker(FILE *fp)
-{
-    static int wroteMarker = 0;
-    if (fp != NULL && !wroteMarker)
-    {
-        fprintf(fp, "\n==== session_start channel=storage ====\n");
-        wroteMarker = 1;
-    }
-}
-
-static void vm_fileio_trace(const char *fmt, ...)
-{
-    vm_trace_ensure_log_dir();
-    FILE *fp = fopen(vm_storage_trace_path(), "ab");
-    if (fp == NULL)
-        return;
-    vm_trace_write_storage_session_marker(fp);
-
-    va_list args;
-    va_start(args, fmt);
-    vfprintf(fp, fmt, args);
-    va_end(args);
-    fclose(fp);
-}
-
-static void vm_fileio_trace_bytes(const char *tag, int handle, const char *path, const void *data, int len)
-{
-    vm_trace_ensure_log_dir();
-    FILE *fp = fopen(vm_storage_trace_path(), "ab");
-    if (fp == NULL)
-        return;
-    vm_trace_write_storage_session_marker(fp);
-
-    const u8 *bytes = (const u8 *)data;
-    int dumpLen = len < 48 ? len : 48;
-    fprintf(fp, "%s handle=%d path=%s len=%d dump=%d hex=", tag, handle, path ? path : "", len, dumpLen);
-    for (int i = 0; i < dumpLen; ++i)
-        fprintf(fp, "%02x", bytes[i]);
-    fprintf(fp, " ascii=");
-    for (int i = 0; i < dumpLen; ++i)
-    {
-        u8 ch = bytes[i];
-        fputc((ch >= 0x20 && ch <= 0x7e) ? ch : '.', fp);
-    }
-    fputc('\n', fp);
-    fclose(fp);
-}
-
-static void vm_lcd_image_trace(const char *fmt, ...)
-{
-    vm_trace_ensure_log_dir();
-    FILE *fp = fopen("logs/net_trace.log", "ab");
-    if (fp == NULL)
-        return;
-    vm_trace_write_net_session_marker(fp);
-
-    va_list args;
-    va_start(args, fmt);
-    vfprintf(fp, fmt, args);
-    va_end(args);
-    fclose(fp);
-}
-
-static bool vm_trace_progress_strip_image_region_overlap(int x, int y, int w, int h)
-{
-    const int regionLeft = 16;
-    const int regionTop = 200;
-    const int regionRight = 224;
-    const int regionBottom = 286;
-
-    if (w <= 0 || h <= 0)
-        return false;
-
-    return x < regionRight &&
-           x + w > regionLeft &&
-           y < regionBottom &&
-           y + h > regionTop;
-}
-
-static bool vm_trace_scene_actor_image_region_overlap(int x, int y, int w, int h)
-{
-    const int regionLeft = 56;
-    const int regionTop = 192;
-    const int regionRight = 184;
-    const int regionBottom = 384;
-
-    if (w <= 0 || h <= 0)
-        return false;
-
-    return x < regionRight &&
-           x + w > regionLeft &&
-           y < regionBottom &&
-           y + h > regionTop;
-}
-
-static bool vm_trace_progress_strip_scene_settled_filelocal(void)
-{
-    u8 sceneTickGate3 = 0;
-    u8 sceneTickGate4 = 0;
-    u8 load0 = 0;
-    u8 load1 = 0;
-    u8 load2 = 0;
-
-    if (!Global_R9)
-        return false;
-
-    uc_mem_read(MTK, Global_R9 + 23655, &sceneTickGate3, 1);
-    uc_mem_read(MTK, Global_R9 + 23656, &sceneTickGate4, 1);
-    uc_mem_read(MTK, Global_R9 + 23673, &load0, 1);
-    uc_mem_read(MTK, Global_R9 + 23674, &load1, 1);
-    uc_mem_read(MTK, Global_R9 + 23675, &load2, 1);
-
-    return sceneTickGate3 == 1 &&
-           sceneTickGate4 == 1 &&
-           load0 == 0 &&
-           load1 == 0 &&
-           load2 == 0;
-}
-
-static bool vm_trace_scene_actor_residual_window(u8 *sceneGateA,
-                                                 u8 *sceneGateB,
-                                                 u8 *load0,
-                                                 u8 *load1,
-                                                 u8 *load2)
-{
-    u8 gateA = 0;
-    u8 gateB = 0;
-    u8 localLoad0 = 0;
-    u8 localLoad1 = 0;
-    u8 localLoad2 = 0;
-
-    if (!Global_R9)
-        return false;
-
-    uc_mem_read(MTK, Global_R9 + 0x5C67, &gateA, 1);
-    uc_mem_read(MTK, Global_R9 + 0x5C68, &gateB, 1);
-    uc_mem_read(MTK, Global_R9 + 23673, &localLoad0, 1);
-    uc_mem_read(MTK, Global_R9 + 23674, &localLoad1, 1);
-    uc_mem_read(MTK, Global_R9 + 23675, &localLoad2, 1);
-
-    if (sceneGateA)
-        *sceneGateA = gateA;
-    if (sceneGateB)
-        *sceneGateB = gateB;
-    if (load0)
-        *load0 = localLoad0;
-    if (load1)
-        *load1 = localLoad1;
-    if (load2)
-        *load2 = localLoad2;
-
-    return gateA == 0 && gateB == 1;
-}
-
-static void vm_trace_progress_strip_image(const char *apiName,
-                                          u32 srcInfo,
-                                          u32 srcPtr,
-                                          u16 srcW,
-                                          u16 srcH,
-                                          u32 dstInfo,
-                                          u32 dstPtr,
-                                          u16 dstW,
-                                          u16 dstH,
-                                          int origSrcX,
-                                          int origSrcY,
-                                          int origW,
-                                          int origH,
-                                          int origDstX,
-                                          int origDstY,
-                                          int srcX,
-                                          int srcY,
-                                          int w,
-                                          int h,
-                                          int dstX,
-                                          int dstY)
-{
-    static u32 s_progressStripImageTraceCount = 0;
-    u32 lr = 0;
-    u32 sp = 0;
-    u32 callerLr = 0;
-
-    if (apiName == NULL || s_progressStripImageTraceCount >= 64)
-        return;
-    if (!vm_trace_progress_strip_scene_settled_filelocal())
-        return;
-    if (dstW > LCD_WIDTH || dstH > LCD_HEIGHT)
-        return;
-    if (!vm_trace_progress_strip_image_region_overlap(dstX, dstY, w, h))
-        return;
-
-    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
-    uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
-    uc_mem_read(MTK, sp + 0x34, &callerLr, 4);
-    ++s_progressStripImageTraceCount;
-    vm_lcd_image_trace("trace_progress_strip_draw api=%s srcInfo=%08x srcPtr=%08x srcDim=%u,%u dstInfo=%08x dstPtr=%08x dstDim=%u,%u orig sx=%d sy=%d w=%d h=%d dx=%d dy=%d clipped sx=%d sy=%d w=%d h=%d dx=%d dy=%d lr=%08x caller=%08x last=%08x count=%u\n",
-                       apiName,
-                       srcInfo,
-                       srcPtr,
-                       (unsigned)srcW,
-                       (unsigned)srcH,
-                       dstInfo,
-                       dstPtr,
-                       (unsigned)dstW,
-                       (unsigned)dstH,
-                       origSrcX,
-                       origSrcY,
-                       origW,
-                       origH,
-                       origDstX,
-                       origDstY,
-                       srcX,
-                       srcY,
-                       w,
-                       h,
-                       dstX,
-                       dstY,
-                       lr,
-                       callerLr,
-                       lastAddress,
-                       s_progressStripImageTraceCount);
-}
-
-static void vm_trace_scene_actor_region_image(const char *apiName,
-                                              u32 srcInfo,
-                                              u32 srcPtr,
-                                              u16 srcW,
-                                              u16 srcH,
-                                              u32 dstInfo,
-                                              u32 dstPtr,
-                                              u16 dstW,
-                                              u16 dstH,
-                                              int origSrcX,
-                                              int origSrcY,
-                                              int origW,
-                                              int origH,
-                                              int origDstX,
-                                              int origDstY,
-                                              int srcX,
-                                              int srcY,
-                                              int w,
-                                              int h,
-                                              int dstX,
-                                              int dstY)
-{
-    static u32 s_sceneActorImageTraceCount = 0;
-    u32 lr = 0;
-    u32 sp = 0;
-    u32 callerLr = 0;
-    u8 sceneGateA = 0;
-    u8 sceneGateB = 0;
-    u8 load0 = 0;
-    u8 load1 = 0;
-    u8 load2 = 0;
-
-    if (apiName == NULL || s_sceneActorImageTraceCount >= 160)
-        return;
-    if (!vm_trace_scene_actor_residual_window(&sceneGateA, &sceneGateB, &load0, &load1, &load2))
-        return;
-    if (dstPtr != VM_screenImage_ADDRESS || dstW != LCD_WIDTH)
-        return;
-    if (!vm_trace_scene_actor_image_region_overlap(dstX, dstY, w, h))
-        return;
-
-    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
-    uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
-    uc_mem_read(MTK, sp + 0x34, &callerLr, 4);
-    ++s_sceneActorImageTraceCount;
-    vm_lcd_image_trace("trace_scene_actor_region_draw api=%s srcInfo=%08x srcPtr=%08x srcDim=%u,%u dstInfo=%08x dstPtr=%08x dstDim=%u,%u orig sx=%d sy=%d w=%d h=%d dx=%d dy=%d clipped sx=%d sy=%d w=%d h=%d dx=%d dy=%d sceneGate=%u,%u loadFlags=%u,%u,%u lr=%08x caller=%08x last=%08x count=%u\n",
-                       apiName,
-                       srcInfo,
-                       srcPtr,
-                       (unsigned)srcW,
-                       (unsigned)srcH,
-                       dstInfo,
-                       dstPtr,
-                       (unsigned)dstW,
-                       (unsigned)dstH,
-                       origSrcX,
-                       origSrcY,
-                       origW,
-                       origH,
-                       origDstX,
-                       origDstY,
-                       srcX,
-                       srcY,
-                       w,
-                       h,
-                       dstX,
-                       dstY,
-                       sceneGateA,
-                       sceneGateB,
-                       load0,
-                       load1,
-                       load2,
-                       lr,
-                       callerLr,
-                       lastAddress,
-                       s_sceneActorImageTraceCount);
-}
-
-#if TRACE_RESOURCE_IO
-#define VM_RESOURCE_TRACE(...) vm_fileio_trace(__VA_ARGS__)
-#else
-#define VM_RESOURCE_TRACE(...) ((void)0)
-#endif
-
 static void vm_trim_mmorpg_tempdata_header(void)
 {
     FILE *fp = fopen("JHOnlineData/mmorpgTempdata", "rb");
@@ -368,7 +30,6 @@ static void vm_trim_mmorpg_tempdata_header(void)
         return;
     fwrite(header, 1, sizeof(header), fp);
     fclose(fp);
-    vm_fileio_trace("file_trim_tempdata_header len=%u\n", (unsigned)sizeof(header));
 }
 #define VM_PSEUDO_DIR_HANDLE ((FILE *)-1)
 
@@ -876,8 +537,6 @@ int vm_get_file_handle(char *nameBuf, const char *mode)
         snprintf(normalizedName, sizeof(normalizedName), "%s", nameBuf);
     if (vm_file_try_resolve_map_path(normalizedName, openMode, resolvedName, sizeof(resolvedName)))
     {
-        vm_fileio_trace("file_open_resolve_map_extension from=%s to=%s mode=%s last=%08x\n",
-                        normalizedName, resolvedName, openMode ? openMode : "<null>", lastAddress);
         snprintf(normalizedName, sizeof(normalizedName), "%s", resolvedName);
     }
     if (vm_file_ext_requires_binary(normalizedName) && mode && strchr(mode, 'b') == NULL)
@@ -887,8 +546,6 @@ int vm_get_file_handle(char *nameBuf, const char *mode)
     }
     if (vm_file_is_invalid_named_resource_cache(normalizedName, openMode))
     {
-        vm_fileio_trace("file_open_reject_invalid_named_cache path=%s mode=%s last=%08x\n",
-                        normalizedName, openMode ? openMode : "<null>", lastAddress);
         return -1;
     }
     for (int i = 0; i < 16; i++)
@@ -911,12 +568,10 @@ int vm_get_file_handle(char *nameBuf, const char *mode)
             }
             if (f == NULL)
             {
-                vm_fileio_trace("file_open_fail path=%s mode=%s\n", normalizedName, openMode);
                 return -1;
             }
             openFileList[i] = f;
             snprintf(openFileNames[i], sizeof(openFileNames[i]), "%s", normalizedName);
-            vm_fileio_trace("file_open handle=%d path=%s mode=%s\n", i, normalizedName, openMode);
             return i;
         }
     }
@@ -933,7 +588,6 @@ int vm_dir_exists(int a1)
     if (strcmp(normalizedName, ".") == 0)
         return vm_set_call_result(0);
     int r = dirExists(normalizedName);
-    vm_fileio_trace("dir_exists raw=%s normalized=%s result=%d last=%08x\n", nameBuf, normalizedName, r, lastAddress);
     return vm_set_call_result(r);
 }
 
@@ -954,8 +608,6 @@ int vm_cbfs_vm_file_open(int openMode, int namePtr, int rwPtr)
     rwBuff[sizeof(rwBuff) - 1] = 0;
     vm_file_select_mode(openMode, rwBuff, mode, sizeof(mode));
     int handle = vm_get_file_handle(nameBuff, mode);
-    vm_fileio_trace("file_open_request openMode=%x namePtr=%08x name=%s hint=%s selected=%s handle=%d pc=%08x lr=%08x last=%08x\n",
-                    openMode, namePtr, nameBuff, rwBuff, mode, handle, pc, lr, lastAddress);
     if (handle < 0)
     {
         u32 r[8] = {0};
@@ -967,9 +619,6 @@ int vm_cbfs_vm_file_open(int openMode, int namePtr, int rwPtr)
         uc_reg_read(MTK, UC_ARM_REG_R5, &r[5]);
         uc_reg_read(MTK, UC_ARM_REG_R6, &r[6]);
         uc_reg_read(MTK, UC_ARM_REG_LR, &r[7]);
-        vm_fileio_trace("file_open_fail_regs namePtr=%08x r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x lr=%08x last=%08x\n",
-                        namePtr, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], lastAddress);
-        vm_fileio_trace_bytes("file_open_fail_mem_namePtr", -1, nameBuff, rawName, sizeof(rawName));
         for (u32 i = 4; i <= 6; ++i)
         {
             if ((r[i] >= ROM_ADDRESS && r[i] < ROM_ADDRESS + 0x1000000) ||
@@ -981,12 +630,10 @@ int vm_cbfs_vm_file_open(int openMode, int namePtr, int rwPtr)
                 {
                     char tag[64];
                     snprintf(tag, sizeof(tag), "file_open_fail_mem_r%u_%08x", i, r[i]);
-                    vm_fileio_trace_bytes(tag, -1, nameBuff, bytes, sizeof(bytes));
                 }
             }
         }
     }
-    vm_fileio_trace_bytes("file_open_raw_name", -1, nameBuff, rawName, sizeof(rawName));
     return vm_set_call_result(handle);
 }
 // ok
@@ -1014,35 +661,12 @@ int vm_cbfs_vm_file_read(int bufferPtr, int size, int handle)
     if (readed > 0)
     {
         uc_mem_write(MTK, bufferPtr, tmp, readed);
-        vm_fileio_trace_bytes("file_read", handle, openFileNames[handle], tmp, readed);
         if (strstr(openFileNames[handle], ".cbm") != NULL || strstr(openFileNames[handle], ".CBM") != NULL)
         {
-            vm_fileio_trace("file_read_guest_write handle=%d path=%s buffer=%08x requested=%d read=%d pc=%08x lr=%08x last=%08x regs=%08x,%08x,%08x,%08x\n",
-                            handle,
-                            openFileNames[handle],
-                            (u32)bufferPtr,
-                            size,
-                            readed,
-                            pc,
-                            lr,
-                            lastAddress,
-                            r0,
-                            r1,
-                            r2,
-                            r3);
         }
     }
     else
     {
-        vm_fileio_trace("file_read handle=%d path=%s buffer=%08x size=%d result=%d pc=%08x lr=%08x last=%08x\n",
-                        handle,
-                        openFileNames[handle],
-                        (u32)bufferPtr,
-                        size,
-                        readed,
-                        pc,
-                        lr,
-                        lastAddress);
     }
     SDL_free(tmp);
     return vm_set_call_result(readed);
@@ -1055,24 +679,17 @@ int vm_cbfs_vm_file_write(int bufferPtr, int size, int fileHandle)
     uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
     if (fileHandle < 0 || fileHandle >= 16 || openFileList[fileHandle] == NULL || size <= 0)
     {
-        vm_fileio_trace("file_write_invalid handle=%d buffer=%08x size=%d pc=%08x lr=%08x last=%08x\n",
-                        fileHandle, bufferPtr, size, pc, lr, lastAddress);
         return vm_set_call_result(-1);
     }
     if (openFileList[fileHandle] == VM_PSEUDO_DIR_HANDLE)
     {
-        vm_fileio_trace("file_write_pseudo handle=%d path=%s buffer=%08x size=%d pc=%08x lr=%08x last=%08x\n",
-                        fileHandle, openFileNames[fileHandle], bufferPtr, size, pc, lr, lastAddress);
         return vm_set_call_result(0);
     }
     void *buffer = SDL_malloc(size);
     uc_mem_read(MTK, bufferPtr, buffer, size);
     int r = fwrite(buffer, 1, size, openFileList[fileHandle]);
     if (r > 0)
-        vm_fileio_trace_bytes("file_write_data", fileHandle, openFileNames[fileHandle], buffer, r);
     SDL_free(buffer);
-    vm_fileio_trace("file_write handle=%d path=%s buffer=%08x size=%d result=%d pc=%08x lr=%08x last=%08x\n",
-                    fileHandle, openFileNames[fileHandle], bufferPtr, size, r, pc, lr, lastAddress);
     return vm_set_call_result(r);
 }
 // ok
@@ -1085,7 +702,6 @@ int vm_cbfs_vm_file_seek(int handle, int pos, int type)
     int r = fseek(openFileList[handle], pos, type);
     if (r == 0)
         r = ftell(openFileList[handle]);
-    vm_fileio_trace("file_seek handle=%d path=%s pos=%d type=%d result=%d\n", handle, openFileNames[handle], pos, type, r);
     return vm_set_call_result(r);
 }
 // ok
@@ -1096,7 +712,6 @@ int vm_cbfs_vm_file_tell(int fileHandle)
     if (openFileList[fileHandle] == VM_PSEUDO_DIR_HANDLE)
         return vm_set_call_result(0);
     int r = ftell(openFileList[fileHandle]);
-    vm_fileio_trace("file_tell handle=%d path=%s result=%d\n", fileHandle, openFileNames[fileHandle], r);
     return vm_set_call_result(r);
 }
 
@@ -1115,7 +730,6 @@ int vm_cbfs_vm_file_exists(int disk, int namePtr)
         r = 1;
         fclose(f);
     }
-    vm_fileio_trace("file_exists raw=%s normalized=%s result=%u last=%08x\n", charBuffer, normalizedName, r, lastAddress);
     return vm_set_call_result(r);
 }
 
@@ -1172,8 +786,6 @@ int vm_cbfs_vm_file_rename(int disk, int oldNamePtr, int newNamePtr)
         vm_is_pseudo_dir_path(oldName) || vm_is_pseudo_dir_path(finalNewName) ||
         vm_is_cbm_resource_path(oldName) || vm_is_cbm_resource_path(finalNewName))
     {
-        vm_fileio_trace("file_rename_skip disk=%d oldRaw=%s newRaw=%s old=%s new=%s finalNew=%s last=%08x\n",
-                        disk, oldRaw, newRaw, oldName, newName, finalNewName, lastAddress);
         return vm_set_call_result(0);
     }
 
@@ -1185,8 +797,6 @@ int vm_cbfs_vm_file_rename(int disk, int oldNamePtr, int newNamePtr)
         r = rename(oldName, finalNewName);
     }
 
-    vm_fileio_trace("file_rename disk=%d oldRaw=%s newRaw=%s old=%s new=%s finalNew=%s result=%d success=%d last=%08x\n",
-                    disk, oldRaw, newRaw, oldName, newName, finalNewName, r, r == 0, lastAddress);
     return vm_set_call_result(r == 0 ? 1 : 0);
 }
 
@@ -1200,7 +810,6 @@ int vm_cbfs_vm_file_getfilesize(int fileHandle)
     fseek(f, 0, SEEK_END);
     int r = ftell(f);
     fseek(f, 0, SEEK_SET);
-    vm_fileio_trace("file_getfilesize handle=%d path=%s result=%d\n", fileHandle, openFileNames[fileHandle], r);
     return vm_set_call_result(r);
 }
 // ok
@@ -1215,7 +824,6 @@ int vm_cbfs_vm_file_close(int fileHandle)
         return vm_set_call_result(0);
     }
     int r = fclose(openFileList[fileHandle]);
-    vm_fileio_trace("file_close handle=%d path=%s result=%d\n", fileHandle, openFileNames[fileHandle], r);
     openFileList[fileHandle] = NULL;
     openFileNames[fileHandle][0] = 0;
     return vm_set_call_result(r);
@@ -1253,17 +861,14 @@ LABEL_8:
 int vm_DF_DataPackage_LoadPackage(int a1, int srcPtr)
 {
     int result = 0;
-    char traceName[128] = {0};
+    char packageName[128] = {0};
     if (srcPtr)
-        vm_readStringByPtr(srcPtr, traceName);
-    VM_RESOURCE_TRACE("datapackage_load_package begin pkg=%08x src=%08x name=%s count=%u\n",
-                      a1, srcPtr, traceName, (unsigned)vm_get_var_short(a1 + 10));
+        vm_readStringByPtr(srcPtr, packageName);
 
     /* src == NULL -> set first byte at a1 to 0 and return 0 */
     if (srcPtr == 0)
     {
         vm_set_var_byte(a1, 0); /* *(_BYTE *)a1 = 0; */
-        VM_RESOURCE_TRACE("datapackage_load_package null pkg=%08x\n", a1);
         return 0;
     }
 
@@ -1299,8 +904,6 @@ int vm_DF_DataPackage_LoadPackage(int a1, int srcPtr)
             /* assign package index into slot->byte[1] and return it */
             int pkgIndex = vm_DF_DataPackage_GetPackageIndex(a1);
             vm_set_var_byte(slot_ptr + 1, (unsigned char)pkgIndex);
-            VM_RESOURCE_TRACE("datapackage_load_package reuse_slot pkg=%08x name=%s slot=%d child=%08x pkgIndex=%d count=%u\n",
-                              a1, traceName, idx, slot_ptr, pkgIndex, (unsigned)vm_get_var_short(a1 + 10));
             return vm_set_call_result(pkgIndex);
         }
     }
@@ -1326,9 +929,6 @@ int vm_DF_DataPackage_LoadPackage(int a1, int srcPtr)
 
         result = slot_count + 1;
         vm_set_var_short(a1 + 10, (unsigned short)result); /* update slot count */
-        VM_RESOURCE_TRACE("datapackage_load_package append pkg=%08x name=%s slot=%d child=%08x pkgIndex=%u count=%u\n",
-                          a1, traceName, slot_count, slot_ptr, (unsigned)vm_get_var_byte(slot_ptr + 1),
-                          (unsigned)vm_get_var_short(a1 + 10));
     }
 
     return vm_set_call_result(result);
@@ -1402,13 +1002,6 @@ u16 vm_DF_ReadShort(u32 bufPtr, u32 offsetPtr)
     {
         u8 raw[8] = {0};
         uc_mem_read(MTK, bufPtr + offset, raw, sizeof(raw));
-        vm_fileio_trace("df_read_short base=%08x off=%u raw=%02x%02x%02x%02x%02x%02x%02x%02x ret=%u next=%u last=%08x\n",
-                        bufPtr,
-                        offset,
-                        raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
-                        ret,
-                        offset + 2,
-                        lastAddress);
     }
     offset += 2;
     uc_mem_write(MTK, offsetPtr, &offset, 4);
@@ -1441,17 +1034,6 @@ int vm_DF_ReadInt(int a1, int a2)
 
     offset += 4;
     vm_set_var(a2, offset);
-    // if ((lastAddress >= 0x0100d560 && lastAddress <= 0x0100de90) ||
-    //     (lastAddress >= 0x0100d780 && lastAddress <= 0x0100d8c0))
-    // {
-    //     vm_fileio_trace("df_read_int base=%08x off=%u raw=%02x%02x%02x%02x ret=%d next=%u last=%08x\n",
-    //                     a1,
-    //                     offset - 4,
-    //                     arr[0], arr[1], arr[2], arr[3],
-    //                     result,
-    //                     offset,
-    //                     lastAddress);
-    // }
     return vm_set_call_result(result);
 }
 void vm_DF_WriteInt(a1, a2, value)
@@ -1855,8 +1437,6 @@ int vm_DF_DataPackage_LoadFormTCardEx(int a1, int pathPtr, int fileSeekPos)
         u8 entryLoaded = 0xff;
         if (entry)
             entryLoaded = vm_get_var_byte(entry);
-        VM_RESOURCE_TRACE("datapackage_tcard_entry pkg=%08x i=%d count=%d name=%s namePtr=%08x entry=%08x loaded=%u nextOff=%08x fileSeek=%08x\n",
-                          a1, i, count, entryName, namePtr, entry, entryLoaded, offset, fileSeekPos);
 
         if (entry && !vm_get_var_byte(entry))
         {
@@ -2057,8 +1637,6 @@ int VM_DF_DataPackage_DoLoading(int a1, int a2, int a3)
     {
         uc_mem_read(MTK, VM_DF_DataPackage_LoadType_ADDRESS, &n2, 1);
         uc_mem_read(MTK, VM_DF_DataPackage_In_File_Offset_ADDRESS, &inFileOffset, 4);
-        VM_RESOURCE_TRACE("datapackage_doload a1=%08x a2=%08x a3=%08x loadType=%u inFileOffset=%08x\n",
-                          a1, a2, a3, n2, inFileOffset);
 
         if (n2 == 1)
         {
@@ -2073,7 +1651,6 @@ int VM_DF_DataPackage_DoLoading(int a1, int a2, int a3)
     }
 
     if (a2 == 0)
-        VM_RESOURCE_TRACE("datapackage_load_tresource_null a1=%08x a3=%08x loadType=%u\n", a1, a3, n2);
 
     // 默认走资源加载
     return vm_DF_DataPackage_LoadFromTResource(a1, a2);
@@ -2368,7 +1945,6 @@ void vm_initMemoryBlock(p_g_memoryBlock, size)
     // p_g_memoryBlock[0] = 新的内存块地址。全局块使用固定池；其它块需要独立
     // backing storage，避免多个 MemoryBlock 互相覆盖 actor/资源解析结果。
     tmp1 = (p_g_memoryBlock == VM_MemoryBlock_PTR_ADDRESS) ? VM_MF_MemoryBlock_POOL_ADDRESS : vm_malloc(size);
-    VM_RESOURCE_TRACE("memory_block_init ptr=%08x base=%08x size=%08x\n", p_g_memoryBlock, tmp1, size);
     uc_mem_write(MTK, p_g_memoryBlock, &tmp1, 4);
     // p_g_memoryBlock[1] = offset
     tmp1 = 0;
@@ -2433,9 +2009,9 @@ u32 vm_DF_DataPackage_GetFileID(u32 a1, u32 namePtr)
     u32 v7 = 0;
     int result = -1;
     uc_engine *uc = MTK;
-    char traceName[128] = {0};
+    char fileName[128] = {0};
     if (namePtr)
-        vm_readStringByPtr(namePtr, traceName);
+        vm_readStringByPtr(namePtr, fileName);
     // count1 = *(int16 *)(a1 + 8)
     uc_mem_read(uc, a1 + 8, &count1, 2); // 应该是0x112
 
@@ -2455,8 +2031,6 @@ u32 vm_DF_DataPackage_GetFileID(u32 a1, u32 namePtr)
         {
             u32 file_id = 0; // 第一次应该返回0x1c
             uc_mem_read(uc, id_base + 2 * i, &file_id, 2);
-            VM_RESOURCE_TRACE("df_get_file_id hit pkg=%08x name=%s id=%d index=%d local=1 str=%08x names=%08x ids=%08x count=%d\n",
-                              a1, traceName, (int16_t)file_id, i, str_ptr, base_ptr, id_base, count1);
             uc_reg_write(uc, UC_ARM_REG_R0, &file_id);
             return file_id;
         }
@@ -2478,15 +2052,12 @@ u32 vm_DF_DataPackage_GetFileID(u32 a1, u32 namePtr)
             result = vm_DF_DataPackage_GetFileID(v7, namePtr);
             if (result >= 0)
             {
-                VM_RESOURCE_TRACE("df_get_file_id hit pkg=%08x name=%s id=%d child=%08x\n",
-                                  a1, traceName, result, v7);
                 uc_reg_write(uc, UC_ARM_REG_R0, &result);
                 return result;
             }
         }
     }
     result = -1;
-    VM_RESOURCE_TRACE("df_get_file_id miss pkg=%08x name=%s\n", a1, traceName);
     uc_reg_write(uc, UC_ARM_REG_R0, &result);
     return result;
 }
@@ -2548,9 +2119,6 @@ int vm_DF_DataPackage_DoReadData(int32_t a1, int32_t a2)
     u8 head[8] = {0};
     if (len > 0)
         uc_mem_read(MTK, buffer, head, SDL_min((u32)len, (u32)sizeof(head)));
-    VM_RESOURCE_TRACE("df_read_data pkg=%08x index=%d dataBase=%08x seek=%08x len=%08x out=%08x head=%02x%02x%02x%02x%02x%02x%02x%02x\n",
-                      a1, a2, data_base, v5 + base_offset, len, buffer,
-                      head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7]);
     return vm_set_call_result(buffer);
 }
 
@@ -2589,8 +2157,6 @@ int vm_DF_DataPackage_GetFileByID(u32 a1, u32 fileId)
             if (flag)
             {
                 int data = vm_DF_DataPackage_DoReadData(a1, i);
-                VM_RESOURCE_TRACE("df_get_file_by_id hit pkg=%08x id=%d index=%d flag=%u out=%08x\n",
-                                  a1, (int16_t)fileId, i, flag, data);
                 return data;
             }
             else
@@ -2598,8 +2164,6 @@ int vm_DF_DataPackage_GetFileByID(u32 a1, u32 fileId)
                 uc_mem_read(uc, data_base + i * 4, &data_ptr, 4);
                 offset = offset_base;
                 offset = data_ptr + offset;
-                VM_RESOURCE_TRACE("df_get_file_by_id hit pkg=%08x id=%d index=%d flag=%u out=%08x\n",
-                                  a1, (int16_t)fileId, i, flag, offset);
                 return vm_set_call_result(offset);
             }
         }
@@ -2617,13 +2181,10 @@ int vm_DF_DataPackage_GetFileByID(u32 a1, u32 fileId)
             result = vm_DF_DataPackage_GetFileByID(v7, fileId);
             if (result)
             {
-                VM_RESOURCE_TRACE("df_get_file_by_id child pkg=%08x id=%d child=%08x out=%08x\n",
-                                  a1, (int16_t)fileId, v7, result);
                 return vm_set_call_result(result);
             }
         }
     }
-    VM_RESOURCE_TRACE("df_get_file_by_id miss pkg=%08x id=%d\n", a1, (int16_t)fileId);
     return vm_set_call_result(0);
 }
 
@@ -2631,10 +2192,9 @@ int vm_DF_DataPackage_GetFile(int a1, int namePtr)
 {
     int FileID = vm_DF_DataPackage_GetFileID(a1, namePtr);
     int data = vm_DF_DataPackage_GetFileByID(a1, FileID);
-    char traceName[128] = {0};
+    char fileName[128] = {0};
     if (namePtr)
-        vm_readStringByPtr(namePtr, traceName);
-    VM_RESOURCE_TRACE("df_get_file pkg=%08x name=%s id=%d out=%08x\n", a1, traceName, FileID, data);
+        vm_readStringByPtr(namePtr, fileName);
     return data;
 }
 
@@ -2849,48 +2409,6 @@ void vM_DrawImageWithClipEx()
     if (w <= 0 || h <= 0)
         return;
 
-    vm_trace_progress_strip_image("vMDrawImageWithClipEx",
-                                  (u32)srcInfo,
-                                  (u32)srcPtr,
-                                  src_w,
-                                  src_h,
-                                  (u32)dstInfo,
-                                  (u32)dstPtr,
-                                  dst_w,
-                                  dst_h,
-                                  origSrcX,
-                                  origSrcY,
-                                  origW,
-                                  origH,
-                                  origDstX,
-                                  origDstY,
-                                  srcX,
-                                  srcY,
-                                  w,
-                                  h,
-                                  dstX,
-                                  dstY);
-    vm_trace_scene_actor_region_image("vMDrawImageWithClipEx",
-                                      (u32)srcInfo,
-                                      (u32)srcPtr,
-                                      src_w,
-                                      src_h,
-                                      (u32)dstInfo,
-                                      (u32)dstPtr,
-                                      dst_w,
-                                      dst_h,
-                                      origSrcX,
-                                      origSrcY,
-                                      origW,
-                                      origH,
-                                      origDstX,
-                                      origDstY,
-                                      srcX,
-                                      srcY,
-                                      w,
-                                      h,
-                                      dstX,
-                                      dstY);
 
     int srcImgPitch = (((4 - src_w) & 3) + src_w) * 2; // 源图片的宽度按4像素对齐后再x2就是原图片一行像素占用的字节数
     int dstImgPicth = (((4 - dst_w) & 3) + dst_w) * 2;
@@ -3000,48 +2518,6 @@ void vm_vMDrawImageClipAndAlphaEx()
     if (w <= 0 || h <= 0)
         return;
 
-    vm_trace_progress_strip_image("vMDrawImageClipAndAlphaEx",
-                                  (u32)srcInfo,
-                                  (u32)srcPtr,
-                                  src_w,
-                                  src_h,
-                                  (u32)dstInfo,
-                                  (u32)dstPtr,
-                                  dst_w,
-                                  dst_h,
-                                  origSrcX,
-                                  origSrcY,
-                                  origW,
-                                  origH,
-                                  origDstX,
-                                  origDstY,
-                                  srcX,
-                                  srcY,
-                                  w,
-                                  h,
-                                  dstX,
-                                  dstY);
-    vm_trace_scene_actor_region_image("vMDrawImageClipAndAlphaEx",
-                                      (u32)srcInfo,
-                                      (u32)srcPtr,
-                                      src_w,
-                                      src_h,
-                                      (u32)dstInfo,
-                                      (u32)dstPtr,
-                                      dst_w,
-                                      dst_h,
-                                      origSrcX,
-                                      origSrcY,
-                                      origW,
-                                      origH,
-                                      origDstX,
-                                      origDstY,
-                                      srcX,
-                                      srcY,
-                                      w,
-                                      h,
-                                      dstX,
-                                      dstY);
 
     int srcImgPitch = (((4 - src_w) & 3) + src_w) * 2; // 源图片的宽度按4像素对齐后再x2就是原图片一行像素占用的字节数
     int dstImgPicth = (((4 - dst_w) & 3) + dst_w) * 2;
@@ -3122,7 +2598,6 @@ int vm_IMG_CreateImageFormStream(u32 a1, u32 a2)
 
     if (a1 == 0)
     {
-        VM_RESOURCE_TRACE("img_create_stream null stream resultPtr=%08x\n", a2);
         return vm_set_call_result(0);
     }
 
@@ -3131,9 +2606,6 @@ int vm_IMG_CreateImageFormStream(u32 a1, u32 a2)
     // uc_mem_read(uc, a1, cbeTextString, 32); // debug
     u8 imageHead[8] = {0};
     uc_mem_read(uc, a1, imageHead, sizeof(imageHead));
-    VM_RESOURCE_TRACE("img_create_stream stream=%08x resultPtr=%08x type=%u head=%02x%02x%02x%02x%02x%02x%02x%02x\n",
-                      a1, v3, n3, imageHead[0], imageHead[1], imageHead[2], imageHead[3],
-                      imageHead[4], imageHead[5], imageHead[6], imageHead[7]);
 
     if (n3)
     {
@@ -3191,10 +2663,6 @@ int vm_gifDecode(int gifBufferPtr, int resultPtr)
     {
         u32 dictSize = ((u32)(u8)buffer[0] << 24) | ((u32)(u8)buffer[1] << 16) |
                        ((u32)(u8)buffer[2] << 8) | (u32)(u8)buffer[3];
-        vm_fileio_trace("gif_decode_fallback ptr=%08x dict=%u flags=%02x reason=%s head=%02x%02x%02x%02x%02x%02x%02x%02x\n",
-                        gifBufferPtr, dictSize, (u8)buffer[4], gifDecodeGetLastError(),
-                        (u8)buffer[0], (u8)buffer[1], (u8)buffer[2], (u8)buffer[3],
-                        (u8)buffer[4], (u8)buffer[5], (u8)buffer[6], (u8)buffer[7]);
         u16 transparent = 0;
         int vmPtr = vm_malloc(sizeof(transparent));
         uc_mem_write(MTK, vmPtr, &transparent, sizeof(transparent));
@@ -3450,10 +2918,8 @@ void vm_IMG_CreateImageFormRes(u32 a1)
             uc_mem_read(MTK, dataBase + 4 * a1, &tmp1, 4);
             Data = tmp1 + offsetBase;
         }
-        VM_RESOURCE_TRACE("img_create_res id=%u dataPackage=%08x flag=%u data=%08x\n", a1, DataPackage, tmp2, Data);
         return vm_IMG_CreateImageFormStream(Data, 0);
     }
-    VM_RESOURCE_TRACE("img_create_res no_datapackage id=%u\n", a1);
     return vm_set_call_result(tmp1);
 }
 // ok
@@ -3519,9 +2985,6 @@ int vm_DF_ReadString(u32 a1, u32 a2)
         {
             u32 srcLen = len + 1 < sizeof(srcBytes) ? len + 1 : (u32)sizeof(srcBytes);
             uc_mem_read(uc, a1 + startIdx, srcBytes, srcLen);
-            vm_fileio_trace("df_read_string base=%08x off=%u len=%u out=%08x text=%s next=%u last=%08x\n",
-                            a1, startIdx, len, result, outName, vm_get_var(a2), lastAddress);
-            vm_fileio_trace_bytes("df_read_string_src", -1, outName, srcBytes, srcLen);
         }
     }
     return vm_set_call_result(result);
@@ -3700,8 +3163,6 @@ u32 vm_GetStreamDataFormRes(u32 a1, u32 a2, u32 a3, u32 a4)
         u32 srcSize = vm_malloc_user_size(a1);
         if (srcSize <= 1)
         {
-            vm_fileio_trace("GetStreamDataFormRes pseudo_raw invalid src=%08x size=%u last=%08x\n",
-                            a1, srcSize, lastAddress);
             return vm_set_call_result(0);
         }
 
@@ -3712,8 +3173,6 @@ u32 vm_GetStreamDataFormRes(u32 a1, u32 a2, u32 a3, u32 a4)
             u8 byte = vm_get_var_byte(a1 + 1 + i);
             uc_mem_write(uc, dest + i, &byte, 1);
         }
-        vm_fileio_trace("GetStreamDataFormRes src=%08x type=%u pseudo_raw=%u dest=%08x last=%08x\n",
-                        a1, resType, rawLen, dest, lastAddress);
         return vm_set_call_result(dest);
     }
 
@@ -3755,16 +3214,6 @@ u32 vm_GetStreamDataFormRes(u32 a1, u32 a2, u32 a3, u32 a4)
         u32 dumpLen = v8 < sizeof(head) ? v8 : (u32)sizeof(head);
         if (dumpLen > 0)
             uc_mem_read(MTK, dest, head, dumpLen);
-        vm_fileio_trace("GetStreamDataFormRes src=%08x type=%u comp=%u outCap=%u out=%u dest=%08x head=%02x%02x%02x%02x%02x%02x%02x%02x %02x%02x%02x%02x%02x%02x%02x%02x last=%08x\n",
-                        a1,
-                        vm_get_var_byte(a1),
-                        v5,
-                        (u32)b8 | ((u32)b7 << 8) | ((u32)b6 << 16) | ((u32)b5 << 24),
-                        v8,
-                        dest,
-                        head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7],
-                        head[8], head[9], head[10], head[11], head[12], head[13], head[14], head[15],
-                        lastAddress);
     }
     return vm_set_call_result(dest);
 }

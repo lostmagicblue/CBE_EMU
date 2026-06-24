@@ -45,24 +45,10 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
     //     printf("%x]", value);
     //     printf(" at %x\n", lastAddress);
     // }
-    if (type == UC_MEM_WRITE)
-    {
-        vm_net_trace_title_login_write(address, size, value);
-        vm_net_trace_title_role_workspace_write(address, size, value);
-        vm_net_trace_shared_event_owner_write(address, size, value);
-        vm_net_trace_current_net_object_write(address, size, value);
-        vm_net_trace_scene_dispatch_gate_write(address, size, value);
-        vm_net_trace_scene_loading_owner_write(address, size, value);
-        vm_net_trace_battle_module_data_write(address, size, value);
-        vm_net_trace_battle_main_gate_write(address, size, value);
-        vm_net_trace_battle_subtype8_info_dst_write(address, size, value);
-        vm_net_trace_battle_local_state_write(address, size, value);
-    }
 }
 bool hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data)
 {
     printf("地址无法访问:%x type:%d size:%u value:%llx\n", address, type, size, value);
-    vm_stdout_trace("地址无法访问:%x type:%d size:%u value:%llx\n", address, type, size, value);
     dumpCpuInfo();
     int regs[] = {
         UC_ARM_REG_R0,
@@ -105,14 +91,12 @@ void hookCpuIntr(uc_engine *uc, uint32_t intno, void *user_data)
             u8 ch = 0;
             uc_mem_read(uc, arg, &ch, 1);
             putchar(ch);
-            vm_stdout_trace("%c", ch);
             return;
         }
         if (reason == 4)
         {
             vm_readStringByPtr(arg, cbeTextString);
             printf("%s", cbeTextString);
-            vm_stdout_trace("%s", cbeTextString);
             return;
         }
     }

@@ -33,14 +33,14 @@
 
 - 读取客户端内存、寄存器、日志、反编译结果来取证。
 - 在 host 侧构造响应包，把响应复制到 VM buffer，并通过现有 scheduler 投递网络事件。
-- 增加窄范围 trace、packet dump、断点、watchpoint 来解释客户端行为。
+- 临时增加窄范围断点、watchpoint 或一次性观测代码来解释客户端行为；完成后必须删除。
 - 根据环境变量参数化 mock 数据，如角色名、职业、血量、出生点，但这些值必须进入响应包，而不是直接写客户端状态。
 
 ## 高效工作流
 
 1. 定位卡点
 
-从 `logs/net_trace.log`、unhandled packet、assert 栈、屏幕状态日志开始。先确认卡点是“请求未处理”“响应结构错误”“事件时序错误”“资源缺失”还是“客户端 parser 另走分支”。
+从 unhandled packet、assert 栈、屏幕状态、当前请求签名和 IDA parser 证据开始。先确认卡点是“请求未处理”“响应结构错误”“事件时序错误”“资源缺失”还是“客户端 parser 另走分支”。
 
 2. 固定请求签名
 
@@ -62,7 +62,7 @@
 - 对少量分支函数用 `analyze_batch`。
 - 只在确认范围后 `decompile`。
 
-优先从字符串、WT kind/subtype 分发表、字段名、trace PC、xrefs 入手。不要一上来全量反编译。
+优先从字符串、WT kind/subtype 分发表、字段名、断点命中的 PC、xrefs 入手。不要一上来全量反编译。
 
 4. 还原响应契约
 
@@ -71,7 +71,7 @@
 - header、object 长度、字段长度必须由 helper 统一写。
 - 每个数组先明确 count，再写元素。
 - blob/string 要区分“外层长度 + 内层长度”的格式。
-- 对未知字段保留命名占位，并在 trace 里写 evidence 或 hypothesis。
+- 对未知字段保留命名占位，并在 `docs/re/` 里写 evidence 或 hypothesis。
 
 5. 接入现有框架
 
@@ -79,8 +79,8 @@
 
 - `vm_net_mock_is_xxx_request`：只做窄匹配。
 - `vm_net_mock_build_xxx_response`：只构包，不改客户端状态。
-- `vm_net_trace("mock_xxx ... evidence=...")`：留下证据。
-- `vm_net_log_handled_packet("builtin-xxx", ...)`：便于回归定位。
+- source 名称保持稳定，便于代码审查和文档对照。
+- 证据写入 `docs/re/`，不要写入常驻运行日志。
 
 把 detector 放在 `vm_net_mock_build_response` 中和同阶段处理器相邻的位置，避免抢走更具体的请求。
 
@@ -96,7 +96,7 @@
 
 ## 证据记录格式
 
-每个协议点都按下面格式写进 `docs/re/` 或 trace 注释：
+每个协议点都按下面格式写进 `docs/re/`：
 
 ```text
 phase:
@@ -113,8 +113,8 @@ ida_evidence:
   function:
   branch:
 runtime_evidence:
-  trace:
-  packet:
+  observation:
+  packet_signature:
 client_effect:
 unknowns:
 ```
@@ -132,7 +132,6 @@ unknowns:
   - `hook_vm_manager_network_func`：网络 manager API 入口。
   - `scheduler_queue_net_event`：网络事件排队。
   - `scheduler_dispatch_net_tasks`：回调派发。
-  - `vm_net_trace_*`：状态读取和日志。
 
 ## 包处理器模板
 
@@ -154,7 +153,6 @@ static u32 vm_net_mock_build_example_response(const u8 *request, u32 requestLen,
 {
     u32 pos = 0;
     /* Use existing WT/object/field helpers here. */
-    vm_net_trace("mock_example_response len=%u evidence=IDA:... runtime:...\n", pos);
     return pos;
 }
 ```
@@ -172,13 +170,26 @@ static u32 vm_net_mock_build_example_response(const u8 *request, u32 requestLen,
 
 ## 日志纪律
 
-Trace 要能回答三个问题：
+默认不保留常驻 trace。新增取证代码只能临时存在，完成协议点后必须删除，并把证据沉淀到 `docs/re/`。
+
+临时观测要能回答三个问题：
 
 - 为什么这个请求被这个 handler 接住？
 - 响应里关键业务字段是什么？
 - 客户端下一步是否按预期发生？
 
-避免永久保留高频逐指令日志。调完后把它们关掉、加条件、或改成只在异常路径打印。
+避免永久保留高频逐指令日志。调完后删除临时取证代码，不新增宏开关或环境变量开关。详细规则见 `docs/re/trace-policy.md` 和 `docs/re/logging-policy.md`。
+
+## Agent 与 Skill 入口
+
+按任务类型选择更窄的规范：
+
+- 协调与拆阶段：`.agents/jianghu-coordinator.md`。
+- IDA/协议取证：`.agents/jianghu-protocol-forensics.md`，触发 `$jianghu-protocol-forensics`。
+- mock-server 处理器实现：`.agents/jianghu-mock-server-implementer.md`，触发 `$jianghu-mock-server-handler`。
+- 构建与运行验证：`.agents/jianghu-runtime-validator.md`。
+
+新协议点的 evidence 记录使用 `.codex/skills/jianghu-protocol-forensics/references/evidence-record.md` 模板；新增 handler 前后使用 `.codex/skills/jianghu-mock-server-handler/references/handler-checklist.md` 检查。
 
 ## 回归清单
 
@@ -189,7 +200,7 @@ Trace 要能回答三个问题：
 - 没有新增强写游戏全局状态的 `uc_mem_write`。
 - 新 detector 不会抢走已有 handler。
 - unhandled packet 如果仍存在，已记录下一步调查方向。
-- 文档中的 evidence 与代码 trace 名称一致。
+- 文档中的 evidence 与代码 source 名称一致。
 
 ## 输出要求
 

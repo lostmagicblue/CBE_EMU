@@ -2,10 +2,6 @@
 #define GDI_LAYER_DEBUG_
 
 #define DEBUG_PRINT(...) ((void)0)
-#define TRACE_STARTUP_UI 0
-#define TRACE_RESOURCE_IO 0
-#define TRACE_LCD_TEXT 1
-#define TRACE_LCD_SHAPES 1
 
 #ifdef _WIN32
 #include <direct.h>
@@ -14,7 +10,6 @@
 
 #include "main.h"
 #include "lcd.h"
-void vm_stdout_trace(const char *fmt, ...);
 #include "vmFunc.c"
 #include "hookRam.c"
 #include "vmEvent.c"
@@ -241,35 +236,7 @@ static u32 g_mockBattleEnemyHpCurrent = 0;
 static u32 g_mockBattleEnemyHpMax = 0;
 
 static uc_err add_manager_code_hooks(uc_engine *uc);
-static void vm_net_trace(const char *fmt, ...);
-static bool vm_net_trace_is_battle_g6_relevant(const char *text);
-static bool vm_net_trace_battle_g6_only_enabled(void);
-static bool vm_net_trace_prefix_is(const char *text, const char *prefix);
-static void vm_net_packet_trace(const char *fmt, ...);
 static bool vm_host_file_exists(const char *path);
-static void vm_net_trace_title_login_state(const char *label);
-static void vm_net_trace_title_child_manager_call(const char *label, u32 pc);
-static void vm_net_trace_title_login_dispatch(const char *label, u32 pc);
-static void vm_net_trace_title_role_path(const char *label, u32 pc);
-static void vm_net_trace_title_rolelist_reader_methods(const char *label, u32 pc);
-static void vm_net_trace_title_role_select_action(const char *label, u32 pc);
-static void vm_net_trace_groupinfo_case5_reader(const char *label, u32 pc);
-static void vm_net_trace_battle_module_state(const char *label, u32 pc);
-static void vm_net_trace_battle_pool_probe(const char *label, u32 pc, u32 moduleBase);
-static void vm_net_trace_wt_field_table_detail(const char *label, u32 obj, u32 pc);
-static void vm_net_trace_battle_server_cmd_detail(const char *label, u32 pc);
-static void vm_net_trace_battle_operate_subtype8_detail(const char *label, u32 pc);
-static void vm_net_trace_battle_actioninfo_parser_detail(const char *label, u32 pc);
-static void vm_net_trace_battle_teaminfo_wrapper_detail(const char *label, u32 pc);
-static void vm_net_trace_battle_actioninfo_loop_detail(const char *label, u32 pc);
-static void vm_net_trace_battle_status7_combatinfo_detail(const char *label, u32 pc);
-static void vm_net_trace_battle_status7_item_record_detail(const char *label, u32 pc);
-static void vm_net_trace_battle_status7_sub7228_detail(const char *label, u32 pc);
-static void vm_net_trace_battle_apply_detail(const char *label, u32 pc);
-static void vm_net_trace_battle_local_action_state(const char *label, u32 pc);
-static void vm_net_trace_battle_damage_dispatch_detail(const char *label, u32 pc);
-static void vm_net_trace_battle_anim_effect_delta_detail(const char *label, u32 pc);
-static void vm_net_trace_battle_arm_subtype8_info_dst_watch(u32 base, u32 len, u32 pc);
 static bool vm_net_mock_current_screen_is_battle(void);
 static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *pos);
 static bool vm_net_mock_append_battle_terminal_subtype8_object(u8 *out, u32 outCap, u32 *pos);
@@ -279,41 +246,9 @@ static bool vm_net_mock_append_battle_terminal_case11_object(u8 *out, u32 outCap
 static u32 vm_net_mock_build_battle_auto12_ack_response(const u8 *request, u32 requestLen,
                                                         u8 *out, u32 outCap);
 static u32 vm_net_mock_min_u32(u32 a, u32 b);
-void vm_net_trace_title_login_write(uint64_t address, uint32_t size, int64_t value);
-void vm_net_trace_shared_event_owner_write(uint64_t address, uint32_t size, int64_t value);
-void vm_net_trace_current_net_object_write(uint64_t address, uint32_t size, int64_t value);
-void vm_net_trace_scene_dispatch_gate_write(uint64_t address, uint32_t size, int64_t value);
-void vm_net_trace_scene_loading_owner_write(uint64_t address, uint32_t size, int64_t value);
-static void vm_format_trace_bytes_hex(const u8 *bytes, u32 count, char *out, size_t outCap);
 static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
-static bool vm_net_trace_read_u32(u32 addr, u32 *value);
-static bool vm_net_trace_read_u16(u32 addr, u16 *value);
-static bool vm_net_trace_read_u8(u32 addr, u8 *value);
 static uc_err scheduler_dispatch_net_tasks(void);
 static uc_err scheduler_flush_post_vm_business_send_ready(const char *reason);
-
-void vm_stdout_trace(const char *fmt, ...)
-{
-    static u8 s_session_started = 0;
-    FILE *fp;
-    va_list args;
-
-#ifdef _WIN32
-    _mkdir("logs");
-#endif
-    fp = fopen("logs/stdout_trace.log", "ab");
-    if (!fp)
-        return;
-    if (!s_session_started)
-    {
-        fprintf(fp, "\n==== session_start channel=stdout ====\n");
-        s_session_started = 1;
-    }
-    va_start(args, fmt);
-    vfprintf(fp, fmt, args);
-    va_end(args);
-    fclose(fp);
-}
 
 static bool vm_address_in_range(u32 address, u32 begin, u32 size)
 {
@@ -408,47 +343,7 @@ static bool vm_lcd_looks_like_fillrect_compat(u32 r0, u32 r1, u32 r2, u32 r3)
            h <= LCD_HEIGHT;
 }
 
-static bool vm_trace_progress_strip_region_overlap(int x, int y, int w, int h)
-{
-    const int regionLeft = 16;
-    const int regionTop = 200;
-    const int regionRight = 224;
-    const int regionBottom = 286;
 
-    vm_lcd_normalize_signed_rect(&x, &y, &w, &h);
-
-    if (w <= 0 || h <= 0)
-        return false;
-
-    return x < regionRight &&
-           x + w > regionLeft &&
-           y < regionBottom &&
-           y + h > regionTop;
-}
-
-static bool vm_trace_progress_strip_scene_settled(void)
-{
-    u8 sceneTickGate3 = 0;
-    u8 sceneTickGate4 = 0;
-    u8 load0 = 0;
-    u8 load1 = 0;
-    u8 load2 = 0;
-
-    if (!Global_R9)
-        return false;
-
-    uc_mem_read(MTK, Global_R9 + 23655, &sceneTickGate3, 1);
-    uc_mem_read(MTK, Global_R9 + 23656, &sceneTickGate4, 1);
-    uc_mem_read(MTK, Global_R9 + 23673, &load0, 1);
-    uc_mem_read(MTK, Global_R9 + 23674, &load1, 1);
-    uc_mem_read(MTK, Global_R9 + 23675, &load2, 1);
-
-    return sceneTickGate3 == 1 &&
-           sceneTickGate4 == 1 &&
-           load0 == 0 &&
-           load1 == 0 &&
-           load2 == 0;
-}
 
 static u32 vm_cd_rect_point(u32 left, u32 top, u32 right, u32 bottom, u32 x, u32 y)
 {
@@ -462,186 +357,8 @@ static u32 vm_cd_rect_point(u32 left, u32 top, u32 right, u32 bottom, u32 x, u32
     return (r >= px && l <= px && b >= py && t <= py) ? 1u : 0u;
 }
 
-static void vm_trace_progress_strip_wrapper_entry(const char *label, u32 pc)
-{
-    static u32 s_progressStripWrapperTraceCount = 0;
-    static u32 s_progressStripWrapperLastTick = 0xffffffffu;
-    u32 lr = 0;
-    u32 image = 0;
-    u32 srcX = 0;
-    u32 srcY = 0;
-    u32 width = 0;
-    u32 height = 0;
-    u32 dstX = 0;
-    u32 dstY = 0;
-    u32 sp = 0;
 
-    if (label == NULL)
-        return;
-    if (!vm_trace_progress_strip_scene_settled())
-        return;
 
-    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
-    uc_reg_read(MTK, UC_ARM_REG_R0, &image);
-    uc_reg_read(MTK, UC_ARM_REG_R1, &srcX);
-    uc_reg_read(MTK, UC_ARM_REG_R2, &srcY);
-    uc_reg_read(MTK, UC_ARM_REG_R3, &width);
-    uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
-    uc_mem_read(MTK, sp + 0x0, &height, 4);
-    uc_mem_read(MTK, sp + 0x4, &dstX, 4);
-    uc_mem_read(MTK, sp + 0x8, &dstY, 4);
-
-    if (!vm_trace_progress_strip_region_overlap((int)(int16_t)(dstX & 0xffff),
-                                                (int)(int16_t)(dstY & 0xffff),
-                                                (int)(int16_t)(width & 0xffff),
-                                                (int)(int16_t)(height & 0xffff)))
-        return;
-
-    {
-        u32 caller = lr & ~1u;
-        bool isCenterProgressStrip = (caller == 0x010044B2u);
-        bool isLoadingGifWidget = (caller == 0x010460CAu);
-
-        if (!isCenterProgressStrip && !isLoadingGifWidget)
-            return;
-    }
-
-    if (s_progressStripWrapperTraceCount >= 48)
-    {
-        if (s_progressStripWrapperLastTick != g_schedulerTick)
-        {
-            s_progressStripWrapperLastTick = g_schedulerTick;
-            vm_net_trace("trace_progress_strip_wrapper_tick label=%s pc=%08x lr=%08x caller=%08x last=%08x tick=%u image=%08x dst=%d,%d\n",
-                         label,
-                         pc,
-                         lr,
-                         lr & ~1u,
-                         lastAddress,
-                         g_schedulerTick,
-                         image,
-                         vm_lcd_coord_from_reg(dstX),
-                         vm_lcd_coord_from_reg(dstY));
-        }
-        return;
-    }
-
-    s_progressStripWrapperLastTick = g_schedulerTick;
-    ++s_progressStripWrapperTraceCount;
-    vm_net_trace("trace_progress_strip_wrapper label=%s pc=%08x lr=%08x caller=%08x last=%08x tick=%u image=%08x src=%d,%d size=%d,%d dst=%d,%d count=%u\n",
-                 label,
-                 pc,
-                 lr,
-                 lr & ~1u,
-                 lastAddress,
-                 g_schedulerTick,
-                 image,
-                 vm_lcd_coord_from_reg(srcX),
-                 vm_lcd_coord_from_reg(srcY),
-                 vm_lcd_coord_from_reg(width),
-                 vm_lcd_coord_from_reg(height),
-                 vm_lcd_coord_from_reg(dstX),
-                 vm_lcd_coord_from_reg(dstY),
-                 s_progressStripWrapperTraceCount);
-}
-
-static void vm_trace_loading_gif_widget_draw_entry(u32 pc)
-{
-    static u32 s_loadingGifWidgetDrawTraceCount = 0;
-    static u32 s_loadingGifWidgetDrawLastTick = 0xffffffffu;
-    u32 lr = 0;
-    u32 widget = 0;
-    u32 argX = 0;
-    u32 argY = 0;
-    u32 argW = 0;
-    u8 widgetFlag = 0;
-    u8 widgetMode = 0;
-    u8 globalGate = 0;
-    u8 sceneGateA = 0;
-    u8 sceneGateB = 0;
-    u16 frameCounter = 0;
-    u16 imageIndex = 0;
-    int16_t overlayCounter = 0;
-
-    if (!Global_R9)
-        return;
-    if (!vm_trace_progress_strip_scene_settled())
-        return;
-
-    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
-    uc_reg_read(MTK, UC_ARM_REG_R0, &widget);
-    uc_reg_read(MTK, UC_ARM_REG_R1, &argX);
-    uc_reg_read(MTK, UC_ARM_REG_R2, &argY);
-    uc_reg_read(MTK, UC_ARM_REG_R3, &argW);
-
-    if (widget != Global_R9 + 0x60F4u)
-        return;
-
-    uc_mem_read(MTK, widget + 0x0A, &frameCounter, 2);
-    uc_mem_read(MTK, widget + 0x0E, &imageIndex, 2);
-    uc_mem_read(MTK, widget + 0x10, &widgetFlag, 1);
-    uc_mem_read(MTK, widget + 0x12, &widgetMode, 1);
-    uc_mem_read(MTK, Global_R9 + 0x5530, &globalGate, 1);
-    uc_mem_read(MTK, Global_R9 + 0x5C67, &sceneGateA, 1);
-    uc_mem_read(MTK, Global_R9 + 0x5C68, &sceneGateB, 1);
-    uc_mem_read(MTK, Global_R9 + 0x9590, &overlayCounter, 2);
-
-    if (s_loadingGifWidgetDrawTraceCount >= 64 &&
-        s_loadingGifWidgetDrawLastTick == g_schedulerTick)
-        return;
-
-    s_loadingGifWidgetDrawLastTick = g_schedulerTick;
-    if (s_loadingGifWidgetDrawTraceCount < 64)
-        ++s_loadingGifWidgetDrawTraceCount;
-
-    vm_net_trace("trace_loading_gif_widget_draw_entry pc=%08x lr=%08x caller=%08x last=%08x tick=%u widget=%08x flag10=%u gate5530=%u sceneGate=%u,%u overlayCounter=%d frame=%u imageIndex=%u mode12=%u args=%d,%d,%d activeScreen=%08x currentThis=%08x count=%u\n",
-                 pc,
-                 lr,
-                 lr & ~1u,
-                 lastAddress,
-                 g_schedulerTick,
-                 widget,
-                 widgetFlag,
-                 globalGate,
-                 sceneGateA,
-                 sceneGateB,
-                 overlayCounter,
-                 frameCounter,
-                 imageIndex,
-                 widgetMode,
-                 vm_lcd_coord_from_reg(argX),
-                 vm_lcd_coord_from_reg(argY),
-                 vm_lcd_coord_from_reg(argW),
-                 vmAddedScreen,
-                 g_currentScreenThis,
-                 s_loadingGifWidgetDrawTraceCount);
-}
-
-static void vm_trace_lcd_shape(const char *apiName, int x, int y, int w, int h, u32 color)
-{
-#if TRACE_LCD_SHAPES
-    static u32 s_progressStripShapeTraceCount = 0;
-    if (apiName != NULL &&
-        s_progressStripShapeTraceCount < 48 &&
-        strstr(apiName, "Rect") != NULL &&
-        vm_trace_progress_strip_scene_settled() &&
-        vm_trace_progress_strip_region_overlap(x, y, w, h))
-    {
-        ++s_progressStripShapeTraceCount;
-        vm_net_trace("trace_progress_strip_shape api=%s x=%d y=%d w=%d h=%d color=%08x last=%08x tick=%u count=%u\n",
-                     apiName, x, y, w, h, color, lastAddress, g_schedulerTick, s_progressStripShapeTraceCount);
-    }
-    if (y >= 35 && y <= 130)
-        vm_net_trace("lcd_shape api=%s x=%d y=%d w=%d h=%d color=%08x last=%08x\n",
-                     apiName, x, y, w, h, color, lastAddress);
-#else
-    (void)apiName;
-    (void)x;
-    (void)y;
-    (void)w;
-    (void)h;
-    (void)color;
-#endif
-}
 
 static void vm_lcd_draw_line(int x0, int y0, int x1, int y1, u16 color)
 {
@@ -759,8 +476,6 @@ static void scheduler_normalize_startup_screen_state(void)
         uc_mem_read(MTK, Global_R9 + 0x5496, &hasLocalUpdate, 1);
         uc_mem_read(MTK, Global_R9 + 0x5494, &progress, 1);
         uc_mem_read(MTK, Global_R9 + 0x4cb6, &updateState, 1);
-        vm_net_trace("startup_screen obj=%08x state=%u updateObj=%08x hasLocalUpdate=%u progress=%u updateState=%u imageTable=%08x idx=%d,%d tick=%u\n",
-                     debugUiObj, state, updateObj, hasLocalUpdate, progress, updateState, imageTable, imageIndexA, imageIndexB, g_schedulerTick);
         g_lastStartupScreenState = state;
         g_lastStartupUpdateObj = updateObj;
         g_lastStartupProgress = progress;
@@ -774,63 +489,15 @@ static void scheduler_normalize_startup_screen_state(void)
         uc_mem_read(MTK, Global_R9 + 0x4cb6, &updateState, 1);
         if (progress != g_lastStartupProgress || updateState != g_lastStartupUpdateState)
         {
-            vm_net_trace("startup_progress progress=%u updateState=%u state=%u tick=%u\n", progress, updateState, state, g_schedulerTick);
             g_lastStartupProgress = progress;
             g_lastStartupUpdateState = updateState;
         }
     }
     if (state == 10 && updateObj == 0)
     {
-#if TRACE_STARTUP_UI
-        vm_net_trace("startup_state_waiting state=10 updateObj=0 tick=%u\n", g_schedulerTick);
-#endif
     }
 }
 
-static void scheduler_trace_startup_ui_object(const char *phase, u32 screenPtr)
-{
-#if TRACE_STARTUP_UI
-    u32 debugUiRoot = Global_R9 + 0x9928;
-    u32 debugUiObj = 0;
-    u32 imageTable = 0;
-    u32 item0 = 0;
-    u32 item1 = 0;
-    u32 item3 = 0;
-    short imageIndexA = 0;
-    short imageIndexB = 0;
-    u8 state = 0;
-    u32 entry0 = 0, entry4 = 0, entry8 = 0, entry12 = 0, entry16 = 0, entry20 = 0, entry24 = 0;
-    if (screenPtr)
-    {
-        uc_mem_read(MTK, screenPtr + 0x00, &entry0, 4);
-        uc_mem_read(MTK, screenPtr + 0x04, &entry4, 4);
-        uc_mem_read(MTK, screenPtr + 0x08, &entry8, 4);
-        uc_mem_read(MTK, screenPtr + 0x0c, &entry12, 4);
-        uc_mem_read(MTK, screenPtr + 0x10, &entry16, 4);
-        uc_mem_read(MTK, screenPtr + 0x14, &entry20, 4);
-        uc_mem_read(MTK, screenPtr + 0x18, &entry24, 4);
-    }
-    uc_mem_read(MTK, debugUiRoot + 0x10, &debugUiObj, 4);
-    if (debugUiObj == 0)
-        return;
-    uc_mem_read(MTK, debugUiObj + 0x50, &imageTable, 4);
-    uc_mem_read(MTK, debugUiObj + 0x34, &imageIndexA, 2);
-    uc_mem_read(MTK, debugUiObj + 0x36, &imageIndexB, 2);
-    uc_mem_read(MTK, debugUiObj + 0x3d, &state, 1);
-    if (imageTable)
-    {
-        uc_mem_read(MTK, imageTable + 0 * 4, &item0, 4);
-        uc_mem_read(MTK, imageTable + 1 * 4, &item1, 4);
-        uc_mem_read(MTK, imageTable + 3 * 4, &item3, 4);
-    }
-    vm_net_trace("startup_ui %s screen=%08x table=%08x,%08x,%08x,%08x,%08x,%08x,%08x obj=%08x state=%u imageTable=%08x idx=%d,%d items=%08x,%08x,%08x\n",
-                 phase, screenPtr, entry0, entry4, entry8, entry12, entry16, entry20, entry24,
-                 debugUiObj, state, imageTable, imageIndexA, imageIndexB, item0, item1, item3);
-#else
-    (void)phase;
-    (void)screenPtr;
-#endif
-}
 
 static uc_err vm_emu_start(u32 begin, u32 until);
 static bool vm_is_pool_entry(u32 entry);
@@ -1069,8 +736,6 @@ static void vm_restore_main_r9_for_rom_code(u32 pc)
     if (s_restoreMainR9TraceCount < 64)
     {
         ++s_restoreMainR9TraceCount;
-        vm_net_trace("main_r9_restore pc=%08x r9=%08x -> %08x last=%08x tick=%u count=%u\n",
-                     normalizedPc, currentR9, Global_R9, lastAddress, g_schedulerTick, s_restoreMainR9TraceCount);
     }
 }
 
@@ -1295,29 +960,6 @@ static u32 scheduler_count_active_net_tasks(void)
     return active;
 }
 
-static void scheduler_trace_net_task_slots(const char *label)
-{
-    char line[512];
-    int pos = snprintf(line, sizeof(line), "net_task_slots label=%s tick=%u",
-                       label ? label : "?", g_schedulerTick);
-    for (u32 i = 0; i < VM_SCHED_MAX_NET_TASKS && pos > 0 && pos < (int)sizeof(line); ++i)
-    {
-        if (!g_netTasks[i].active)
-            continue;
-        pos += snprintf(line + pos, sizeof(line) - (size_t)pos,
-                        " slot%u[e=%u d=%u r1=%08x cb=%08x ctx=%08x]",
-                        i,
-                        g_netTasks[i].eventType,
-                        g_netTasks[i].delayTicks,
-                        g_netTasks[i].r1,
-                        g_netTasks[i].callback,
-                        g_netTasks[i].context);
-    }
-    if (pos > 0 && pos < (int)sizeof(line) - 1)
-        line[pos++] = '\n';
-    line[(pos > 0 && pos < (int)sizeof(line)) ? pos : (int)sizeof(line) - 1] = '\0';
-    vm_net_trace("%s", line);
-}
 
 static void scheduler_queue_net_event(u32 eventType, u32 r0, u32 r1, u32 r2, u32 callback, u32 context)
 {
@@ -1326,8 +968,6 @@ static void scheduler_queue_net_event(u32 eventType, u32 r0, u32 r1, u32 r2, u32
     {
         if (g_netTasks[i].active && g_netTasks[i].eventType == eventType && g_netTasks[i].r0 == r0 && g_netTasks[i].r1 == r1 && g_netTasks[i].r2 == r2 && g_netTasks[i].callback == callback && g_netTasks[i].context == context)
         {
-            vm_net_trace("queue_event_duplicate slot=%u event=%u r0=%08x r1=%08x r2=%08x cb=%08x ctx=%08x tick=%u pending=%u dispatchDepth=%d dispatchSlot=%d\n",
-                         i, eventType, r0, r1, r2, callback, context, g_schedulerTick, activeBefore, g_netTaskDispatchDepth, g_netTaskDispatchSlot);
             return;
         }
     }
@@ -1360,22 +1000,13 @@ static void scheduler_queue_net_event(u32 eventType, u32 r0, u32 r1, u32 r2, u32
                     memcpy(&bufferPtr, g_netTasks[i].downloadSnapshot + 0x14, sizeof(bufferPtr));
                     memcpy(&received, g_netTasks[i].downloadSnapshot + 0x18, sizeof(received));
                     memcpy(&capacity, g_netTasks[i].downloadSnapshot + 0x28, sizeof(capacity));
-                    vm_net_trace("queue_download_snapshot state=%u buffer=%08x received=%u capacity=%u base=%08x\n",
-                                 g_netTasks[i].downloadSnapshotState, bufferPtr, received, capacity, downloadBase);
                 }
             }
             DEBUG_PRINT("[probe_net] queue event=%u r0=%x r1=%x r2=%x cb=%x ctx=%x tick=%u last=%x\n", eventType, r0, r1, r2, callback, context, g_schedulerTick, lastAddress);
-            vm_net_trace("queue_event slot=%u event=%u r0=%08x r1=%08x r2=%08x cb=%08x ctx=%08x tick=%u last=%08x pending_before=%u pending_after=%u dispatchDepth=%d dispatchSlot=%d\n",
-                         i, eventType, r0, r1, r2, callback, context, g_schedulerTick, lastAddress, activeBefore, activeBefore + 1, g_netTaskDispatchDepth, g_netTaskDispatchSlot);
             if (g_netTaskDispatchDepth > 0 && g_netTaskDispatchSlot >= 0 && (int)i <= g_netTaskDispatchSlot)
-                vm_net_trace("queue_event_deferred_next_tick slot=%u currentSlot=%d tick=%u\n", i, g_netTaskDispatchSlot, g_schedulerTick);
-            scheduler_trace_net_task_slots("after_queue");
             return;
         }
     }
-    vm_net_trace("queue_event_drop_full event=%u r0=%08x r1=%08x r2=%08x cb=%08x ctx=%08x tick=%u pending=%u\n",
-                 eventType, r0, r1, r2, callback, context, g_schedulerTick, activeBefore);
-    scheduler_trace_net_task_slots("drop_full");
 }
 
 static void scheduler_queue_net_task(u32 r0, u32 r1, u32 callback, u32 context)
@@ -1427,24 +1058,16 @@ static void scheduler_queue_send_ready_for_active_channels(const char *reason)
         {
             if (businessFastPath && pending->delayTicks != 0)
             {
-                vm_net_trace("queue_send_ready_accelerate reason=%s slot=%u connect=%u cb=%08x ctx=%08x oldDelay=%u tick=%u\n",
-                             reason ? reason : "?", i, channel->connectId, channel->callback, channel->context, pending->delayTicks, g_schedulerTick);
                 pending->delayTicks = 0;
             }
-            vm_net_trace("queue_send_ready_skip reason=%s slot=%u connect=%u cb=%08x ctx=%08x tick=%u\n",
-                         reason ? reason : "?", i, channel->connectId, channel->callback, channel->context, g_schedulerTick);
             if (businessFastPath && g_netTaskDispatchDepth > 0 && pending->delayTicks == 0)
                 g_netBusinessSendReadyDeferred = 1;
             if (businessFastPath && g_netTaskDispatchDepth == 0 && pending->delayTicks == 0)
             {
                 g_netBusinessSendReadyPostVm = 1;
-                vm_net_trace("queue_send_ready_post_vm reason=%s slot=%u connect=%u cb=%08x ctx=%08x tick=%u\n",
-                             reason ? reason : "?", i, channel->connectId, channel->callback, channel->context, g_schedulerTick);
             }
             continue;
         }
-        vm_net_trace("queue_send_ready reason=%s slot=%u connect=%u cb=%08x ctx=%08x tick=%u dispatchDepth=%d\n",
-                     reason ? reason : "?", i, channel->connectId, channel->callback, channel->context, g_schedulerTick, g_netTaskDispatchDepth);
         scheduler_queue_net_event(5, 0, 0, 0, channel->callback, channel->context);
         pending = scheduler_find_pending_net_event(5, channel->callback, channel->context);
         if (pending && businessFastPath)
@@ -1453,20 +1076,11 @@ static void scheduler_queue_send_ready_for_active_channels(const char *reason)
         if (businessFastPath && g_netTaskDispatchDepth > 0)
             g_netBusinessSendReadyDeferred = 1;
     }
-    if (activeChannels == 0)
-        vm_net_trace("queue_send_ready_miss reason=%s tick=%u\n", reason ? reason : "?", g_schedulerTick);
-    else if (queued == 0)
-        vm_net_trace("queue_send_ready_all_pending reason=%s active=%u tick=%u\n",
-                     reason ? reason : "?", activeChannels, g_schedulerTick);
-    else if (businessFastPath)
+    if (businessFastPath)
     {
-        vm_net_trace("queue_send_ready_business_fastpath reason=%s active=%u queued=%u tick=%u dispatchDepth=%d\n",
-                     reason ? reason : "?", activeChannels, queued, g_schedulerTick, g_netTaskDispatchDepth);
         if (g_netTaskDispatchDepth == 0)
         {
             g_netBusinessSendReadyPostVm = 1;
-            vm_net_trace("queue_send_ready_post_vm_business reason=%s active=%u queued=%u tick=%u\n",
-                         reason ? reason : "?", activeChannels, queued, g_schedulerTick);
         }
     }
 }
@@ -1476,12 +1090,8 @@ static uc_err scheduler_flush_post_vm_business_send_ready(const char *reason)
     if (!g_netBusinessSendReadyPostVm || g_netTaskDispatchDepth != 0)
         return UC_ERR_OK;
     g_netBusinessSendReadyPostVm = 0;
-    vm_net_trace("post_vm_net_flush reason=%s tick=%u pending=%u\n",
-                 reason ? reason : "?", g_schedulerTick, scheduler_count_active_net_tasks());
     uc_err err = scheduler_dispatch_net_tasks();
     if (err != UC_ERR_OK)
-        vm_net_trace("post_vm_net_flush_error reason=%s err=%u tick=%u\n",
-                     reason ? reason : "?", err, g_schedulerTick);
     return err;
 }
 
@@ -1493,351 +1103,28 @@ static uc_err scheduler_flush_login_tail42_if_needed(const char *reason)
     u32 wrapperFlush = 0;
     if (g_netCurrentObject)
         uc_mem_read(MTK, g_netCurrentObject + 0x2c, &wrapperFlush, 4);
-    vm_net_trace("login_tail42_flush reason=%s tick=%u pending=%u currentObj=%08x wrapperFlush=%08x\n",
-                 reason ? reason : "?", g_schedulerTick, scheduler_count_active_net_tasks(), g_netCurrentObject, wrapperFlush);
     if (!g_netCurrentObject || !wrapperFlush)
     {
-        vm_net_trace("login_tail42_flush_skip reason=%s tick=%u currentObj=%08x wrapperFlush=%08x\n",
-                     reason ? reason : "?", g_schedulerTick, g_netCurrentObject, wrapperFlush);
         return UC_ERR_OK;
     }
     uc_err err = vm_call4_preserve_regs_clear_stack_args(wrapperFlush, g_netCurrentObject, 0, 0, 0);
     if (err != UC_ERR_OK)
-        vm_net_trace("login_tail42_flush_error reason=%s err=%u tick=%u\n",
-                     reason ? reason : "?", err, g_schedulerTick);
     return err;
 }
 
-static void vm_net_trace_runtime_state(const char *label)
-{
-    u32 businessDispatch = 0;
-    u32 businessCtx = 0;
-    u32 sceneObj = 0;
-    u32 sceneVtable = 0;
-    u8 sceneResult = 0;
-    u8 sceneGate = 0;
-    u8 loadingFlagA = 0;
-    u8 loadingFlagB = 0;
-    u8 loadingFlagC = 0;
-    u16 sceneState = 0;
-    u16 loadingMode = 0;
 
-    uc_mem_read(MTK, Global_R9 + 21812, &businessDispatch, 4);
-    uc_mem_read(MTK, Global_R9 + 21804, &businessCtx, 4);
-    uc_mem_read(MTK, Global_R9 + 21676, &sceneObj, 4);
-    uc_mem_read(MTK, Global_R9 + 23673, &loadingFlagA, 1);
-    uc_mem_read(MTK, Global_R9 + 23674, &loadingFlagB, 1);
-    uc_mem_read(MTK, Global_R9 + 23675, &loadingFlagC, 1);
-    uc_mem_read(MTK, Global_R9 + 23682, &loadingMode, 2);
-    if (sceneObj)
-    {
-        uc_mem_read(MTK, sceneObj, &sceneVtable, 4);
-        uc_mem_read(MTK, sceneObj + 356, &sceneGate, 1);
-        uc_mem_read(MTK, sceneObj + 436, &sceneState, 2);
-        uc_mem_read(MTK, sceneObj + 1208, &sceneResult, 1);
-    }
 
-    vm_net_trace("runtime_state label=%s dispatch=%08x ctx=%08x sceneObj=%08x vtbl=%08x sceneGate=%u sceneState=%u sceneResult=%u loadFlags=%u,%u,%u loadMode=%u activeScreen=%08x currentThis=%08x module=%08x\n",
-                 label ? label : "?",
-                 businessDispatch,
-                 businessCtx,
-                 sceneObj,
-                 sceneVtable,
-                 sceneGate,
-                 sceneState,
-                 sceneResult,
-                 loadingFlagA,
-                 loadingFlagB,
-                 loadingFlagC,
-                 loadingMode,
-                 vmAddedScreen,
-                 g_currentScreenThis,
-                 g_currentScreenModuleBase);
-}
 
-static void vm_net_trace_enter_mode_gate(const char *label, u32 pc)
-{
-    u32 lr = 0;
-    u32 payMgr = 0;
-    u32 payFn0 = 0;
-    u32 payFn1 = 0;
-    u32 payFn2 = 0;
-    u32 flag21300 = 0;
-    u32 flag21312 = 0;
 
-    if (!Global_R9)
-        return;
 
-    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
-    (void)uc_mem_read(MTK, Global_R9 + 19848, &payMgr, 4);
-    if (payMgr)
-    {
-        (void)uc_mem_read(MTK, payMgr + 0, &payFn0, 4);
-        (void)uc_mem_read(MTK, payMgr + 4, &payFn1, 4);
-        (void)uc_mem_read(MTK, payMgr + 8, &payFn2, 4);
-    }
-    (void)uc_mem_read(MTK, Global_R9 + 21300, &flag21300, 1);
-    (void)uc_mem_read(MTK, Global_R9 + 21312, &flag21312, 4);
 
-    vm_net_trace("trace_enter_mode_gate label=%s pc=%08x lr=%08x last=%08x tick=%u"
-                 " payMgr=%08x payFn0=%08x payFn1=%08x payFn2=%08x"
-                 " flag21300=%u pending21312=%08x activeScreen=%08x currentThis=%08x\n",
-                 label ? label : "?",
-                 pc,
-                 lr,
-                 lastAddress,
-                 g_schedulerTick,
-                 payMgr,
-                 payFn0,
-                 payFn1,
-                 payFn2,
-                 flag21300,
-                 flag21312,
-                 vmAddedScreen,
-                 g_currentScreenThis);
-}
 
-static void vm_net_trace_enter_mode_gate_result(const char *label, u32 pc)
-{
-    u32 lr = 0;
-    u32 r0 = 0;
-    u32 payMgr = 0;
 
-    if (!Global_R9)
-        return;
-
-    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
-    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
-    (void)uc_mem_read(MTK, Global_R9 + 19848, &payMgr, 4);
-
-    vm_net_trace("trace_enter_mode_gate_result label=%s pc=%08x lr=%08x last=%08x tick=%u"
-                 " result=%08x payMgr=%08x activeScreen=%08x currentThis=%08x\n",
-                 label ? label : "?",
-                 pc,
-                 lr,
-                 lastAddress,
-                 g_schedulerTick,
-                 r0,
-                 payMgr,
-                 vmAddedScreen,
-                 g_currentScreenThis);
-}
-
-static void vm_net_trace_wpay_update_gate(const char *label, u32 pc)
-{
-    u32 lr = 0;
-    u32 r0 = 0;
-    u32 r4 = 0;
-    u32 cbMgr = 0;
-    u32 cb148 = 0;
-    u32 auxMgr = 0;
-    u32 auxCb356 = 0;
-    u32 auxCb360 = 0;
-    u32 flag23184 = 0;
-
-    if (!Global_R9)
-        return;
-
-    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
-    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
-    uc_reg_read(MTK, UC_ARM_REG_R4, &r4);
-    (void)uc_mem_read(MTK, Global_R9 + 19844, &cbMgr, 4);
-    if (cbMgr)
-        (void)uc_mem_read(MTK, cbMgr + 148, &cb148, 4);
-    (void)uc_mem_read(MTK, Global_R9 + 19824, &auxMgr, 4);
-    if (auxMgr)
-    {
-        (void)uc_mem_read(MTK, auxMgr + 356, &auxCb356, 4);
-        (void)uc_mem_read(MTK, auxMgr + 360, &auxCb360, 4);
-    }
-    (void)uc_mem_read(MTK, Global_R9 + 23184, &flag23184, 1);
-
-    vm_net_trace("trace_wpay_update_gate label=%s pc=%08x lr=%08x last=%08x tick=%u"
-                 " r0=%08x r4=%08x cbMgr=%08x cb148=%08x auxMgr=%08x auxCb356=%08x auxCb360=%08x"
-                 " flag23184=%u activeScreen=%08x currentThis=%08x\n",
-                 label ? label : "?",
-                 pc,
-                 lr,
-                 lastAddress,
-                 g_schedulerTick,
-                 r0,
-                 r4,
-                 cbMgr,
-                 cb148,
-                 auxMgr,
-                 auxCb356,
-                 auxCb360,
-                 flag23184,
-                 vmAddedScreen,
-                 g_currentScreenThis);
-}
-
-static void vm_net_trace_loading_flag_flow(const char *label, u32 pc, u32 lr, u32 arg0)
-{
-    u32 sceneObj = 0;
-    u8 loadingFlagA = 0;
-    u8 loadingFlagB = 0;
-    u8 loadingFlagC = 0;
-    u16 loadingMode = 0;
-    u8 sceneLoad0 = 0;
-    u8 sceneLoad4 = 0;
-    u8 sceneLoad5 = 0;
-    u8 sceneBusy = 0;
-    u8 sceneResult = 0;
-
-    if (!Global_R9)
-        return;
-
-    uc_mem_read(MTK, Global_R9 + 21676, &sceneObj, 4);
-    uc_mem_read(MTK, Global_R9 + 23673, &loadingFlagA, 1);
-    uc_mem_read(MTK, Global_R9 + 23674, &loadingFlagB, 1);
-    uc_mem_read(MTK, Global_R9 + 23675, &loadingFlagC, 1);
-    uc_mem_read(MTK, Global_R9 + 23682, &loadingMode, 2);
-
-    if (sceneObj)
-    {
-        uc_mem_read(MTK, sceneObj + 2400, &sceneLoad0, 1);
-        uc_mem_read(MTK, sceneObj + 2404, &sceneLoad4, 1);
-        uc_mem_read(MTK, sceneObj + 2405, &sceneLoad5, 1);
-        uc_mem_read(MTK, sceneObj + 2412, &sceneBusy, 1);
-        uc_mem_read(MTK, sceneObj + 1208, &sceneResult, 1);
-    }
-
-    vm_net_trace("trace_loading_flags label=%s pc=%08x lr=%08x arg0=%08x loadFlags=%u,%u,%u loadMode=%u sceneObj=%08x scene2400=%u scene2404=%u scene2405=%u scene2412=%u sceneResult=%u tick=%u last=%08x\n",
-                 label ? label : "?",
-                 pc,
-                 lr,
-                 arg0,
-                 loadingFlagA,
-                 loadingFlagB,
-                 loadingFlagC,
-                 loadingMode,
-                 sceneObj,
-                 sceneLoad0,
-                 sceneLoad4,
-                 sceneLoad5,
-                 sceneBusy,
-                 sceneResult,
-                 g_schedulerTick,
-                 lastAddress);
-}
-
-static void vm_net_trace_loading_flag_change_if_needed(u32 pc)
-{
-    static u8 s_prevA = 0;
-    static u8 s_prevB = 0;
-    static u8 s_prevC = 0;
-    static u16 s_prevMode = 0;
-    static u32 s_prevSceneObj = 0;
-    static int s_seen = 0;
-    u32 sceneObj = 0;
-    u32 lr = 0;
-    u8 loadingFlagA = 0;
-    u8 loadingFlagB = 0;
-    u8 loadingFlagC = 0;
-    u16 loadingMode = 0;
-
-    if (!Global_R9)
-        return;
-
-    uc_mem_read(MTK, Global_R9 + 21676, &sceneObj, 4);
-    uc_mem_read(MTK, Global_R9 + 23673, &loadingFlagA, 1);
-    uc_mem_read(MTK, Global_R9 + 23674, &loadingFlagB, 1);
-    uc_mem_read(MTK, Global_R9 + 23675, &loadingFlagC, 1);
-    uc_mem_read(MTK, Global_R9 + 23682, &loadingMode, 2);
-
-    if (!s_seen)
-    {
-        s_prevA = loadingFlagA;
-        s_prevB = loadingFlagB;
-        s_prevC = loadingFlagC;
-        s_prevMode = loadingMode;
-        s_prevSceneObj = sceneObj;
-        s_seen = 1;
-        return;
-    }
-
-    if (s_prevA == loadingFlagA &&
-        s_prevB == loadingFlagB &&
-        s_prevC == loadingFlagC &&
-        s_prevMode == loadingMode &&
-        s_prevSceneObj == sceneObj)
-        return;
-
-    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
-    vm_net_trace("trace_loading_flags_change pc=%08x lr=%08x prev=%u,%u,%u/%u/%08x now=%u,%u,%u/%u/%08x tick=%u last=%08x activeScreen=%08x currentThis=%08x\n",
-                 pc,
-                 lr,
-                 s_prevA,
-                 s_prevB,
-                 s_prevC,
-                 s_prevMode,
-                 s_prevSceneObj,
-                 loadingFlagA,
-                 loadingFlagB,
-                 loadingFlagC,
-                 loadingMode,
-                 sceneObj,
-                 g_schedulerTick,
-                 lastAddress,
-                 vmAddedScreen,
-                 g_currentScreenThis);
-    vm_net_trace_loading_flag_flow("change_watch", pc, lr, 0);
-
-    s_prevA = loadingFlagA;
-    s_prevB = loadingFlagB;
-    s_prevC = loadingFlagC;
-    s_prevMode = loadingMode;
-    s_prevSceneObj = sceneObj;
-}
-
-static void vm_net_trace_scene_tick_gate_change_if_needed(u32 pc)
-{
-    static u8 s_prev3 = 0;
-    static u8 s_prev4 = 0;
-    static int s_seen = 0;
-    u32 lr = 0;
-    u8 gate3 = 0;
-    u8 gate4 = 0;
-
-    if (!Global_R9)
-        return;
-
-    uc_mem_read(MTK, Global_R9 + 23655, &gate3, 1);
-    uc_mem_read(MTK, Global_R9 + 23656, &gate4, 1);
-
-    if (!s_seen)
-    {
-        s_prev3 = gate3;
-        s_prev4 = gate4;
-        s_seen = 1;
-        return;
-    }
-
-    if (s_prev3 == gate3 && s_prev4 == gate4)
-        return;
-
-    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
-    vm_net_trace("trace_scene_tick_gate_change pc=%08x lr=%08x prev=%u,%u now=%u,%u tick=%u last=%08x activeScreen=%08x currentThis=%08x\n",
-                 pc,
-                 lr,
-                 s_prev3,
-                 s_prev4,
-                 gate3,
-                 gate4,
-                 g_schedulerTick,
-                 lastAddress,
-                 vmAddedScreen,
-                 g_currentScreenThis);
-    s_prev3 = gate3;
-    s_prev4 = gate4;
-}
 
 static uc_err scheduler_dispatch_net_tasks(void)
 {
     u32 activeBefore = scheduler_count_active_net_tasks();
     if (activeBefore)
-        scheduler_trace_net_task_slots("dispatch_begin");
     for (u32 i = 0; i < VM_SCHED_MAX_NET_TASKS; ++i)
     {
         vm_net_task *task = &g_netTasks[i];
@@ -1856,96 +1143,50 @@ static uc_err scheduler_dispatch_net_tasks(void)
             u32 taskR2 = task->r2;
             u32 taskCallback = task->callback;
             u32 taskContext = task->context;
-            u32 activeModuleBase = 0;
             task->fired = 1;
             task->active = 0;
             g_netTaskDispatchDepth++;
             g_netTaskDispatchSlot = (int)i;
             DEBUG_PRINT("[probe_net_fire] event=%u r0=%x r1=%x r2=%x cb=%x ctx=%x tick=%u\n", taskEvent, taskR0, taskR1, taskR2, taskCallback, taskContext, g_schedulerTick);
-            vm_net_trace("fire_event slot=%u event=%u r0=%08x r1=%08x r2=%08x cb=%08x ctx=%08x tick=%u pending_after_pop=%u\n",
-                         i, taskEvent, taskR0, taskR1, taskR2, taskCallback, taskContext, g_schedulerTick, scheduler_count_active_net_tasks());
             if (taskEvent == 7)
             {
-                u32 netCb14 = 0;
-                u32 netCb44 = 0;
-                uc_mem_read(MTK, Global_R9 + 0x9588 + 0x14, &netCb14, 4);
-                uc_mem_read(MTK, Global_R9 + 0x9588 + 0x44, &netCb44, 4);
-                vm_net_trace("net_state_observe cb14=%08x cb44=%08x\n", netCb14, netCb44);
-                vm_net_trace_runtime_state("pre_data_event");
-                activeModuleBase = g_currentScreenModuleBase ? g_currentScreenModuleBase : vm_screen_stack_lookup_module_base(vmAddedScreen);
-                if (activeModuleBase)
-                    vm_net_trace_title_login_state("pre_data_event_05017509");
                 if (task->downloadSnapshotValid && task->downloadSnapshotState == 2)
                 {
                     u32 downloadBase = Global_R9 + 0x9584;
                     uc_mem_write(MTK, downloadBase, task->downloadSnapshot, sizeof(task->downloadSnapshot));
-                    vm_net_trace("restore_download_snapshot state=%u base=%08x\n", task->downloadSnapshotState, downloadBase);
                 }
             }
             uc_err err = vm_call4_preserve_regs_clear_stack_args(taskCallback, taskR0, taskR1, taskR2, taskEvent);
             g_netTaskDispatchDepth--;
             g_netTaskDispatchSlot = -1;
             if (err != UC_ERR_OK)
-                vm_net_trace("net_callback_error event=%u cb=%08x err=%u\n", taskEvent, taskCallback, err);
+                return err;
             if (taskEvent == 7)
             {
                 u8 updateFlags[4] = {0};
-                u8 hasLocalUpdate = 0;
                 u8 updateState = 0;
-                u8 downloadState = 0;
-                u8 updateIndex = 0;
-                u16 updateRemain = 0;
-                u16 updateDoneCount = 0;
-                u32 downloadReceived = 0;
-                u32 downloadTotal = 0;
                 uc_mem_read(MTK, Global_R9 + 0x954c + 0x10, updateFlags, sizeof(updateFlags));
-                uc_mem_read(MTK, Global_R9 + 0x954c + 0x8, &updateIndex, 1);
-                uc_mem_read(MTK, Global_R9 + 0x954c + 0x8, &updateRemain, 2);
-                uc_mem_read(MTK, Global_R9 + 0x954c + 0xa, &updateDoneCount, 2);
-                uc_mem_read(MTK, Global_R9 + 0x5496, &hasLocalUpdate, 1);
                 uc_mem_read(MTK, Global_R9 + 0x4cb6, &updateState, 1);
-                uc_mem_read(MTK, Global_R9 + 0x95e8, &downloadState, 1);
-                uc_mem_read(MTK, Global_R9 + 0x95e8 + 0x18, &downloadReceived, 4);
-                uc_mem_read(MTK, Global_R9 + 0x95e8 + 0x28, &downloadTotal, 4);
-                if (downloadState == 3 && updateFlags[0] == 0 && updateFlags[1] == 1 && updateFlags[2] == 1 && updateFlags[3] == 1)
-                {
-                    vm_net_trace("update_chunk_complete_observed flag=0 downloadState=3\n");
-                }
                 if (updateState == 2 && updateFlags[0] == 1 && updateFlags[1] == 1 && updateFlags[2] == 1 && updateFlags[3] == 1 &&
                     !g_netMockUpdateDelivered)
                 {
                     g_netMockUpdateDelivered = 1;
-                    vm_net_trace("startup_no_update_complete flags=1,1,1,1\n");
                 }
-                vm_net_trace_runtime_state("post_data_event");
-                if (activeModuleBase)
-                    vm_net_trace_title_login_state("post_data_event_05017509");
-                vm_net_trace("after_data_event updateState=%u downloadState=%u updateIndex=%u remain=%u done=%u received=%u total=%u hasLocalUpdate=%u flags=%u,%u,%u,%u\n",
-                             updateState, downloadState, updateIndex, updateRemain, updateDoneCount, downloadReceived, downloadTotal, hasLocalUpdate, updateFlags[0], updateFlags[1], updateFlags[2], updateFlags[3]);
             }
             if (err == UC_ERR_OK && g_netTaskDispatchDepth == 0 && g_netBusinessSendReadyPostVm)
             {
-                vm_net_trace("net_callback_post_vm_ready event=%u cb=%08x tick=%u pending=%u\n",
-                             taskEvent, taskCallback, g_schedulerTick, scheduler_count_active_net_tasks());
                 err = scheduler_flush_post_vm_business_send_ready("net_callback_return");
             }
             if (err == UC_ERR_OK && g_netTaskDispatchDepth == 0 && g_loginTail42FlushPending)
                 err = scheduler_flush_login_tail42_if_needed("net_callback_return");
-            if (g_netTasks[i].active)
-                vm_net_trace("fire_event_slot_reused slot=%u event=%u r1=%08x cb=%08x tick=%u\n",
-                             i, g_netTasks[i].eventType, g_netTasks[i].r1, g_netTasks[i].callback, g_schedulerTick);
             if (err != UC_ERR_OK)
                 return err;
         }
     }
-    if (scheduler_count_active_net_tasks())
-        scheduler_trace_net_task_slots("dispatch_end");
     if (g_netTaskDispatchDepth == 0 && g_netBusinessSendReadyDeferred && !g_netBusinessSendReadyRerun)
     {
         g_netBusinessSendReadyDeferred = 0;
         g_netBusinessSendReadyRerun = 1;
-        vm_net_trace("dispatch_rerun_business_send_ready tick=%u pending=%u\n",
-                     g_schedulerTick, scheduler_count_active_net_tasks());
         uc_err rerunErr = scheduler_dispatch_net_tasks();
         g_netBusinessSendReadyRerun = 0;
         if (rerunErr != UC_ERR_OK)
@@ -1999,8 +1240,6 @@ static uc_err scheduler_dispatch_tscreen_event(u32 tScreenEventEntry, u32 screen
         simulateTouchDrag = evt->r0 == MR_MOUSE_MOVE;
         simulateTouchX = evt->r1 & 0xffff;
         simulateTouchY = (evt->r1 >> 16) & 0xffff;
-        vm_net_trace("touch_dispatch entry=%08x screen=%08x type=%u x=%u y=%u path=tscreen\n",
-                     tScreenEventEntry, screenPtr, evt->r0, simulateTouchX, simulateTouchY);
         if (tScreenEventEntry == 0)
             return UC_ERR_OK;
 
@@ -2412,7 +1651,6 @@ void mouseEvent(int type, int x, int y)
     else if (y > 399)
         y = 399;
 
-    vm_net_trace("mouse_event type=%d x=%d y=%d\n", type, x, y);
     EnqueueVMEvent(VM_EVENT_TOUCHSCREEN, type, (y << 16) | x);
 }
 
@@ -2519,9 +1757,6 @@ void dumpCpuInfo()
     printf("r0:%x r1:%x r2:%x r3:%x r4:%x r5:%x r6:%x r7:%x r8:%x r9:%x\n", r0, r1, r2, r3, r4, r5, r6, r7, r8, r9);
     printf("msp:%x cpsr:%x(thumb:%x)(mode:%x) lr:%x pc:%x lastPc:%x irq_c(%x)\n", msp, cpsr, (cpsr & 0x20) > 0, cpsr & 0x1f, lr, pc, lastAddress, irq_nested_count);
     printf("------------\n");
-    vm_stdout_trace("r0:%x r1:%x r2:%x r3:%x r4:%x r5:%x r6:%x r7:%x r8:%x r9:%x\n", r0, r1, r2, r3, r4, r5, r6, r7, r8, r9);
-    vm_stdout_trace("msp:%x cpsr:%x(thumb:%x)(mode:%x) lr:%x pc:%x lastPc:%x irq_c(%x)\n", msp, cpsr, (cpsr & 0x20) > 0, cpsr & 0x1f, lr, pc, lastAddress, irq_nested_count);
-    vm_stdout_trace("------------\n");
 }
 
 u8 *SimpleRamMatch(u8 *start, u8 *end, u8 *matchStart, int matchLen)
@@ -2623,21 +1858,6 @@ static u32 vm_persist_write_file(const char *path, const u8 *buffer, u32 size)
     return (u32)writeLen;
 }
 
-static void vm_storage_trace(const char *fmt, ...)
-{
-    vm_trace_ensure_log_dir();
-
-    FILE *fp = fopen("logs/storage_trace.log", "ab");
-    if (fp == NULL)
-        return;
-    vm_trace_write_storage_session_marker(fp);
-
-    va_list args;
-    va_start(args, fmt);
-    vfprintf(fp, fmt, args);
-    va_end(args);
-    fclose(fp);
-}
 
 static u32 vm_nv_read(u32 reqPtr)
 {
@@ -2669,7 +1889,6 @@ static u32 vm_nv_read(u32 reqPtr)
     }
 
     DEBUG_PRINT("[call]vmDlFuncNvRead slot=%x size=%u read=%u\n", slot, size, readLen);
-    vm_storage_trace("nv_read req=%08x slot=%08x dst=%08x size=%u read=%u path=%s\n", reqPtr, slot, dst, size, readLen, path);
     return vm_set_call_result(0);
 }
 
@@ -2692,7 +1911,6 @@ static u32 vm_nv_write(u32 reqPtr)
     u32 savedLen = vm_persist_write_file(path, buffer, writeLen);
 
     DEBUG_PRINT("[call]vmDlFuncNvWrite slot=%x size=%u saved=%u\n", slot, size, savedLen);
-    vm_storage_trace("nv_write req=%08x slot=%08x src=%08x size=%u saved=%u path=%s\n", reqPtr, slot, src, size, savedLen, path);
     return vm_set_call_result(0);
 }
 
@@ -2703,7 +1921,6 @@ static u32 vm_sys_set_setting_profile(u32 profile)
     char path[160];
     vm_persist_build_path(path, sizeof(path), "sys_profile", 0);
     u32 savedLen = vm_persist_write_file(path, value, sizeof(value));
-    vm_storage_trace("sys_set_profile profile=%u saved=%u path=%s\n", profile, savedLen, path);
     return vm_set_call_result(0);
 }
 
@@ -2713,7 +1930,6 @@ static u32 vm_sys_get_setting_profile(void)
     char path[160];
     vm_persist_build_path(path, sizeof(path), "sys_profile", 0);
     u32 readLen = vm_persist_read_file(path, (u8 *)&profile, sizeof(profile));
-    vm_storage_trace("sys_get_profile profile=%u read=%u path=%s\n", profile, readLen, path);
     return vm_set_call_result(profile);
 }
 
@@ -2730,7 +1946,6 @@ static u32 vm_sys_get_setting_profile_name(u32 profile, u32 dst, u32 dstLen)
             len = dstLen;
         uc_mem_write(MTK, dst, name, len);
     }
-    vm_storage_trace("sys_get_profile_name profile=%u dst=%08x len=%u name=%s\n", profile, dst, dstLen, name);
     return vm_set_call_result(0);
 }
 
@@ -2815,7 +2030,6 @@ void RunArmProgram(void *param)
                             printf("TScreen init异常:%s\n", uc_strerror(p));
                             break;
                         }
-                        scheduler_trace_startup_ui_object("after_init", vmAddedScreen);
                     }
                     tScreenInitedPtr = vmAddedScreen;
                 }
@@ -2847,7 +2061,6 @@ void RunArmProgram(void *param)
                     screenStructNotifyLoadRes = 0;
                     if (tScreenResourceLoadEntry)
                     {
-                        vm_net_trace("tscreen_resource_load entry=%08x screen=%08x\n", tScreenResourceLoadEntry, vmAddedScreen);
                         uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
                         uc_reg_write(MTK, UC_ARM_REG_R0, &vmAddedScreen);
                         p = vm_emu_start(tScreenResourceLoadEntry, exitAddr);
@@ -2858,7 +2071,6 @@ void RunArmProgram(void *param)
                         }
                     }
                 }
-                scheduler_trace_startup_ui_object("before_render", vmAddedScreen);
                 uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
                 uc_reg_write(MTK, UC_ARM_REG_R0, &vmAddedScreen);
                 p = vm_emu_start(tScreenRenderEntry, exitAddr);
@@ -2895,8 +2107,6 @@ void RunArmProgram(void *param)
                     uc_mem_read(MTK, Global_R9 + 0x9588 + 0x28, &waitNet28, 4);
                     uc_mem_read(MTK, Global_R9 + 0x9588 + 0x30, &waitNet30, 4);
                     uc_mem_read(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &waitNextScreen, 4);
-                    vm_net_trace("screen_wait_no_active updateState=%u nextScreen=%08x net28=%08x net30=%08x tick=%u\n",
-                                 waitUpdateState, waitNextScreen, waitNet28, waitNet30, g_schedulerTick);
                 }
                 SDL_Delay(100);
             }
@@ -2916,8 +2126,6 @@ void RunArmProgram(void *param)
                 {
                     screenThisPtr = screenFuncPtr - 0x18;
                     g_currentScreenModuleBase = screenModuleBase;
-                    vm_net_trace("screen_func_dynamic_this screen=%08x this=%08x moduleBase=%08x last=%08x\n",
-                                 screenFuncPtr, screenThisPtr, screenModuleBase, lastAddress);
                 }
                 uc_mem_read(MTK, screenFuncPtr, &screenInitEntry, 4);
                 uc_mem_read(MTK, screenFuncPtr + 4, &screenDestoryEntry, 4);
@@ -2927,18 +2135,6 @@ void RunArmProgram(void *param)
                 uc_mem_read(MTK, screenFuncPtr + 20, &screenRemuseEntry, 4);
                 uc_mem_read(MTK, screenFuncPtr + 24, &screenResouceLoadEntry, 4);
                 printf("[SCR_FUNC](init:%x,destory:%x,logic:%x,render:%x,pause:%x,remuse:%x,resLoad:%x)\n", screenInitEntry, screenDestoryEntry, screenLogicEntry, screenRenderEntry, screenPauseEntry, screenRemuseEntry, screenResouceLoadEntry);
-                vm_net_trace("screen_func_table screen=%08x this=%08x init=%08x destroy=%08x logic=%08x render=%08x pause=%08x resume=%08x resLoad=%08x tick=%u last=%08x\n",
-                             screenFuncPtr,
-                             screenThisPtr,
-                             screenInitEntry,
-                             screenDestoryEntry,
-                             screenLogicEntry,
-                             screenRenderEntry,
-                             screenPauseEntry,
-                             screenRemuseEntry,
-                             screenResouceLoadEntry,
-                             g_schedulerTick,
-                             lastAddress);
                 screenStructChange = 0;
                 g_activeScreenRemovedThisFrame = 0;
             }
@@ -2956,9 +2152,6 @@ void RunArmProgram(void *param)
                 else
                     p = UC_ERR_OK;
                 printf("ScreenResume Ok\n");
-                vm_stdout_trace("ScreenResume Ok\n");
-                vm_net_trace("screen_resume_existing screen=%08x this=%08x resume=%08x\n",
-                             screenFuncPtr, screenThisPtr, screenRemuseEntry);
                 g_screenResumeExisting = 0;
             }
             else
@@ -2968,7 +2161,6 @@ void RunArmProgram(void *param)
                 else
                     p = UC_ERR_OK;
                 printf("ScreenInit Ok\n");
-                vm_stdout_trace("ScreenInit Ok\n");
             }
             if (p == UC_ERR_OK)
             {
@@ -3001,8 +2193,6 @@ void RunArmProgram(void *param)
                         }
                         else
                         {
-                            vm_net_trace("screen_resource_load_skip_null screen=%08x this=%08x\n",
-                                         screenFuncPtr, screenThisPtr);
                         }
                     }
                     if (screenStructChange == 1 || g_screenRemovedWithoutNext)
@@ -3039,9 +2229,6 @@ void RunArmProgram(void *param)
                                 simulateTouchDrag = evt->r0 == MR_MOUSE_MOVE;
                                 simulateTouchX = evt->r1 & 0xffff;
                                 simulateTouchY = (evt->r1 >> 16) & 0xffff;
-                                vm_net_trace("touch_dispatch entry=%08x screen=%08x type=%u x=%u y=%u path=logic pool=%u\n",
-                                             screenLogicEntry, screenThisPtr, evt->r0, simulateTouchX, simulateTouchY,
-                                             vm_is_pool_entry(screenLogicEntry) ? 1 : 0);
                             }
                             if (screenThisPtr && vm_is_pool_entry(screenLogicEntry))
                             {
@@ -3135,8 +2322,6 @@ void RunArmProgram(void *param)
                 }
                 if (g_activeScreenRemovedThisFrame)
                 {
-                    vm_net_trace("screen_destroy_skip_removed screen=%08x destroy=%08x this=%08x\n",
-                                 screenFuncPtr, screenDestoryEntry, screenThisPtr);
                     g_activeScreenRemovedThisFrame = 0;
                 }
                 else
@@ -3152,8 +2337,6 @@ void RunArmProgram(void *param)
                     }
                     else
                     {
-                        vm_net_trace("screen_destroy_skip_null screen=%08x this=%08x\n",
-                                     screenFuncPtr, screenThisPtr);
                     }
                 }
             }
@@ -3207,7 +2390,7 @@ int main(int argc, char *args[])
 {
 
     uc_err err;
-    uc_hook trace;
+    uc_hook hookHandle;
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
 
@@ -3281,20 +2464,20 @@ int main(int argc, char *args[])
         return NULL;
     }
 
-    err = uc_hook_add(MTK, &trace, UC_HOOK_CODE, hookCodeCallBack, 0, 0, 0xFFFFFFFF);
+    err = uc_hook_add(MTK, &hookHandle, UC_HOOK_CODE, hookCodeCallBack, 0, 0, 0xFFFFFFFF);
     if (err == UC_ERR_OK)
         err = add_manager_code_hooks(MTK);
-    //    err = uc_hook_add(MTK, &trace, UC_HOOK_BLOCK, hookBlockCallBack, 0, 0, 0xFFFFFFFF);
+    //    err = uc_hook_add(MTK, &hookHandle, UC_HOOK_BLOCK, hookBlockCallBack, 0, 0, 0xFFFFFFFF);
 
-    uc_hook_add(MTK, &trace, UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, hookRamCallBack, 0, 0, 0xFFFFFFFF);
+    uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, hookRamCallBack, 0, 0, 0xFFFFFFFF);
 
-    err = uc_hook_add(MTK, &trace, UC_HOOK_MEM_READ_UNMAPPED, hookRamErrorBack, 2, 0, 0xFFFFFFFF);
-    err = uc_hook_add(MTK, &trace, UC_HOOK_MEM_WRITE_UNMAPPED, hookRamErrorBack, 3, 0, 0xFFFFFFFF);
-    err = uc_hook_add(MTK, &trace, UC_HOOK_MEM_FETCH_UNMAPPED, hookRamErrorBack, 4, 0, 0xFFFFFFFF);
+    err = uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_READ_UNMAPPED, hookRamErrorBack, 2, 0, 0xFFFFFFFF);
+    err = uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_WRITE_UNMAPPED, hookRamErrorBack, 3, 0, 0xFFFFFFFF);
+    err = uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_FETCH_UNMAPPED, hookRamErrorBack, 4, 0, 0xFFFFFFFF);
 
-    err = uc_hook_add(MTK, &trace, UC_HOOK_INTR, hookCpuIntr, NULL, 1, 0);
+    err = uc_hook_add(MTK, &hookHandle, UC_HOOK_INTR, hookCpuIntr, NULL, 1, 0);
 
-    err = uc_hook_add(MTK, &trace, UC_HOOK_INSN_INVALID, hookInsnInvalid, 4, 0, 0xFFFFFFFF);
+    err = uc_hook_add(MTK, &hookHandle, UC_HOOK_INSN_INVALID, hookInsnInvalid, 4, 0, 0xFFFFFFFF);
 
     if (err != UC_ERR_OK)
     {
@@ -3315,8 +2498,8 @@ int main(int argc, char *args[])
 
         changeTmp3 = VM_MANAGER_TABLE_ADDRESS;
         uc_mem_write(MTK, VM_Manager_Table_ADDRESS + 8, &changeTmp3, 4); // vmManager函数表地址
-        changeTmp3 = VM_LOG_TRACE_ADDRESS;
-        uc_mem_write(MTK, VM_Manager_Table_ADDRESS + 12, &changeTmp3, 4); // vm_log_trace函数地址
+        changeTmp3 = VM_LOG_NOOP_ADDRESS;
+        uc_mem_write(MTK, VM_Manager_Table_ADDRESS + 12, &changeTmp3, 4);
         changeTmp3 = VM_CURR_APP_INFO_ADDRESS;
         uc_mem_write(MTK, VM_Manager_Table_ADDRESS + 16, &changeTmp3, 4); // vcurAppFileName全局变量地址
 
@@ -3463,7 +2646,6 @@ static bool hook_vm_manager_func(u32 address)
     else if (idx == 14)
     {
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        vm_net_trace("manager_init_net table=%08x last=%08x\n", tmp1, lastAddress);
         if (tmp1)
         {
             for (tmp2 = 0; tmp2 < 43; tmp2++)
@@ -3478,7 +2660,6 @@ static bool hook_vm_manager_func(u32 address)
     {
         tmp1 = VM_MANAGER_NETWORK_TABLE_ADDRESS;
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        vm_net_trace("manager_get_net table=%08x last=%08x\n", tmp1, lastAddress);
         DEBUG_PRINT("[call]vMGetNetManager\n");
     }
     else if (idx == 16)
@@ -3744,7 +2925,6 @@ static bool hook_vm_sys_manager_func(u32 address)
 ven_setting_getDefaultSIM(3, &v2, v1);
 if ( ven_util_getMccMnc((unsigned __int8)v2, &v4, &n2) )
 return 1;
-vm_log_trace("[coolbar] xxl: master sim get MCC %d, MNC %d", (unsigned __int16)v4, (unsigned __int16)n2);
 if ( !(_WORD)n2 || (unsigned __int16)n2 == 2 )
 return 2;
 if ( (unsigned __int16)n2 == 1 )
@@ -3847,7 +3027,6 @@ return 4;
         uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
         uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
         printf("[call]vMAssert(%s:%u, lr:%x, sp:%x, last:%x)\n", cbeTextString, line, lr, sp, lastAddress);
-        vm_net_trace("vMAssert file=%s line=%u lr=%08x sp=%08x last=%08x\n", cbeTextString, line, lr, sp, lastAddress);
         for (u32 off = 0; off < 0x80; off += 4)
         {
             u32 word = 0;
@@ -3858,7 +3037,6 @@ return 4;
                 (word >= 0x1000000 && word < 0x1100000) ||
                 (word >= ROM_ADDRESS && word < ROM_ADDRESS + 0x800000))
             {
-                vm_net_trace("vMAssert_stack off=%02x word=%08x\n", off, word);
             }
         }
         dumpCpuInfo();
@@ -4254,22 +3432,12 @@ return 4;
     }
     else if (idx == 91)
     {
-        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
-        vm_stdout_trace("manager_stub api=VmGetMixMenuLength idx=91 r0=%08x r1=%08x r2=%08x r3=%08x last=%08x tick=%u result=0\n",
-                        tmp1, tmp2, tmp3, tmp4, lastAddress, g_schedulerTick);
         vm_set_call_result(0);
     }
     else if (idx == 92)
     {
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
-        vm_stdout_trace("manager_stub api=VmGetMixMenudata idx=92 r0=%08x r1=%08x r2=%08x r3=%08x last=%08x tick=%u result=0\n",
-                        tmp1, tmp2, tmp3, tmp4, lastAddress, g_schedulerTick);
         vm_try_write_zero(tmp1, 32);
         vm_try_write_zero(tmp2, 32);
         vm_set_call_result(0);
@@ -4278,10 +3446,6 @@ return 4;
     {
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
-        vm_stdout_trace("manager_stub api=VmGetWpayCBMInfo idx=93 r0=%08x r1=%08x r2=%08x r3=%08x last=%08x tick=%u result=0\n",
-                        tmp1, tmp2, tmp3, tmp4, lastAddress, g_schedulerTick);
         vm_try_write_zero(tmp1, 32);
         vm_try_write_zero(tmp2, 32);
         vm_set_call_result(0);
@@ -4290,10 +3454,6 @@ return 4;
     {
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
-        vm_stdout_trace("manager_stub api=VMGetCurVerAllInfo idx=94 r0=%08x r1=%08x r2=%08x r3=%08x last=%08x tick=%u result=0\n",
-                        tmp1, tmp2, tmp3, tmp4, lastAddress, g_schedulerTick);
         vm_try_write_zero(tmp1, 32);
         vm_try_write_zero(tmp2, 32);
         vm_set_call_result(0);
@@ -4440,8 +3600,6 @@ static bool hook_vm_memory_manager_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         DEBUG_PRINT("[call]DF_Malloc_IN(%x,%x)\n", tmp1, tmp2);
         tmp3 = vm_malloc(tmp2);
-        vm_net_trace("mem_mgr idx=2 DF_Malloc_IN dst=%08x size=%u out=%08x last=%08x\n",
-                     tmp1, tmp2, tmp3, lastAddress);
         uc_mem_write(MTK, tmp1, &tmp3, 4);
         tmp1 = 1;
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
@@ -4471,8 +3629,6 @@ static bool hook_vm_memory_manager_func(u32 address)
     {
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-        vm_net_trace("mem_mgr idx=6 MF_MemoryBlock_Malloc block=%08x size=%u last=%08x\n",
-                     tmp1, tmp2, lastAddress);
         vm_MF_MemoryBlock_Malloc(tmp1, tmp2);
         DEBUG_PRINT("[call]MF_MemoryBlock_Malloc(%x,%x)\n", tmp1, tmp2);
     }
@@ -4654,8 +3810,6 @@ static bool hook_vm_manager_lcd_func(u32 address)
         vm_readStringGbkByReg(UC_ARM_REG_R0, cbeTextString);
         int x = vm_lcd_coord_from_reg(tmp2);
         int y = vm_lcd_coord_from_reg(tmp3);
-        // vm_trace_lcd_text("vMDrawString", idx, tmp1, x, y, (u16)tmp4, cbeTextString);
-        // vm_trace_lcd_text_call("vMDrawString", idx, tmp1, tmp1, tmp2, tmp3, tmp4, tmp5, x, y, (u16)tmp4, cbeTextString);
         vm_lcd_draw_current_string(cbeTextString, x, y, (u16)tmp4);
         vm_lcd_sync_string_to_vm(cbeTextString, x, y);
         tmp1 = 1;
@@ -4675,8 +3829,6 @@ static bool hook_vm_manager_lcd_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
         int x = vm_lcd_coord_from_reg(tmp2);
         int y = vm_lcd_coord_from_reg(tmp3);
-        // vm_trace_lcd_text("vMDrawStringEx", idx, tmp1, x, y, color, cbeTextString);
-        // vm_trace_lcd_text_call("vMDrawStringEx", idx, tmp1, tmp1, tmp2, tmp3, color, tmp4, x, y, color, cbeTextString);
 
         vm_lcd_draw_current_string(cbeTextString, x, y, color);
         vm_lcd_sync_string_to_vm(cbeTextString, x, y);
@@ -4696,8 +3848,6 @@ static bool hook_vm_manager_lcd_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
         int x = vm_lcd_coord_from_reg(tmp2);
         int y = vm_lcd_coord_from_reg(tmp3);
-        vm_trace_lcd_text("vMShowStringClipAlign", idx, tmp1, x, y, color, cbeTextString);
-        vm_trace_lcd_text_call("vMShowStringClipAlign", idx, tmp1, r0, tmp1, tmp2, tmp3, tmp4, x, y, color, cbeTextString);
         vm_lcd_draw_current_string(cbeTextString, x, y, color);
         vm_lcd_sync_string_to_vm(cbeTextString, x, y);
         vm_set_call_result(1);
@@ -4715,8 +3865,6 @@ static bool hook_vm_manager_lcd_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
         int x = vm_lcd_coord_from_reg(tmp2);
         int y = vm_lcd_coord_from_reg(tmp3);
-        vm_trace_lcd_text("vMShowStringClip", idx, tmp1, x, y, color, cbeTextString);
-        vm_trace_lcd_text_call("vMShowStringClip", idx, tmp1, r0, tmp1, tmp2, tmp3, tmp4, x, y, color, cbeTextString);
         vm_lcd_draw_current_string(cbeTextString, x, y, color);
         vm_lcd_sync_string_to_vm(cbeTextString, x, y);
         vm_set_call_result(1);
@@ -4734,8 +3882,6 @@ static bool hook_vm_manager_lcd_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
         int x = vm_lcd_coord_from_reg(tmp2);
         int y = vm_lcd_coord_from_reg(tmp3);
-        vm_trace_lcd_text("vMShowStringRect", idx, tmp1, x, y, color, cbeTextString);
-        vm_trace_lcd_text_call("vMShowStringRect", idx, tmp1, r0, tmp1, tmp2, tmp3, tmp4, x, y, color, cbeTextString);
         vm_lcd_draw_current_string(cbeTextString, x, y, color);
         vm_lcd_sync_string_to_vm(cbeTextString, x, y);
         vm_set_call_result(1);
@@ -4753,7 +3899,6 @@ static bool hook_vm_manager_lcd_func(u32 address)
         int y0 = vm_lcd_coord_from_reg(tmp2);
         int x1 = vm_lcd_coord_from_reg(tmp3);
         int y1 = vm_lcd_coord_from_reg(tmp4);
-        vm_trace_lcd_shape("vMDrawLine", x0, y0, x1, y1, color);
         vm_lcd_draw_line(x0, y0, x1, y1, color);
         int sx = x0 < x1 ? x0 : x1;
         int sy = y0 < y1 ? y0 : y1;
@@ -4772,7 +3917,6 @@ static bool hook_vm_manager_lcd_func(u32 address)
         int x1 = vm_lcd_coord_from_reg(tmp2);
         int y1 = vm_lcd_coord_from_reg(tmp2 >> 16);
         u16 color = (u16)tmp3;
-        vm_trace_lcd_shape("vMDrawLineEx", x0, y0, x1, y1, color);
         vm_lcd_draw_line(x0, y0, x1, y1, color);
         int sx = x0 < x1 ? x0 : x1;
         int sy = y0 < y1 ? y0 : y1;
@@ -4804,7 +3948,6 @@ static bool hook_vm_manager_lcd_func(u32 address)
             h = vm_lcd_coord_from_reg(rectH);
         }
         u16 color = (u16)rectColor;
-        vm_trace_lcd_shape("vMDrawRect", x, y, w, h, rectColor);
         if (vm_lcd_clip_rect(&x, &y, &w, &h, LCD_WIDTH, LCD_HEIGHT))
         {
             u16 *rowBuf = (u16 *)cbeTextString;
@@ -4861,7 +4004,6 @@ static bool hook_vm_manager_lcd_func(u32 address)
         int w = vm_lcd_coord_from_reg(tmp3);
         int h = vm_lcd_coord_from_reg(rectH);
         u16 color = (u16)rectColor;
-        vm_trace_lcd_shape("vMDrawRectEx", x, y, w, h, rectColor);
         if (vm_lcd_clip_rect(&x, &y, &w, &h, dstW, dstH))
         {
             u16 *rowBuf = (u16 *)cbeTextString;
@@ -4919,7 +4061,6 @@ static bool hook_vm_manager_lcd_func(u32 address)
             w = vm_lcd_coord_from_reg(tmp3);
             h = vm_lcd_coord_from_reg(fillH);
         }
-        vm_trace_lcd_shape("vMFillRect", x, y, w, h, fillColor);
         if (vm_lcd_clip_rect(&x, &y, &w, &h, LCD_WIDTH, LCD_HEIGHT))
         {
             u16 color = (u16)fillColor;
@@ -4951,7 +4092,6 @@ static bool hook_vm_manager_lcd_func(u32 address)
             int y = vm_lcd_coord_from_reg(tmp1);
             int w = vm_lcd_coord_from_reg(tmp2);
             int h = vm_lcd_coord_from_reg(tmp3);
-            vm_trace_lcd_shape("vMFillRectCompat", x, y, w, h, fillH);
             if (vm_lcd_clip_rect(&x, &y, &w, &h, LCD_WIDTH, LCD_HEIGHT))
             {
                 u16 color = (u16)fillH;
@@ -4982,7 +4122,6 @@ static bool hook_vm_manager_lcd_func(u32 address)
         int y = vm_lcd_coord_from_reg(tmp2);
         int w = vm_lcd_coord_from_reg(tmp3);
         int h = vm_lcd_coord_from_reg(fillH);
-        vm_trace_lcd_shape("vMFillRectEx", x, y, w, h, fillColor);
         if (vm_lcd_clip_rect(&x, &y, &w, &h, dstW, dstH))
         {
             u16 color = (u16)fillColor;
@@ -5663,8 +4802,8 @@ static bool hook_vm_manager_stdio_func(u32 address)
     }
     else if (idx == 5)
     {
-        printf("[call]vm_log_trace\n");
-        assert(0);
+        tmp1 = 0;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
     }
     else if (idx == 6)
     {
@@ -5951,8 +5090,6 @@ static bool hook_vm_manager_network_func(u32 address)
     uc_reg_read(MTK, UC_ARM_REG_R7, &netR7);
     uc_reg_read(MTK, UC_ARM_REG_LR, &netLr);
     DEBUG_PRINT("[probe_net_idx] idx=%u r0=%x r1=%x r2=%x r3=%x last=%x\n", idx, tmp1, tmp2, tmp3, tmp4, lastAddress);
-    vm_net_trace("net_idx idx=%u r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x r7=%08x lr=%08x last=%08x\n",
-                 idx, tmp1, tmp2, tmp3, tmp4, netR4, netR5, netR6, netR7, netLr, lastAddress);
     if (idx == 0)
     {
         g_netCurrentObject = netR4;
@@ -5962,7 +5099,6 @@ static bool hook_vm_manager_network_func(u32 address)
         if (tmp4)
             uc_mem_write(MTK, tmp4, &tmp5, 4);
         scheduler_register_net_channel(tmp5, tmp3, tmp4);
-        vm_net_trace("open_channel host=%08x type=%u cb=%08x ctx=%08x connect=%u last=%08x\n", tmp1, tmp2, tmp3, tmp4, tmp5, lastAddress);
         u8 netState = 1;
         uc_mem_write(MTK, Global_R9 + 0x9588 + 0x0c, &netState, 1);
         scheduler_queue_net_task(tmp1, tmp2, tmp3, tmp4);
@@ -5972,13 +5108,11 @@ static bool hook_vm_manager_network_func(u32 address)
     {
         if (netR4)
             g_netCurrentObject = netR4;
-        vm_net_trace("send_call connect=%u len=%u data=%08x r3=%08x last=%08x\n", tmp1, tmp2, tmp3, tmp4, lastAddress);
         vm_net_mock_on_send(tmp1, tmp3, tmp2);
         vm_set_call_result(tmp2);
     }
     else if (idx == 2)
     {
-        vm_net_trace("close_channel connect=%u last=%08x\n", tmp1, lastAddress);
         scheduler_unregister_net_channel(tmp1);
         u8 netState = 0;
         uc_mem_write(MTK, Global_R9 + 0x9588 + 0x0c, &netState, 1);
@@ -5998,19 +5132,16 @@ static bool hook_vm_manager_network_func(u32 address)
     }
     else if (idx == 6 || idx == 7 || idx == 18)
     {
-        vm_net_trace("open_channel_ex idx=%u r0=%08x r1=%08x cb=%08x ctx=%08x last=%08x\n", idx, tmp1, tmp2, tmp3, tmp4, lastAddress);
         scheduler_queue_net_task(tmp1, tmp2, tmp3, tmp4);
         vm_set_call_result(1);
     }
     else if (idx == 17)
     {
-        vm_net_trace("http_get_ex r0=%08x cb=%08x ctx=%08x last=%08x\n", tmp1, tmp2, tmp3, lastAddress);
         scheduler_queue_net_task(tmp1, 0, tmp2, tmp3);
         vm_set_call_result(1);
     }
     else if (idx == 4 || idx == 19 || idx == 20 || idx == 29 || idx == 30)
     {
-        vm_net_trace("net_success_stub idx=%u r0=%08x r1=%08x r2=%08x r3=%08x last=%08x\n", idx, tmp1, tmp2, tmp3, tmp4, lastAddress);
         vm_set_call_result(1);
     }
     else if (idx == 35)
@@ -6018,7 +5149,6 @@ static bool hook_vm_manager_network_func(u32 address)
         g_netUpLinkData = 0;
         g_netDownLinkData = 0;
         g_netMockResponseOffset = 0;
-        vm_net_trace("net_data_reset\n");
         vm_set_call_result(0);
     }
     else if (idx == 36)
@@ -6027,7 +5157,6 @@ static bool hook_vm_manager_network_func(u32 address)
             uc_mem_write(MTK, tmp1, &g_netUpLinkData, 4);
         if (tmp2)
             uc_mem_write(MTK, tmp2, &g_netDownLinkData, 4);
-        vm_net_trace("net_get_data up=%u down=%u upPtr=%08x downPtr=%08x\n", g_netUpLinkData, g_netDownLinkData, tmp1, tmp2);
         vm_set_call_result(g_netDownLinkData);
     }
     else if (idx == 5 || idx == 12 || idx == 13 || idx == 21 || idx == 24 || idx == 25 || idx == 33 || idx == 34 || idx == 37 || idx == 39 || idx == 41 || idx == 42)
@@ -6406,7 +5535,6 @@ static bool hook_vm_manager_billing_func(u32 address)
         {
             if (tmp2)
                 vm_set_var(tmp2, 0);
-            vm_net_trace("CDownGetFileNameByAppID appid=%u missing Wpay9990Ker42WqvgaV100.CBM -> 0\n", tmp1);
             vm_set_call_result(0);
         }
         else
@@ -6420,7 +5548,6 @@ static bool hook_vm_manager_billing_func(u32 address)
                 uc_mem_write(MTK, tmp3, &type, 1);
             if (tmp4)
                 uc_mem_write(MTK, tmp4, &version, 2);
-            vm_net_trace("CDownGetFileNameByAppID appid=%u nameOut=%08x typeOut=%08x verOut=%08x name=%08x version=%u\n", tmp1, tmp2, tmp3, tmp4, namePtr, version);
             vm_set_call_result(1);
         }
     }
@@ -6553,7 +5680,6 @@ static bool hook_vm_manager_ucs2_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2); // src
         vm_readStringUCS2ByReg(UC_ARM_REG_R1, cbeTextString);
         uc_mem_write(MTK, tmp1, cbeTextString, (strlen_utf16(cbeTextString) + 1) * 2);
-        vm_storage_trace("ucs2_strcpy dst=%08x src=%08x chars=%u lr=%08x\n", tmp1, tmp2, strlen_utf16(cbeTextString), lastAddress);
         vm_set_call_result(tmp1);
     }
     else if (idx == 3)
@@ -6574,7 +5700,6 @@ static bool hook_vm_manager_ucs2_func(u32 address)
             vm_readStringUCS2ByReg(UC_ARM_REG_R1, cbeTextString);
             u32 srcChars = strlen_utf16((u16 *)cbeTextString);
             uc_mem_write(MTK, tmp1 + dstChars * 2, cbeTextString, (srcChars + 1) * 2);
-            vm_storage_trace("ucs2_strcat dst=%08x src=%08x dstChars=%u srcChars=%u lr=%08x\n", tmp1, tmp2, dstChars, srcChars, lastAddress);
         }
         vm_set_call_result(tmp1);
     }
@@ -6583,7 +5708,6 @@ static bool hook_vm_manager_ucs2_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         vm_readStringByPtr(tmp2, cbeTextString);
-        vm_storage_trace("gbk_to_ucs2 dst=%08x src=%08x text=%s lr=%08x\n", tmp1, tmp2, cbeTextString, lastAddress);
         gbk_to_unicode(cbeTextString, sprintfBuff, mySizeOf(sprintfBuff));
         tmp3 = strlen_utf16((u16 *)sprintfBuff);
         uc_mem_write(MTK, tmp1, sprintfBuff, (tmp3 + 1) * 2);
@@ -6612,7 +5736,6 @@ static bool hook_vm_manager_ucs2_func(u32 address)
                     uc_mem_write(MTK, tmp1 + i * 2, &ch, 2);
             }
         }
-        vm_storage_trace("ucs2_strncpy dst=%08x src=%08x count=%u lr=%08x\n", tmp1, tmp2, tmp3, lastAddress);
         vm_set_call_result(tmp1);
     }
     else if (idx == 6)
@@ -6667,7 +5790,6 @@ static bool hook_vm_manager_screen_func(u32 address)
     if (idx == 0)
     {
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        vm_net_trace("screen_manager idx=0 change r0=%08x last=%08x\n", tmp1, lastAddress);
         uc_mem_write(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &tmp1, 4);
         tmp2 = 0;
         uc_mem_write(MTK, VM_SCREEN_isInQuit_ADDRESS, &tmp2, 4);
@@ -6683,8 +5805,6 @@ static bool hook_vm_manager_screen_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
         if (tmp1 != 0 && tmp1 != vmAddedScreen)
         {
-            vm_net_trace("screen_manager idx=2 change r0=%08x r1=%08x r2=%08x r3=%08x depth=%u active=%08x last=%08x\n",
-                         tmp1, tmp2, tmp3, tmp4, g_screenStackCount, vmAddedScreen, lastAddress);
             uc_mem_write(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &tmp1, 4);
             tmp2 = 0;
             uc_mem_write(MTK, VM_SCREEN_isInQuit_ADDRESS, &tmp2, 4);
@@ -6693,8 +5813,6 @@ static bool hook_vm_manager_screen_func(u32 address)
         }
         else
         {
-            vm_net_trace("screen_manager idx=2 same_current r0=%08x r1=%08x r2=%08x r3=%08x depth=%u active=%08x last=%08x\n",
-                         tmp1, tmp2, tmp3, tmp4, g_screenStackCount, vmAddedScreen, lastAddress);
             if (tmp1 != 0 &&
                 tmp1 == vmAddedScreen &&
                 lastAddress == 0x010182A6)
@@ -6709,8 +5827,6 @@ static bool hook_vm_manager_screen_func(u32 address)
                 uc_mem_write(MTK, VM_SCREEN_isInQuit_ADDRESS, &tmp2, 4);
                 screenStructChange = 1;
                 g_screenRemovedWithoutNext = 0;
-                vm_net_trace("screen_manager idx=2 same_current_rechange r0=%08x last=%08x\n",
-                             tmp1, lastAddress);
             }
         }
         vm_set_call_result(VM_SCREEN_isInQuit_ADDRESS);
@@ -6729,18 +5845,13 @@ static bool hook_vm_manager_screen_func(u32 address)
             u32 inferredModuleR9 = 0;
             if (vm_infer_battle_module_from_screen(tmp1, &inferredCodeBase, &inferredModuleR9))
             {
-                vm_net_trace("screen_manager idx=4 infer_battle_module screen=%08x codeBase=%08x loaderR9=%08x headerR9=%08x last=%08x evidence=Battle.cbm_screen_table_offsets,dynamic_cbm_file_read_guest_write\n",
-                             tmp1, inferredCodeBase, moduleBase, inferredModuleR9, lastAddress);
             }
         }
         vm_screen_stack_push(tmp1, moduleBase);
-        vm_net_trace("screen_manager idx=4 add r0=%08x depth=%u moduleBase=%08x last=%08x\n", tmp1, g_screenStackCount, moduleBase, lastAddress);
         if (moduleBase)
         {
             g_currentScreenThis = tmp1 - 0x18;
             g_currentScreenModuleBase = moduleBase;
-            vm_net_trace("screen_manager idx=4 module_context this=%08x r9=%08x last=%08x\n",
-                         g_currentScreenThis, g_currentScreenModuleBase, lastAddress);
         }
         u32 startupObj = 0;
         uc_mem_read(MTK, Global_R9 + 0x9928 + 0x10, &startupObj, 4);
@@ -6755,7 +5866,6 @@ static bool hook_vm_manager_screen_func(u32 address)
             uc_mem_write(MTK, VM_SCREEN_isInQuit_ADDRESS, &tmp2, 4);
             screenStructChange = 1;
             g_screenRemovedWithoutNext = 0;
-            vm_net_trace("screen_manager idx=4 promote_to_change screen=%08x last=%08x\n", tmp1, lastAddress);
         }
         vm_set_call_result(0);
     }
@@ -6770,7 +5880,6 @@ static bool hook_vm_manager_screen_func(u32 address)
          * this as a successful screen-manager query, so keep the permissive
          * result and use the stack only as debug state.
          */
-        vm_net_trace("screen_manager idx=5 query r0=%08x r1=%08x ret=1 depth=%u last=%08x\n", tmp1, tmp2, g_screenStackCount, lastAddress);
         vm_set_call_result(1);
     }
     else if (idx == 6)
@@ -6780,8 +5889,6 @@ static bool hook_vm_manager_screen_func(u32 address)
         tmp3 = 0;
         tmp5 = 0;
         tmp4 = vm_screen_stack_remove(tmp1, &tmp3, &tmp5) ? 1 : 0;
-        vm_net_trace("screen_manager idx=6 remove r0=%08x r1=%08x ret=%u newTop=%08x newTopModule=%08x depth=%u last=%08x\n",
-                     tmp1, tmp2, tmp4, tmp3, tmp5, g_screenStackCount, lastAddress);
         if (tmp4 && tmp1 == vmAddedScreen && tmp3)
         {
             g_activeScreenRemovedThisFrame = 1;
@@ -6794,16 +5901,12 @@ static bool hook_vm_manager_screen_func(u32 address)
             uc_mem_write(MTK, VM_SCREEN_isInQuit_ADDRESS, &isInQuit, 4);
             screenStructChange = 1;
             g_screenRemovedWithoutNext = 0;
-            vm_net_trace("screen_manager idx=6 promote_current_remove screen=%08x moduleBase=%08x depth=%u resume=%u last=%08x\n",
-                         tmp3, g_currentScreenModuleBase, g_screenStackCount, g_screenResumeExisting, lastAddress);
         }
         else if (tmp4 && tmp1 == vmAddedScreen)
         {
             g_activeScreenRemovedThisFrame = 1;
             vmAddedScreen = 0;
             g_screenRemovedWithoutNext = 1;
-            vm_net_trace("screen_manager idx=6 active_removed_wait depth=%u last=%08x\n",
-                         g_screenStackCount, lastAddress);
         }
         vm_set_call_result(tmp4);
     }
@@ -7279,8 +6382,6 @@ static bool hook_vm_manager_gameold_func(u32 address)
             uc_mem_read(MTK, screenPtr + 0x14, &entry20, 4);
             uc_mem_read(MTK, screenPtr + 0x18, &entry24, 4);
         }
-        vm_net_trace("screen_notify_load_res lr=%08x screen=%08x table=%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
-                     lr, screenPtr, entry0, entry4, entry8, entry12, entry16, entry20, entry24);
         screenStructNotifyLoadRes = 1;
         DEBUG_PRINT("[call]SCREEN_NotifyLoadResource(entry:0x%x)\n", tmp2);
     }
@@ -7518,8 +6619,8 @@ static bool hook_vm_manager_gameold_func(u32 address)
     }
     else if (idx == 138)
     {
-        printf("[call]vm_log_trace\n");
-        assert(0);
+        tmp1 = 0;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
     }
     else if (idx == 139)
     {
@@ -8096,8 +7197,6 @@ static bool hook_vm_dl_pay_func(u32 address)
     uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
     uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
     uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
-    vm_net_trace("dl_wpay_call idx=%u r0=%08x r1=%08x lr=%08x last=%08x tick=%u result=%08x\n",
-                 idx, tmp1, tmp2, lr, lastAddress, g_schedulerTick, 0u);
     vm_set_call_result(0);
 
     uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
@@ -8622,10 +7721,6 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     if (vm_is_manager_func_stub_address((u32)address))
         return;
 
-    // vm_net_trace_loading_flag_change_if_needed((u32)address);
-    // vm_net_trace_scene_tick_gate_change_if_needed((u32)address);
-    // vm_net_trace_status_bar_state_if_needed((u32)address);
-
 #ifdef GDB_SERVER_SUPPORT
     tmp2 = gdbTarget.simulate_pc_count;
     if (tmp2 == 0)
@@ -8674,13 +7769,8 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     //     dumpCpuInfo();
     //     assert(0);
     // }
-    if (address == VM_LOG_TRACE_ADDRESS)
+    if (address == VM_LOG_NOOP_ADDRESS)
     {
-        // vm_log_trace only emits firmware-side diagnostics; keep it silent during normal emulation.
-        // vm_readStringByReg(UC_ARM_REG_R0, cbeTextString);
-        printf("[vm_log_trace]");
-        vm_sprintf();
-        // bx lr实现
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         vm_bx(tmp1);
     }

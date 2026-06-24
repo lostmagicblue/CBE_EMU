@@ -1,13 +1,5 @@
 #include "gifDecode.h"
 
-/* ==================== 调试宏 ==================== */
-#define GIF2BMP_DEBUG 0
-#if GIF2BMP_DEBUG
-#define LOG_TRACE(fmt, ...) printf(fmt "\n", ##__VA_ARGS__)
-#else
-#define LOG_TRACE(fmt, ...) ((void)0)
-#endif
-
 #define GIF_FAIL(fmt, ...)                                      \
     do                                                          \
     {                                                           \
@@ -81,7 +73,6 @@ static void gif_lkv2_Init(void)
     if (LKV2_Palette == NULL)
     {
         LKV2_Palette = (uint16_t *)alloc_mem(512);
-        LOG_TRACE("gif_lkv2_Init %p", (void *)LKV2_Palette);
     }
 }
 
@@ -404,7 +395,6 @@ int gifDecodeExt(uint8_t *data, GifOutput *output, int alloc_new, int *mallocSiz
                 loop_cnt++;
                 if (total_pixels <= 0)
                 {
-                    // LOG_TRACE("DECODE DONE: remaining=%d", total_pixels);
                     break;
                 }
 
@@ -502,9 +492,6 @@ int gifDecodeExt(uint8_t *data, GifOutput *output, int alloc_new, int *mallocSiz
                     }
                 }
             }
-
-            LOG_TRACE("--------------------GIF2BMP_Decode----------------:%p",
-                      (void *)output);
 
             /* 释放 LZW 字典内存 */
             free_mem(LKV2_OutCode);
