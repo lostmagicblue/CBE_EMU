@@ -115,7 +115,8 @@ int simulateTouchY = 0;
 typedef enum
 {
     VM_AUTOTEST_ACTION_TAP,
-    VM_AUTOTEST_ACTION_KEY
+    VM_AUTOTEST_ACTION_KEY,
+    VM_AUTOTEST_ACTION_HOLD_KEY
 } vm_autotest_action_type;
 
 typedef struct
@@ -131,6 +132,7 @@ static int g_autotestEnabled = 0;
 static u32 g_autotestStartMs = 0;
 static u32 g_autotestNextShotMs = 0;
 static u32 g_autotestShotIntervalMs = 1000;
+static u32 g_autotestMaxMs = 0;
 static u32 g_autotestShotIndex = 0;
 static vm_autotest_action g_autotestActions[64];
 static u32 g_autotestActionCount = 0;
@@ -256,7 +258,7 @@ static char g_netLastHandledSummary[512];
 static u32 g_battleSubtype8InfoDstWatchBase = 0;
 static u32 g_battleSubtype8InfoDstWatchLen = 0;
 static u32 g_battleSubtype8InfoDstWatchTick = 0;
-static u32 g_battleSubtype8InfoDstWriteTraceCount = 0;
+static u32 g_battleSubtype8InfoDstWriteLimitCount = 0;
 static u32 g_mockBattleOperateSessionSerial = 0;
 static u32 g_mockBattleOperateTurnCounter = 0;
 static u8 g_mockBattleOperateSessionArmed = 0;
@@ -754,7 +756,7 @@ static void vm_restore_r9_for_entry(u32 entry)
 
 static void vm_restore_main_r9_for_rom_code(u32 pc)
 {
-    static u32 s_restoreMainR9TraceCount = 0;
+    static u32 s_restoreMainR9LimitCount = 0;
     u32 currentR9 = 0;
     u32 normalizedPc = pc & ~1u;
 
@@ -764,9 +766,9 @@ static void vm_restore_main_r9_for_rom_code(u32 pc)
     if (currentR9 == Global_R9)
         return;
     uc_reg_write(MTK, UC_ARM_REG_R9, &Global_R9);
-    if (s_restoreMainR9TraceCount < 64)
+    if (s_restoreMainR9LimitCount < 64)
     {
-        ++s_restoreMainR9TraceCount;
+        ++s_restoreMainR9LimitCount;
     }
 }
 
@@ -1729,11 +1731,46 @@ static void vm_autotest_add_key(u32 atMs, int keySym)
     ++g_autotestActionCount;
 }
 
+static void vm_autotest_add_hold_key(u32 atMs, int keySym, u32 durationMs)
+{
+    if (g_autotestActionCount >= sizeof(g_autotestActions) / sizeof(g_autotestActions[0]))
+        return;
+    if (durationMs == 0)
+        durationMs = 80;
+    g_autotestActions[g_autotestActionCount].atMs = atMs;
+    g_autotestActions[g_autotestActionCount].type = VM_AUTOTEST_ACTION_HOLD_KEY;
+    g_autotestActions[g_autotestActionCount].a = keySym;
+    g_autotestActions[g_autotestActionCount].b = (int)durationMs;
+    g_autotestActions[g_autotestActionCount].fired = 0;
+    ++g_autotestActionCount;
+}
+
+static int vm_autotest_key_name_to_sym(const char *keyName, int *keySym)
+{
+    if (keyName == NULL || keySym == NULL)
+        return 0;
+    if (strlen(keyName) == 1)
+    {
+        *keySym = (int)keyName[0];
+        return 1;
+    }
+    if (strcmp(keyName, "enter") == 0)
+    {
+        *keySym = SDLK_RETURN;
+        return 1;
+    }
+    if (strcmp(keyName, "esc") == 0)
+    {
+        *keySym = SDLK_ESCAPE;
+        return 1;
+    }
+    return 0;
+}
+
 static void vm_autotest_parse_actions(const char *script)
 {
     char buffer[2048];
     char *token;
-    char *ctx = NULL;
     if (script == NULL || *script == 0)
         return;
     snprintf(buffer, sizeof(buffer), "%s", script);
@@ -1744,24 +1781,27 @@ static void vm_autotest_parse_actions(const char *script)
         char type[16] = {0};
         int a = 0;
         int b = 0;
+        u32 durationMs = 0;
         char keyName[32] = {0};
+        int keySym = 0;
         if (sscanf(token, "%u:%15[^:]:%d:%d", &atMs, type, &a, &b) == 4 &&
             strcmp(type, "tap") == 0)
         {
             vm_autotest_add_tap(atMs, a, b);
         }
+        else if (sscanf(token, "%u:%15[^:]:%31[^:]:%u", &atMs, type, keyName, &durationMs) == 4 &&
+                 strcmp(type, "hold") == 0 &&
+                 vm_autotest_key_name_to_sym(keyName, &keySym))
+        {
+            vm_autotest_add_hold_key(atMs, keySym, durationMs);
+        }
         else if (sscanf(token, "%u:%15[^:]:%31s", &atMs, type, keyName) == 3 &&
                  strcmp(type, "key") == 0)
         {
-            if (strlen(keyName) == 1)
-                vm_autotest_add_key(atMs, (int)keyName[0]);
-            else if (strcmp(keyName, "enter") == 0)
-                vm_autotest_add_key(atMs, SDLK_RETURN);
-            else if (strcmp(keyName, "esc") == 0)
-                vm_autotest_add_key(atMs, SDLK_ESCAPE);
+            if (vm_autotest_key_name_to_sym(keyName, &keySym))
+                vm_autotest_add_key(atMs, keySym);
         }
         token = strtok(NULL, ",;");
-        (void)ctx;
     }
 }
 
@@ -1769,11 +1809,14 @@ static void vm_autotest_init(int argc, char *args[])
 {
     const char *envAuto = getenv("CBE_AUTOTEST");
     const char *envShotMs = getenv("CBE_AUTOTEST_SHOT_MS");
+    const char *envMaxMs = getenv("CBE_AUTOTEST_MAX_MS");
     const char *envActions = getenv("CBE_AUTOTEST_ACTIONS");
     if (envAuto && strcmp(envAuto, "0") != 0)
         g_autotestEnabled = 1;
     if (envShotMs)
         vm_autotest_parse_u32(envShotMs, &g_autotestShotIntervalMs);
+    if (envMaxMs)
+        vm_autotest_parse_u32(envMaxMs, &g_autotestMaxMs);
     if (envActions)
         vm_autotest_parse_actions(envActions);
 
@@ -1783,6 +1826,8 @@ static void vm_autotest_init(int argc, char *args[])
             g_autotestEnabled = 1;
         else if (strncmp(args[i], "--shot-ms=", 10) == 0)
             vm_autotest_parse_u32(args[i] + 10, &g_autotestShotIntervalMs);
+        else if (strncmp(args[i], "--max-ms=", 9) == 0)
+            vm_autotest_parse_u32(args[i] + 9, &g_autotestMaxMs);
         else if (strncmp(args[i], "--actions=", 10) == 0)
             vm_autotest_parse_actions(args[i] + 10);
     }
@@ -1799,8 +1844,8 @@ static void vm_autotest_init(int argc, char *args[])
         mkdir("autotest/screens", 0755);
 #endif
         g_autotestStateFile = fopen("autotest/state.txt", "w");
-        printf("[info][autotest] enabled shot_ms=%u actions=%u\n",
-               g_autotestShotIntervalMs, g_autotestActionCount);
+        printf("[info][autotest] enabled shot_ms=%u max_ms=%u actions=%u\n",
+               g_autotestShotIntervalMs, g_autotestMaxMs, g_autotestActionCount);
     }
 }
 
@@ -1967,6 +2012,24 @@ static void vm_autotest_tick(void)
             g_autotestKeyReleaseMs = elapsed + 80;
             g_autotestKeyReleaseSym = action->a;
         }
+        else if (action->type == VM_AUTOTEST_ACTION_HOLD_KEY)
+        {
+            keyEvent(MR_KEY_PRESS, action->a);
+            g_autotestKeyReleasePending = 1;
+            g_autotestKeyReleaseMs = elapsed + (u32)action->b;
+            g_autotestKeyReleaseSym = action->a;
+        }
+    }
+
+    if (g_autotestMaxMs > 0 && elapsed >= g_autotestMaxMs)
+    {
+        vm_autotest_note("autotest_exit elapsed=%u max_ms=%u\n", elapsed, g_autotestMaxMs);
+        if (g_autotestStateFile != NULL)
+        {
+            fclose(g_autotestStateFile);
+            g_autotestStateFile = NULL;
+        }
+        exit(0);
     }
 }
 

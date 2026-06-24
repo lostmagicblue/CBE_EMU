@@ -12,6 +12,7 @@ Run from `bin` so game assets resolve:
 
 - `--autotest`: enable screenshots and scripted input.
 - `--shot-ms=N`: save one BMP every `N` milliseconds. Minimum is `100`.
+- `--max-ms=N`: exit the process after `N` milliseconds. This is intended for smoke tests because the emulator threads do not currently have a graceful stop signal.
 - `--actions=...`: comma or semicolon separated action list.
 
 ## Action Format
@@ -31,6 +32,15 @@ time_ms:key:enter
 time_ms:key:esc
 ```
 
+Hold key:
+
+```text
+time_ms:hold:w:2000
+time_ms:hold:s:2000
+time_ms:hold:a:2000
+time_ms:hold:d:2000
+```
+
 Useful key mapping:
 
 - `f`: OK
@@ -44,4 +54,3 @@ Useful key mapping:
 - Test state summary: `bin/autotest/state.txt`
 
 The state file is only produced when `--autotest` or `CBE_AUTOTEST` is enabled. It is a test artifact and must not be treated as protocol evidence; protocol conclusions belong in `docs/re/`.
-
