@@ -112,6 +112,36 @@ int simulateTouchUp = 0;
 int simulateTouchDrag = 0;
 int simulateTouchX = 0;
 int simulateTouchY = 0;
+typedef enum
+{
+    VM_AUTOTEST_ACTION_TAP,
+    VM_AUTOTEST_ACTION_KEY
+} vm_autotest_action_type;
+
+typedef struct
+{
+    u32 atMs;
+    vm_autotest_action_type type;
+    int a;
+    int b;
+    int fired;
+} vm_autotest_action;
+
+static int g_autotestEnabled = 0;
+static u32 g_autotestStartMs = 0;
+static u32 g_autotestNextShotMs = 0;
+static u32 g_autotestShotIntervalMs = 1000;
+static u32 g_autotestShotIndex = 0;
+static vm_autotest_action g_autotestActions[64];
+static u32 g_autotestActionCount = 0;
+static int g_autotestTapReleasePending = 0;
+static u32 g_autotestTapReleaseMs = 0;
+static int g_autotestTapReleaseX = 0;
+static int g_autotestTapReleaseY = 0;
+static int g_autotestKeyReleasePending = 0;
+static u32 g_autotestKeyReleaseMs = 0;
+static int g_autotestKeyReleaseSym = 0;
+static FILE *g_autotestStateFile = NULL;
 static int g_vmInputOpen = 0;
 static int g_vmInputPassword = 0;
 static u32 g_vmInputCallback = 0;
@@ -214,6 +244,7 @@ static u32 g_netDownLinkData = 0;
 static u32 g_netCurrentObject = 0;
 static const u32 VM_GAME_NET_BUSINESS_CALLBACK = 0x01012e4d;
 static u8 g_lastStartupScreenState = 0xff;
+static void vm_autotest_note(const char *fmt, ...);
 static u32 g_lastStartupUpdateObj = 0xffffffff;
 static u8 g_lastStartupProgress = 0xff;
 static u8 g_lastStartupUpdateState = 0xff;
@@ -963,6 +994,7 @@ static u32 scheduler_count_active_net_tasks(void)
 
 static void scheduler_queue_net_event(u32 eventType, u32 r0, u32 r1, u32 r2, u32 callback, u32 context)
 {
+    static u32 s_netQueueObserveCount = 0;
     u32 activeBefore = scheduler_count_active_net_tasks();
     for (u32 i = 0; i < VM_SCHED_MAX_NET_TASKS; ++i)
     {
@@ -1003,6 +1035,12 @@ static void scheduler_queue_net_event(u32 eventType, u32 r0, u32 r1, u32 r2, u32
                 }
             }
             DEBUG_PRINT("[probe_net] queue event=%u r0=%x r1=%x r2=%x cb=%x ctx=%x tick=%u last=%x\n", eventType, r0, r1, r2, callback, context, g_schedulerTick, lastAddress);
+            if (s_netQueueObserveCount < 100)
+            {
+                ++s_netQueueObserveCount;
+                vm_autotest_note("net_queue event=%u r0=%08x r1=%08x r2=%08x cb=%08x ctx=%08x\n",
+                                 eventType, r0, r1, r2, callback, context);
+            }
             if (g_netTaskDispatchDepth > 0 && g_netTaskDispatchSlot >= 0 && (int)i <= g_netTaskDispatchSlot)
             return;
         }
@@ -1654,6 +1692,284 @@ void mouseEvent(int type, int x, int y)
     EnqueueVMEvent(VM_EVENT_TOUCHSCREEN, type, (y << 16) | x);
 }
 
+static int vm_autotest_parse_u32(const char *text, u32 *value)
+{
+    char *end = NULL;
+    unsigned long parsed;
+    if (text == NULL || *text == 0 || value == NULL)
+        return 0;
+    parsed = strtoul(text, &end, 10);
+    if (end == text || *end != 0)
+        return 0;
+    *value = (u32)parsed;
+    return 1;
+}
+
+static void vm_autotest_add_tap(u32 atMs, int x, int y)
+{
+    if (g_autotestActionCount >= sizeof(g_autotestActions) / sizeof(g_autotestActions[0]))
+        return;
+    g_autotestActions[g_autotestActionCount].atMs = atMs;
+    g_autotestActions[g_autotestActionCount].type = VM_AUTOTEST_ACTION_TAP;
+    g_autotestActions[g_autotestActionCount].a = x;
+    g_autotestActions[g_autotestActionCount].b = y;
+    g_autotestActions[g_autotestActionCount].fired = 0;
+    ++g_autotestActionCount;
+}
+
+static void vm_autotest_add_key(u32 atMs, int keySym)
+{
+    if (g_autotestActionCount >= sizeof(g_autotestActions) / sizeof(g_autotestActions[0]))
+        return;
+    g_autotestActions[g_autotestActionCount].atMs = atMs;
+    g_autotestActions[g_autotestActionCount].type = VM_AUTOTEST_ACTION_KEY;
+    g_autotestActions[g_autotestActionCount].a = keySym;
+    g_autotestActions[g_autotestActionCount].b = 0;
+    g_autotestActions[g_autotestActionCount].fired = 0;
+    ++g_autotestActionCount;
+}
+
+static void vm_autotest_parse_actions(const char *script)
+{
+    char buffer[2048];
+    char *token;
+    char *ctx = NULL;
+    if (script == NULL || *script == 0)
+        return;
+    snprintf(buffer, sizeof(buffer), "%s", script);
+    token = strtok(buffer, ",;");
+    while (token)
+    {
+        u32 atMs = 0;
+        char type[16] = {0};
+        int a = 0;
+        int b = 0;
+        char keyName[32] = {0};
+        if (sscanf(token, "%u:%15[^:]:%d:%d", &atMs, type, &a, &b) == 4 &&
+            strcmp(type, "tap") == 0)
+        {
+            vm_autotest_add_tap(atMs, a, b);
+        }
+        else if (sscanf(token, "%u:%15[^:]:%31s", &atMs, type, keyName) == 3 &&
+                 strcmp(type, "key") == 0)
+        {
+            if (strlen(keyName) == 1)
+                vm_autotest_add_key(atMs, (int)keyName[0]);
+            else if (strcmp(keyName, "enter") == 0)
+                vm_autotest_add_key(atMs, SDLK_RETURN);
+            else if (strcmp(keyName, "esc") == 0)
+                vm_autotest_add_key(atMs, SDLK_ESCAPE);
+        }
+        token = strtok(NULL, ",;");
+        (void)ctx;
+    }
+}
+
+static void vm_autotest_init(int argc, char *args[])
+{
+    const char *envAuto = getenv("CBE_AUTOTEST");
+    const char *envShotMs = getenv("CBE_AUTOTEST_SHOT_MS");
+    const char *envActions = getenv("CBE_AUTOTEST_ACTIONS");
+    if (envAuto && strcmp(envAuto, "0") != 0)
+        g_autotestEnabled = 1;
+    if (envShotMs)
+        vm_autotest_parse_u32(envShotMs, &g_autotestShotIntervalMs);
+    if (envActions)
+        vm_autotest_parse_actions(envActions);
+
+    for (int i = 1; i < argc; ++i)
+    {
+        if (strcmp(args[i], "--autotest") == 0)
+            g_autotestEnabled = 1;
+        else if (strncmp(args[i], "--shot-ms=", 10) == 0)
+            vm_autotest_parse_u32(args[i] + 10, &g_autotestShotIntervalMs);
+        else if (strncmp(args[i], "--actions=", 10) == 0)
+            vm_autotest_parse_actions(args[i] + 10);
+    }
+
+    if (g_autotestShotIntervalMs < 100)
+        g_autotestShotIntervalMs = 100;
+    if (g_autotestEnabled)
+    {
+#ifdef _WIN32
+        _mkdir("autotest");
+        _mkdir("autotest\\screens");
+#else
+        mkdir("autotest", 0755);
+        mkdir("autotest/screens", 0755);
+#endif
+        g_autotestStateFile = fopen("autotest/state.txt", "w");
+        printf("[info][autotest] enabled shot_ms=%u actions=%u\n",
+               g_autotestShotIntervalMs, g_autotestActionCount);
+    }
+}
+
+static void vm_autotest_note(const char *fmt, ...)
+{
+    va_list args;
+    if (!g_autotestEnabled || g_autotestStateFile == NULL)
+        return;
+    va_start(args, fmt);
+    vfprintf(g_autotestStateFile, fmt, args);
+    va_end(args);
+    fflush(g_autotestStateFile);
+}
+
+static void vm_autotest_note_startup_pc(u32 pc)
+{
+    static u32 seenEntry = 0;
+    static u32 seenOpenPrep = 0;
+    static u32 seenOpenCall = 0;
+    static u32 seenOpenResult = 0;
+    static u32 seenVersionRequest = 0;
+    static u32 seenNetCallback = 0;
+    static u32 seenTitleLoginParser = 0;
+    static u32 seenTitleLoginDispatch = 0;
+    static u32 seenTitleRoleListInit = 0;
+    static u32 seenTitleRoleManageInit = 0;
+    static u32 seenTitleRoleNetwork = 0;
+    u32 startupState = 0;
+    u32 netTask = 0;
+    u16 waitTicks = 0;
+    u32 startupObj = 0;
+
+    if (!g_autotestEnabled || Global_R9 == 0)
+        return;
+    if (pc != 0x0103A77C && pc != 0x0103A7AC && pc != 0x0103A7BA &&
+        pc != 0x0103A7C2 && pc != 0x0103B2D6 && pc != 0x0103B95A &&
+        pc != 0x050816DC && pc != 0x05082D80 && pc != 0x05082A50 &&
+        pc != 0x05082DBA && pc != 0x05083AD2 && pc != 0x050853EC)
+        return;
+    uc_mem_read(MTK, Global_R9 + 39224, &startupObj, 4);
+    if (startupObj)
+    {
+        uc_mem_read(MTK, startupObj + 61, &startupState, 1);
+        uc_mem_read(MTK, startupObj + 28, &netTask, 4);
+        uc_mem_read(MTK, startupObj + 32, &waitTicks, 2);
+    }
+
+    if (pc == 0x0103A77C && !seenEntry)
+    {
+        seenEntry = 1;
+        vm_autotest_note("startup_async_entry state=%u net_task=%08x wait=%u\n", startupState, netTask, waitTicks);
+    }
+    else if (pc == 0x0103A7AC && !seenOpenPrep)
+    {
+        seenOpenPrep = 1;
+        vm_autotest_note("startup_async_open_prep state=%u net_task=%08x wait=%u\n", startupState, netTask, waitTicks);
+    }
+    else if (pc == 0x0103A7BA && !seenOpenCall)
+    {
+        seenOpenCall = 1;
+        vm_autotest_note("startup_async_open_call state=%u net_task=%08x wait=%u\n", startupState, netTask, waitTicks);
+    }
+    else if (pc == 0x0103A7C2 && !seenOpenResult)
+    {
+        seenOpenResult = 1;
+        vm_autotest_note("startup_async_open_result state=%u net_task=%08x wait=%u\n", startupState, netTask, waitTicks);
+    }
+    else if (pc == 0x0103B2D6 && !seenVersionRequest)
+    {
+        seenVersionRequest = 1;
+        vm_autotest_note("send_version_update_request state=%u net_task=%08x wait=%u\n", startupState, netTask, waitTicks);
+    }
+    else if (pc == 0x0103B95A && !seenNetCallback)
+    {
+        seenNetCallback = 1;
+        vm_autotest_note("startup_net_callback state=%u net_task=%08x wait=%u\n", startupState, netTask, waitTicks);
+    }
+    else if (pc == 0x050816DC && !seenTitleLoginParser)
+    {
+        seenTitleLoginParser = 1;
+        vm_autotest_note("title_login_response_parser pc=%08x\n", pc);
+    }
+    else if ((pc == 0x05082D80 || pc == 0x05082A50) && !seenTitleLoginDispatch)
+    {
+        seenTitleLoginDispatch = 1;
+        vm_autotest_note("title_login_dispatch pc=%08x\n", pc);
+    }
+    else if (pc == 0x05082DBA && !seenTitleRoleListInit)
+    {
+        seenTitleRoleListInit = 1;
+        vm_autotest_note("title_role_list_init pc=%08x\n", pc);
+    }
+    else if (pc == 0x05083AD2 && !seenTitleRoleManageInit)
+    {
+        seenTitleRoleManageInit = 1;
+        vm_autotest_note("title_role_manage_init pc=%08x\n", pc);
+    }
+    else if (pc == 0x050853EC && !seenTitleRoleNetwork)
+    {
+        seenTitleRoleNetwork = 1;
+        vm_autotest_note("title_role_manage_network pc=%08x\n", pc);
+    }
+}
+
+static void vm_autotest_save_screenshot(u32 elapsedMs)
+{
+    char path[128];
+    SDL_Surface *sfc = SDL_GetWindowSurface(window);
+    if (!sfc)
+        return;
+    snprintf(path, sizeof(path), "autotest/screens/%06u_%08u.bmp",
+             g_autotestShotIndex++, elapsedMs);
+    if (SDL_SaveBMP(sfc, path) != 0)
+        printf("[warn][autotest] save_screenshot_failed path=%s err=%s\n", path, SDL_GetError());
+}
+
+static void vm_autotest_tick(void)
+{
+    if (!g_autotestEnabled)
+        return;
+    u32 now = SDL_GetTicks();
+    if (g_autotestStartMs == 0)
+    {
+        g_autotestStartMs = now;
+        g_autotestNextShotMs = 0;
+    }
+    u32 elapsed = now - g_autotestStartMs;
+
+    if (elapsed >= g_autotestNextShotMs)
+    {
+        vm_autotest_save_screenshot(elapsed);
+        g_autotestNextShotMs = elapsed + g_autotestShotIntervalMs;
+    }
+
+    if (g_autotestTapReleasePending && elapsed >= g_autotestTapReleaseMs)
+    {
+        mouseEvent(MR_MOUSE_UP, g_autotestTapReleaseX, g_autotestTapReleaseY);
+        g_autotestTapReleasePending = 0;
+    }
+    if (g_autotestKeyReleasePending && elapsed >= g_autotestKeyReleaseMs)
+    {
+        keyEvent(MR_KEY_RELEASE, g_autotestKeyReleaseSym);
+        g_autotestKeyReleasePending = 0;
+    }
+
+    for (u32 i = 0; i < g_autotestActionCount; ++i)
+    {
+        vm_autotest_action *action = &g_autotestActions[i];
+        if (action->fired || elapsed < action->atMs)
+            continue;
+        action->fired = 1;
+        if (action->type == VM_AUTOTEST_ACTION_TAP)
+        {
+            mouseEvent(MR_MOUSE_DOWN, action->a, action->b);
+            g_autotestTapReleasePending = 1;
+            g_autotestTapReleaseMs = elapsed + 80;
+            g_autotestTapReleaseX = action->a;
+            g_autotestTapReleaseY = action->b;
+        }
+        else if (action->type == VM_AUTOTEST_ACTION_KEY)
+        {
+            keyEvent(MR_KEY_PRESS, action->a);
+            g_autotestKeyReleasePending = 1;
+            g_autotestKeyReleaseMs = elapsed + 80;
+            g_autotestKeyReleaseSym = action->a;
+        }
+    }
+}
+
 
 void loop()
 {
@@ -1716,11 +2032,15 @@ void loop()
                 break;
             }
         }
+        vm_autotest_tick();
+        SDL_Delay(5);
     }
     pthread_join(&EmuThread, &thread_ret);
     pthread_join(&MainUpdareThread, &thread_ret);
     if (SD_File_Handle != NULL)
         fclose(SD_File_Handle);
+    if (g_autotestStateFile != NULL)
+        fclose(g_autotestStateFile);
     SD_File_Handle = NULL;
 }
 
@@ -2393,6 +2713,7 @@ int main(int argc, char *args[])
     uc_hook hookHandle;
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
+    vm_autotest_init(argc, args);
 
     // SetConsoleOutputCP(CP_UTF8);
     // while(1);
@@ -5078,6 +5399,7 @@ static bool hook_vm_manager_network_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
     u32 netR4 = 0, netR5 = 0, netR6 = 0, netR7 = 0, netLr = 0;
+    static u32 s_netManagerObserveCount = 0;
 
     u32 idx = (address - VM_MANAGER_NETWORK_FUNC_LIST_ADDRESS) / 4;
     uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
@@ -5090,6 +5412,12 @@ static bool hook_vm_manager_network_func(u32 address)
     uc_reg_read(MTK, UC_ARM_REG_R7, &netR7);
     uc_reg_read(MTK, UC_ARM_REG_LR, &netLr);
     DEBUG_PRINT("[probe_net_idx] idx=%u r0=%x r1=%x r2=%x r3=%x last=%x\n", idx, tmp1, tmp2, tmp3, tmp4, lastAddress);
+    if (s_netManagerObserveCount < 20)
+    {
+        ++s_netManagerObserveCount;
+        vm_autotest_note("network_call idx=%u r0=%08x r1=%08x r2=%08x r3=%08x lr=%08x\n",
+                         idx, tmp1, tmp2, tmp3, tmp4, netLr);
+    }
     if (idx == 0)
     {
         g_netCurrentObject = netR4;
@@ -7717,6 +8045,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
     vm_restore_main_r9_for_rom_code((u32)address);
+    vm_autotest_note_startup_pc((u32)address & ~1u);
 
     if (vm_is_manager_func_stub_address((u32)address))
         return;

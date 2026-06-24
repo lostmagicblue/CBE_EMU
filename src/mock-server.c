@@ -823,8 +823,44 @@ static void vm_net_log_handled_packet(const char *source, const u8 *request, u32
 
 static void vm_net_log_unhandled_packet(const u8 *request, u32 requestLen)
 {
-    (void)request;
-    (void)requestLen;
+    u8 wtKind = 0;
+    u8 wtSubtype = 0;
+    u8 objectCount = 0;
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+    char objects[160] = {0};
+    u32 used = 0;
+    u32 seen = 0;
+
+    if (request && requestLen >= 5)
+        objectCount = request[4];
+    if (vm_net_mock_get_wt_header_kind_subtype(request, requestLen, &wtKind, &wtSubtype))
+    {
+        while (seen < 4 && vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        {
+            int wrote = snprintf(objects + used, sizeof(objects) - used,
+                                 "%s%u/%u/%u:%u",
+                                 seen ? "," : "",
+                                 object.major, object.kind, object.subtype,
+                                 object.payloadLen);
+            if (wrote < 0 || (u32)wrote >= sizeof(objects) - used)
+                break;
+            used += (u32)wrote;
+            ++seen;
+        }
+        printf("[error][network] unhandled wt=%u/%u len=%u objects=%u first=%s last_source=%s last_resp=%u\n",
+               wtKind, wtSubtype, requestLen, objectCount,
+               objects[0] ? objects : "-",
+               g_netLastHandledValid ? g_netLastHandledSource : "-",
+               g_netLastHandledResponseLen);
+    }
+    else
+    {
+        printf("[error][network] unhandled malformed len=%u last_source=%s last_resp=%u\n",
+               requestLen,
+               g_netLastHandledValid ? g_netLastHandledSource : "-",
+               g_netLastHandledResponseLen);
+    }
 }
 
 static bool vm_net_try_read_ascii(u32 ptr, u8 *out, u32 outCap)
@@ -4242,10 +4278,8 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
     u8 type1Tail2 = (u8)vm_net_mock_env_u32("CBE_BATTLE_TYPE1_TAIL2", 0);
 
     if (outCap < pos || !vm_net_mock_is_battle_operate_request(request, requestLen))
-    {
-        if (vm_net_mock_is_battle_operate_request_relaxed(request, requestLen))
         return 0;
-    }
+
     if (!vm_net_mock_get_object_u32_field(request, requestLen, "index", &index) &&
         vm_net_mock_get_object_u8_field(request, requestLen, "index", &index8))
         index = index8;
@@ -7049,6 +7083,20 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
     u32 responseEventType = 7;
 
     g_netMockResponseLen = vm_net_mock_build_response(request, readLen, g_netMockResponse, sizeof(g_netMockResponse));
+    {
+        u8 wtKind = 0;
+        u8 wtSubtype = 0;
+        if (vm_net_mock_get_wt_header_kind_subtype(request, readLen, &wtKind, &wtSubtype))
+            vm_autotest_note("net_send connect=%u wt=%u/%u len=%u source=%s resp=%u\n",
+                             connectId, wtKind, wtSubtype, readLen,
+                             g_netLastHandledValid ? g_netLastHandledSource : "-",
+                             g_netMockResponseLen);
+        else
+            vm_autotest_note("net_send connect=%u malformed len=%u source=%s resp=%u\n",
+                             connectId, readLen,
+                             g_netLastHandledValid ? g_netLastHandledSource : "-",
+                             g_netMockResponseLen);
+    }
     g_netMockResponseOffset = 0;
     g_netUpLinkData += dataLen;
     if (g_netMockResponseLen == 0)
@@ -7076,6 +7124,7 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
 
 static u32 vm_net_mock_read_data(u32 dst, u32 dstLen)
 {
+    static u32 s_netReadObserveCount = 0;
     if (dst == 0 || dstLen == 0 || g_netMockResponseOffset >= g_netMockResponseLen)
     {
         return vm_set_call_result(0);
@@ -7085,6 +7134,12 @@ static u32 vm_net_mock_read_data(u32 dst, u32 dstLen)
     u32 copyLen = dstLen < remain ? dstLen : remain;
     uc_mem_write(MTK, dst, g_netMockResponse + g_netMockResponseOffset, copyLen);
     g_netMockResponseOffset += copyLen;
+    if (s_netReadObserveCount < 20)
+    {
+        ++s_netReadObserveCount;
+        vm_autotest_note("net_read dst=%08x ask=%u copied=%u offset=%u total=%u\n",
+                         dst, dstLen, copyLen, g_netMockResponseOffset, g_netMockResponseLen);
+    }
     return vm_set_call_result(copyLen);
 }
 
