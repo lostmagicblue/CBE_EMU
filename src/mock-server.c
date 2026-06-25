@@ -1763,6 +1763,11 @@ static u32 vm_net_mock_build_pos_info(u8 *out, u32 outCap, u16 x, u16 y)
 }
 
 static bool vm_net_mock_append_books42_object(u8 *out, u32 outCap, u32 *pos);
+static bool vm_net_mock_append_fb_target_empty11_object(u8 *out, u32 outCap, u32 *pos);
+static bool vm_net_mock_append_fb_target_result12_for_scene(u8 *out, u32 outCap, u32 *pos,
+                                                            const char *sceneKey, u16 spawnX, u16 spawnY);
+static bool vm_net_mock_append_fb_target_result4_object(u8 *out, u32 outCap, u32 *pos,
+                                                        u8 typeValue, const char *infoText);
 
 enum
 {
@@ -1770,6 +1775,7 @@ enum
     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_ID = 800,
     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_SEQ = 1,
     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_COUNT = 5,
+    VM_NET_MOCK_TELEPORT_STONE_DEFAULT_EXIT_ID = 1,
     VM_NET_MOCK_ITEM_EXTRA_ATTR_SLOTS = 4
 };
 
@@ -2629,6 +2635,319 @@ static void vm_net_mock_get_scene_change_target(const u8 *request, u32 requestLe
         target->x = (exitId == 1) ? 256 : 136;
         target->y = (exitId == 1) ? 300 : 58;
     }
+}
+
+static bool vm_net_mock_is_teleport_stone_list_request(const u8 *request, u32 requestLen)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T')
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        return false;
+    return offset == requestLen &&
+           object.major == 1 &&
+           object.kind == 0x10 &&
+           object.subtype == 1 &&
+           object.payloadLen == 0;
+}
+
+static bool vm_net_mock_is_teleport_stone_transfer_request(const u8 *request, u32 requestLen, u8 *subtypeOut)
+{
+    u8 kind = 0;
+    u8 subtype = 0;
+
+    if (subtypeOut)
+        *subtypeOut = 0;
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T')
+        return false;
+    if (!vm_net_mock_get_wt_header_kind_subtype(request, requestLen, &kind, &subtype))
+        return false;
+    if (kind != 0x10 || (subtype != 2 && subtype != 3))
+        return false;
+    if (!vm_net_mock_request_contains(request, requestLen, "exitID") &&
+        !vm_net_mock_request_contains(request, requestLen, "type"))
+    {
+        return false;
+    }
+    if (subtypeOut)
+        *subtypeOut = subtype;
+    return true;
+}
+
+static void vm_net_mock_get_teleport_stone_target(const u8 *request, u32 requestLen,
+                                                  vm_net_mock_scene_change_target *target)
+{
+    u32 exitId = VM_NET_MOCK_TELEPORT_STONE_DEFAULT_EXIT_ID;
+    const char *sceneOverride = vm_net_mock_env_str("CBE_TELEPORT_STONE_SCENE", "");
+    const char *targetScene = vm_net_mock_default_scene_name();
+
+    memset(target, 0, sizeof(*target));
+    if (sceneOverride != NULL && sceneOverride[0] != 0 && vm_net_mock_scene_name_is_safe(sceneOverride))
+        targetScene = sceneOverride;
+
+    (void)vm_net_mock_get_object_u32_field(request, requestLen, "exitID", &exitId);
+    (void)vm_net_mock_get_object_u32_field(request, requestLen, "exitid", &exitId);
+
+    snprintf(target->scene, sizeof(target->scene), "%s", vm_net_mock_normalize_scene_name_for_enter(targetScene));
+    target->x = (u16)vm_net_mock_env_u32("CBE_TELEPORT_STONE_X", 223);
+    target->y = (u16)vm_net_mock_env_u32("CBE_TELEPORT_STONE_Y", 382);
+    target->exitId = exitId;
+    target->mapType = 2;
+    vm_net_mock_adjust_safe_player_pos_for_scene(target->scene, &target->x, &target->y);
+}
+
+static bool vm_net_mock_is_teleport_stone_map_transfer_request(const u8 *request, u32 requestLen)
+{
+    u8 kind = 0;
+    u8 subtype = 0;
+
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T')
+        return false;
+    if (!vm_net_mock_get_wt_header_kind_subtype(request, requestLen, &kind, &subtype))
+        return false;
+    return kind == 0x10 &&
+           subtype == 4 &&
+           vm_net_mock_request_contains(request, requestLen, "curid") &&
+           vm_net_mock_request_contains(request, requestLen, "objid");
+}
+
+static void vm_net_mock_get_teleport_stone_map_target(const u8 *request, u32 requestLen,
+                                                      vm_net_mock_scene_change_target *target,
+                                                      u32 *curIdOut,
+                                                      u32 *objIdOut)
+{
+    u32 curId = 0;
+    u32 objId = 0;
+    const char *sceneOverride = vm_net_mock_env_str("CBE_TELEPORT_STONE_SCENE", "");
+    const char *targetScene = NULL;
+
+    memset(target, 0, sizeof(*target));
+    (void)vm_net_mock_get_object_u32_field(request, requestLen, "curid", &curId);
+    (void)vm_net_mock_get_object_u32_field(request, requestLen, "objid", &objId);
+
+    if (sceneOverride != NULL && sceneOverride[0] != 0 && vm_net_mock_scene_name_is_safe(sceneOverride))
+    {
+        targetScene = sceneOverride;
+    }
+    else if (objId == 22)
+    {
+        targetScene = "\x32\x32\xbb\xf0\xd1\xe6\xc9\xbd\x5f\x30\x31\x2e\x73\x63\x65"; /* GBK: 22HuoYanShan_01.sce */
+    }
+    else
+    {
+        targetScene = vm_net_mock_default_scene_name();
+    }
+
+    snprintf(target->scene, sizeof(target->scene), "%s", vm_net_mock_normalize_scene_name_for_enter(targetScene));
+    target->x = (u16)vm_net_mock_env_u32("CBE_TELEPORT_STONE_X", 120);
+    target->y = (u16)vm_net_mock_env_u32("CBE_TELEPORT_STONE_Y", 120);
+    target->exitId = 1;
+    target->mapType = 2;
+    vm_net_mock_adjust_safe_player_pos_for_scene(target->scene, &target->x, &target->y);
+
+    if (curIdOut)
+        *curIdOut = curId;
+    if (objIdOut)
+        *objIdOut = objId;
+}
+
+static bool vm_net_mock_build_teleport_stone_exitinfo_blob(u8 *out, u32 outCap, u32 *blobLenOut)
+{
+    u32 pos = 0;
+    const char *label = vm_net_mock_env_str("CBE_TELEPORT_STONE_LABEL", "Penglai Home");
+    u32 exitId = vm_net_mock_env_u32("CBE_TELEPORT_STONE_EXIT_ID", VM_NET_MOCK_TELEPORT_STONE_DEFAULT_EXIT_ID);
+
+    if (out == NULL || blobLenOut == NULL)
+        return false;
+    if (exitId > 0xffff)
+        exitId = VM_NET_MOCK_TELEPORT_STONE_DEFAULT_EXIT_ID;
+
+    /*
+     * mmGameMstarWqvga.cbm:sub_11CE parses 16/1 exitinfo as:
+     *   u8 count, repeated u32 exitId, len16 string label, u32 reserved.
+     */
+    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 1))
+        return false;
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, exitId))
+        return false;
+    if (!vm_net_mock_seq_put_string(out, outCap, &pos, label))
+        return false;
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, 0))
+        return false;
+
+    *blobLenOut = pos;
+    return true;
+}
+
+static u32 vm_net_mock_build_teleport_stone_list_response(u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u8 exitInfo[128];
+    u32 exitInfoLen = 0;
+
+    if (outCap < pos)
+        return 0;
+    memset(exitInfo, 0, sizeof(exitInfo));
+    if (!vm_net_mock_build_teleport_stone_exitinfo_blob(exitInfo, sizeof(exitInfo), &exitInfoLen))
+        return 0;
+    if (exitInfoLen == 0 || exitInfoLen > 0xffff)
+        return 0;
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x10, 1, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_raw(out, outCap, &pos, "exitinfo", exitInfo, (u16)exitInfoLen))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+
+    vm_autotest_note("mock_teleport_stone_list entries=1 exitinfo_len=%u evidence=mmGame:0x11CE\n",
+                     exitInfoLen);
+    return pos;
+}
+
+static bool vm_net_mock_put_teleport_stone_scene_fields(u8 *out, u32 outCap, u32 *pos,
+                                                        u8 subtype,
+                                                        const vm_net_mock_scene_change_target *target)
+{
+    u8 posInfo[8];
+    u32 posInfoLen = 0;
+
+    if (target == NULL)
+        return false;
+    posInfoLen = vm_net_mock_build_pos_info(posInfo, sizeof(posInfo), target->x, target->y);
+    if (posInfoLen == 0)
+        return false;
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", subtype == 3 ? 2 : 1))
+        return false;
+    if (!vm_net_mock_put_object_string(out, outCap, pos, "scene", target->scene))
+        return false;
+    if (!vm_net_mock_put_object_entry(out, outCap, pos, "posinfo", posInfo, (u16)posInfoLen))
+        return false;
+    return vm_net_mock_put_object_u16(out, outCap, pos, "exitid", (u16)target->exitId);
+}
+
+static u32 vm_net_mock_build_teleport_stone_transfer_response(const u8 *request, u32 requestLen,
+                                                              u8 subtype, u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+    vm_net_mock_scene_change_target target;
+
+    if (outCap < pos || (subtype != 2 && subtype != 3))
+        return 0;
+    vm_net_mock_get_teleport_stone_target(request, requestLen, &target);
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x10, subtype, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_teleport_stone_scene_fields(out, outCap, &pos, subtype, &target))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+
+    vm_net_mock_remember_scene_change_target(&target);
+    g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+    g_vm_net_mock_last_scene_change_fb4_type = 1;
+    vm_net_mock_save_player_pos_state(target.scene, target.x, target.y, "teleport-stone-target");
+    vm_autotest_note("mock_teleport_stone_transfer subtype=%u exit=%u scene=%s pos=(%u,%u) evidence=mmGame:0x11CE mmBattle:0x1868\n",
+                     subtype, target.exitId, target.scene, target.x, target.y);
+    return pos;
+}
+
+static u32 vm_net_mock_build_teleport_stone_map_transfer_response(const u8 *request, u32 requestLen,
+                                                                  u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u32 curId = 0;
+    u32 objId = 0;
+    vm_net_mock_scene_change_target target;
+
+    if (outCap < pos || !vm_net_mock_is_teleport_stone_map_transfer_request(request, requestLen))
+        return 0;
+
+    vm_net_mock_get_teleport_stone_map_target(request, requestLen, &target, &curId, &objId);
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x10, 2, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_teleport_stone_scene_fields(out, outCap, &pos, 2, &target))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+
+    vm_net_mock_remember_scene_change_target(&target);
+    g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+    g_vm_net_mock_last_scene_change_fb4_type = 1;
+    vm_net_mock_save_player_pos_state(target.scene, target.x, target.y, "teleport-stone-map-target");
+    vm_autotest_note("mock_teleport_stone_map_transfer curid=%u objid=%u scene=%s pos=(%u,%u) evidence=xxjh:0x103573A response=16/2\n",
+                     curId, objId, target.scene, target.x, target.y);
+    return pos;
+}
+
+static bool vm_net_mock_is_teleport_stone_post_enter_combo_request(const u8 *request, u32 requestLen)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+
+    if (!g_vm_net_mock_last_scene_change_target_valid ||
+        request == NULL || requestLen < 19 ||
+        request[0] != 'W' || request[1] != 'T')
+    {
+        return false;
+    }
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        return false;
+    if (object.major != 1 || object.kind != 0x1b || object.subtype != 11 || object.payloadLen != 0)
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        return false;
+    if (object.major != 1 || object.kind != 0x0c || object.subtype != 1 || object.payloadLen != 0)
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        return false;
+    if (object.major != 1 || object.kind != 7 || object.subtype != 42 || object.payloadLen != 0)
+        return false;
+    if (vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        return false;
+    return offset == requestLen;
+}
+
+static u32 vm_net_mock_build_teleport_stone_post_enter_combo_response(const u8 *request, u32 requestLen,
+                                                                      u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u8 objectCount = 0;
+    vm_net_mock_scene_change_target target;
+
+    if (outCap < pos || !vm_net_mock_is_teleport_stone_post_enter_combo_request(request, requestLen))
+        return 0;
+
+    target = g_vm_net_mock_last_scene_change_target;
+    if (!vm_net_mock_append_fb_target_result12_for_scene(out, outCap, &pos,
+                                                         target.scene, target.x, target.y))
+        return 0;
+    objectCount += 1;
+    if (!vm_net_mock_append_fb_target_empty11_object(out, outCap, &pos))
+        return 0;
+    objectCount += 1;
+    if (!vm_net_mock_append_fb_target_result4_object(out, outCap, &pos,
+                                                     g_vm_net_mock_last_scene_change_fb4_type,
+                                                     vm_net_mock_fb_target_info_text()))
+        return 0;
+    objectCount += 1;
+    if (!vm_net_mock_append_books42_object(out, outCap, &pos))
+        return 0;
+    objectCount += 1;
+
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    vm_net_mock_mark_completed_scene_change_target(&target);
+    vm_net_mock_save_player_pos_state(target.scene, target.x, target.y, "teleport-stone-post-enter");
+    g_vm_net_mock_last_scene_change_target_valid = false;
+    g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+    vm_autotest_note("mock_teleport_stone_post_enter scene=%s pos=(%u,%u) objects=%u evidence=runtime:27/11+12/1+7/42\n",
+                     target.scene, target.x, target.y, objectCount);
+    return pos;
 }
 
 static bool vm_net_mock_append_group_info_object(u8 *out, u32 outCap, u32 *pos, u32 leadId)
@@ -8253,6 +8572,40 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
             vm_net_log_handled_packet("builtin-backpack-items", request, requestLen, hookedLen);
             return hookedLen;
         }
+    }
+
+    if (vm_net_mock_is_teleport_stone_list_request(request, requestLen))
+    {
+        hookedLen = vm_net_mock_build_teleport_stone_list_response(out, outCap);
+        if (hookedLen)
+        {
+            vm_net_log_handled_packet("builtin-teleport-stone-list", request, requestLen, hookedLen);
+            return hookedLen;
+        }
+    }
+
+    u8 teleportStoneSubtype = 0;
+    if (vm_net_mock_is_teleport_stone_transfer_request(request, requestLen, &teleportStoneSubtype))
+    {
+        hookedLen = vm_net_mock_build_teleport_stone_transfer_response(request, requestLen, teleportStoneSubtype, out, outCap);
+        if (hookedLen)
+        {
+            vm_net_log_handled_packet("builtin-teleport-stone-transfer", request, requestLen, hookedLen);
+            return hookedLen;
+        }
+    }
+    hookedLen = vm_net_mock_build_teleport_stone_map_transfer_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-teleport-stone-map-transfer", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_teleport_stone_post_enter_combo_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-teleport-stone-post-enter", request, requestLen, hookedLen);
+        return hookedLen;
     }
 
     if (vm_net_mock_is_current_scene_task_subset_followup_request(request, requestLen))
