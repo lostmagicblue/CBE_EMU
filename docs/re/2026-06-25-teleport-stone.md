@@ -135,19 +135,32 @@ IDA evidence:
 - `Jianghu OL.CBE:SendItemUseReq(0x0103573A)` allocates
   `event(5, 1, 16, 4)`.
 - It writes `curid` and `objid` from the teleport-stone map list item.
-- `objid=22` matches the UI selection `HuoYanShan / YeHuoGu` and local SCE
-  prefix `22HuoYanShan`.
+- In the first validated sample, `objid=22` matches the UI selection
+  `HuoYanShan / YeHuoGu` and local SCE prefix `22HuoYanShan`; `curid=1`
+  also matches the `_01.sce` landing scene.
+- A later random-map validation produced `curid=20 objid=4` and correctly
+  landed on `c04LinAnFu_01.sce`, so `curid` is only treated as a preferred
+  exact scene index, not as an authoritative sub-scene id.
 
 Response strategy:
 
 - return a `1/16/2` object instead of a same-subtype `16/4` object;
 - reuse the already validated `result + scene + posinfo + exitid` scene-enter
   contract consumed by `mmGame:0x11CE` / `mmBattle:0x1868`;
-- current validated mapping:
+- implemented mapping:
 
 ```text
-curid=1 objid=22 -> 22HuoYanShan_01.sce @ (120,120)
+objid=NN curid=M -> first existing JHOnlineData/[c]NN..._%02M.sce
+fallback -> JHOnlineData/[c]NN..._01.sce, then any [c]NN*.sce, then default scene
+validated: curid=1 objid=22 -> 22HuoYanShan_01.sce @ (120,120)
+validated: curid=20 objid=4 -> c04LinAnFu_01.sce @ (120,120), then normal local scene flow
 ```
+
+The runtime scan intentionally excludes `b_*.sce` regional-map index scenes.
+Town-style resources such as `c04LinAnFu_01.sce`, `c08YanMenGuan_01.sce`,
+`c14ShuShan_01.sce`, `c18DaLi_01.sce`, and `c24XiaKeDao_01.sce` are accepted
+through the `cNN` prefix and normalized by the existing scene-enter helper when
+needed.
 
 ### Post-enter Combo
 
@@ -224,7 +237,9 @@ confirm if a prompt appears
 ```
 
 The current deterministic smoke path uses the HuoYanShan world node and reaches
-`22HuoYanShan_01.sce @ (120,120)` without unhandled packets.
+`22HuoYanShan_01.sce @ (120,120)` without unhandled packets. The handler now
+uses the same `curid/objid` packet shape for any local map group that has a
+matching SCE resource under `JHOnlineData`.
 
 ## Unknowns
 
@@ -233,5 +248,9 @@ The current deterministic smoke path uses the HuoYanShan world node and reaches
 - Full UI validation should confirm whether the game sends `16/3` in other
   teleport-stone screen states. The validated path currently sends `16/2`
   followed by `27/11 + 12/1 + 7/42`.
-- Only `objid=22` has been mapped to a concrete SCE so far. Other world-map
-  destinations should be added as their `curid/objid` pairs are observed.
+- `curid` meaning is still partly unknown. It is useful as an exact-scene hint
+  when a matching `[c]NN..._%02curid.sce` exists, but at least one validated
+  request (`curid=20 objid=4`) requires falling back to the first local scene.
+- The scan maps by local resource naming, not by an authoritative server table.
+  If a live server later proves a different first landing scene for a specific
+  `objid`, add a narrow override before the scan.

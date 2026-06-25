@@ -7,6 +7,11 @@
  * of the main emulator source without changing linkage or guest-visible logic.
  */
 
+#ifdef _WIN32
+#include <io.h>
+#include <stdint.h>
+#endif
+
 typedef struct
 {
     const char *name;
@@ -2713,27 +2718,121 @@ static bool vm_net_mock_is_teleport_stone_map_transfer_request(const u8 *request
            vm_net_mock_request_contains(request, requestLen, "objid");
 }
 
+static bool vm_net_mock_teleport_stone_scene_matches_objid(const char *scene, u32 objId)
+{
+    char idText[3];
+
+    if (scene == NULL || objId > 99 || scene[0] == 0 || scene[0] == 'b')
+        return false;
+    snprintf(idText, sizeof(idText), "%02u", objId);
+    return (scene[0] == idText[0] && scene[1] == idText[1]) ||
+           (scene[0] == 'c' && scene[1] == idText[0] && scene[2] == idText[1]);
+}
+
+static bool vm_net_mock_teleport_stone_scene_has_index(const char *scene, u32 index)
+{
+    char suffix[16];
+
+    if (scene == NULL || index == 0 || index > 99)
+        return false;
+    snprintf(suffix, sizeof(suffix), "_%02u.sce", index);
+    return vm_net_mock_str_ends_with(scene, suffix);
+}
+
+static u32 vm_net_mock_teleport_stone_scene_score(const char *scene, u32 objId, u32 curId)
+{
+    u32 sceneIndex = (curId > 0 && curId <= 99) ? curId : 1;
+    u32 score = 0;
+
+    if (!vm_net_mock_teleport_stone_scene_matches_objid(scene, objId) ||
+        !vm_net_mock_str_ends_with(scene, ".sce"))
+    {
+        return 0;
+    }
+
+    if (vm_net_mock_teleport_stone_scene_has_index(scene, sceneIndex))
+        score += 1000;
+    else if (vm_net_mock_teleport_stone_scene_has_index(scene, 1))
+        score += 500;
+    else if (sceneIndex == 1 && vm_net_mock_str_ends_with(scene, "01.sce"))
+        score += 400;
+    else
+        score += 100;
+
+    score += (scene[0] == 'c') ? 10 : 20;
+    return score;
+}
+
+static bool vm_net_mock_find_teleport_stone_scene_by_objid(u32 objId, u32 curId,
+                                                           char *out, size_t outCap)
+{
+#ifdef _WIN32
+    struct _finddata_t data;
+    intptr_t handle;
+    u32 bestScore = 0;
+
+    if (out == NULL || outCap == 0 || objId > 99)
+        return false;
+    out[0] = 0;
+
+    handle = _findfirst("JHOnlineData\\*.sce", &data);
+    if (handle == (intptr_t)-1)
+        return false;
+
+    do
+    {
+        const char *name = data.name;
+        u32 score = 0;
+        if ((data.attrib & _A_SUBDIR) != 0 || name == NULL || strlen(name) >= outCap)
+            continue;
+        score = vm_net_mock_teleport_stone_scene_score(name, objId, curId);
+        if (score == 0)
+            continue;
+        if (score > bestScore || (score == bestScore && out[0] != 0 && strcmp(name, out) < 0))
+        {
+            snprintf(out, outCap, "%s", name);
+            bestScore = score;
+        }
+    } while (_findnext(handle, &data) == 0);
+
+    _findclose(handle);
+    return out[0] != 0 && vm_net_mock_scene_name_is_safe(out);
+#else
+    (void)objId;
+    (void)curId;
+    if (out != NULL && outCap > 0)
+        out[0] = 0;
+    return false;
+#endif
+}
+
 static void vm_net_mock_get_teleport_stone_map_target(const u8 *request, u32 requestLen,
                                                       vm_net_mock_scene_change_target *target,
                                                       u32 *curIdOut,
-                                                      u32 *objIdOut)
+                                                      u32 *objIdOut,
+                                                      const char **sourceOut)
 {
     u32 curId = 0;
     u32 objId = 0;
+    char mappedScene[64];
     const char *sceneOverride = vm_net_mock_env_str("CBE_TELEPORT_STONE_SCENE", "");
     const char *targetScene = NULL;
+    const char *source = "default";
 
     memset(target, 0, sizeof(*target));
+    mappedScene[0] = 0;
     (void)vm_net_mock_get_object_u32_field(request, requestLen, "curid", &curId);
     (void)vm_net_mock_get_object_u32_field(request, requestLen, "objid", &objId);
 
     if (sceneOverride != NULL && sceneOverride[0] != 0 && vm_net_mock_scene_name_is_safe(sceneOverride))
     {
         targetScene = sceneOverride;
+        source = "env";
     }
-    else if (objId == 22)
+    else if (vm_net_mock_find_teleport_stone_scene_by_objid(objId, curId, mappedScene, sizeof(mappedScene)))
     {
-        targetScene = "\x32\x32\xbb\xf0\xd1\xe6\xc9\xbd\x5f\x30\x31\x2e\x73\x63\x65"; /* GBK: 22HuoYanShan_01.sce */
+        targetScene = mappedScene;
+        source = "resource-scan";
     }
     else
     {
@@ -2751,6 +2850,8 @@ static void vm_net_mock_get_teleport_stone_map_target(const u8 *request, u32 req
         *curIdOut = curId;
     if (objIdOut)
         *objIdOut = objId;
+    if (sourceOut)
+        *sourceOut = source;
 }
 
 static bool vm_net_mock_build_teleport_stone_exitinfo_blob(u8 *out, u32 outCap, u32 *blobLenOut)
@@ -2863,12 +2964,13 @@ static u32 vm_net_mock_build_teleport_stone_map_transfer_response(const u8 *requ
     u32 objectStart = 0;
     u32 curId = 0;
     u32 objId = 0;
+    const char *source = NULL;
     vm_net_mock_scene_change_target target;
 
     if (outCap < pos || !vm_net_mock_is_teleport_stone_map_transfer_request(request, requestLen))
         return 0;
 
-    vm_net_mock_get_teleport_stone_map_target(request, requestLen, &target, &curId, &objId);
+    vm_net_mock_get_teleport_stone_map_target(request, requestLen, &target, &curId, &objId, &source);
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x10, 2, &objectStart))
         return 0;
     if (!vm_net_mock_put_teleport_stone_scene_fields(out, outCap, &pos, 2, &target))
@@ -2880,8 +2982,8 @@ static u32 vm_net_mock_build_teleport_stone_map_transfer_response(const u8 *requ
     g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
     g_vm_net_mock_last_scene_change_fb4_type = 1;
     vm_net_mock_save_player_pos_state(target.scene, target.x, target.y, "teleport-stone-map-target");
-    vm_autotest_note("mock_teleport_stone_map_transfer curid=%u objid=%u scene=%s pos=(%u,%u) evidence=xxjh:0x103573A response=16/2\n",
-                     curId, objId, target.scene, target.x, target.y);
+    vm_autotest_note("mock_teleport_stone_map_transfer curid=%u objid=%u scene=%s pos=(%u,%u) source=%s evidence=xxjh:0x103573A response=16/2\n",
+                     curId, objId, target.scene, target.x, target.y, source ? source : "-");
     return pos;
 }
 
