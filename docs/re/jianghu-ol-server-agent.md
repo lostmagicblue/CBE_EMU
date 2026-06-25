@@ -36,7 +36,25 @@
 - 临时增加窄范围断点、watchpoint 或一次性观测代码来解释客户端行为；完成后必须删除。
 - 根据环境变量参数化 mock 数据，如角色名、职业、血量、出生点，但这些值必须进入响应包，而不是直接写客户端状态。
 
-## 高效工作流
+## 会话起手流程（强制）
+
+从当前会话开始，每次推进具体问题前，必须先执行：
+
+1. 阅读当前阶段已有的 `docs/re/*.md` 记录和相关 `git diff`。
+2. 用 IDA 先读相关汇编 / 反编译，把调用链、结构体、字段、业务流程搞清楚。
+3. 在 `docs/re/` 新建或更新本地调查文档，记录证据、unknowns 和本轮最小目标。
+4. 只有本地调查文档达到“可实现”门槛后，才开始改 `src/mock-server.c` 或 `src/main.c`。
+
+默认入口文档：
+
+- `docs/re/ida-first-workflow.md`
+- `docs/re/phase-investigation-template.md`
+
+如果还说不清客户端为什么会卡住、重复加载、闪退或走错分支，就继续看 IDA，不进入实现。
+
+## 单轮推进工作流
+
+会话起手完成后，再进入下面这轮循环：
 
 1. 定位卡点
 
@@ -184,6 +202,7 @@ static u32 vm_net_mock_build_example_response(const u8 *request, u32 requestLen,
 
 按任务类型选择更窄的规范：
 
+- 会话起手与文档模板：`docs/re/ida-first-workflow.md`、`docs/re/phase-investigation-template.md`。
 - 协调与拆阶段：`.agents/jianghu-coordinator.md`。
 - IDA/协议取证：`.agents/jianghu-protocol-forensics.md`，触发 `$jianghu-protocol-forensics`。
 - mock-server 处理器实现：`.agents/jianghu-mock-server-implementer.md`，触发 `$jianghu-mock-server-handler`。

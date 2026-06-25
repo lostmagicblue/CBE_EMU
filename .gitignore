@@ -27,3 +27,4 @@ tools/
 bin/nvram/
 ida_dump/
 bin/autotest/
+docs/re/ida_tmp/

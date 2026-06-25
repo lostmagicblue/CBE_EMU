@@ -281,6 +281,7 @@ static u32 vm_net_mock_build_battle_auto12_ack_response(const u8 *request, u32 r
 static u32 vm_net_mock_min_u32(u32 a, u32 b);
 static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
 static uc_err scheduler_dispatch_net_tasks(void);
+static bool vm_net_mock_should_rearm_send_ready(void);
 static uc_err scheduler_flush_post_vm_business_send_ready(const char *reason);
 
 static bool vm_address_in_range(u32 address, u32 begin, u32 size)
@@ -1212,6 +1213,8 @@ static uc_err scheduler_dispatch_net_tasks(void)
                 {
                     g_netMockUpdateDelivered = 1;
                 }
+                if (g_netTaskDispatchDepth == 0 && vm_net_mock_should_rearm_send_ready())
+                    scheduler_queue_send_ready_for_active_channels("net_data_event");
             }
             if (err == UC_ERR_OK && g_netTaskDispatchDepth == 0 && g_netBusinessSendReadyPostVm)
             {
@@ -1239,6 +1242,50 @@ static uc_err scheduler_dispatch_net_tasks(void)
  * translation unit while it still depends on emulator-local static helpers. */
 #include "mock-server.c"
 static uc_err scheduler_dispatch_input_event(vm_event *evt);
+
+typedef struct
+{
+    char scene[64];
+    u16 x;
+    u16 y;
+    u32 exitId;
+    u8 valid;
+} vm_scene_same_reenter_guard;
+
+static vm_scene_same_reenter_guard g_sceneSameReenterGuard = {0};
+
+static void vm_scene_same_reenter_clear(void)
+{
+    memset(&g_sceneSameReenterGuard, 0, sizeof(g_sceneSameReenterGuard));
+}
+
+static const vm_net_mock_scene_change_target *vm_active_scene_reenter_target(void)
+{
+    if (g_vm_net_mock_last_scene_change_target_valid)
+        return &g_vm_net_mock_last_scene_change_target;
+    vm_scene_same_reenter_clear();
+    return NULL;
+}
+
+static bool vm_scene_same_reenter_matches_target(const vm_net_mock_scene_change_target *target)
+{
+    return target != NULL &&
+           g_sceneSameReenterGuard.valid &&
+           vm_net_mock_scene_names_equal_loose(g_sceneSameReenterGuard.scene, target->scene);
+}
+
+static void vm_scene_same_reenter_remember_target(const vm_net_mock_scene_change_target *target)
+{
+    if (target == NULL || target->scene[0] == 0)
+        return;
+    vm_scene_same_reenter_clear();
+    snprintf(g_sceneSameReenterGuard.scene, sizeof(g_sceneSameReenterGuard.scene),
+             "%s", target->scene);
+    g_sceneSameReenterGuard.x = target->x;
+    g_sceneSameReenterGuard.y = target->y;
+    g_sceneSameReenterGuard.exitId = target->exitId;
+    g_sceneSameReenterGuard.valid = 1;
+}
 
 static uc_err scheduler_dispatch_tscreen_event(u32 tScreenEventEntry, u32 screenPtr)
 {
@@ -1950,6 +1997,113 @@ static void vm_autotest_note_startup_pc(u32 pc)
     }
 }
 
+static void vm_autotest_dump_scene_tables(u32 elapsedMs)
+{
+    static u32 nextDumpMs = 0;
+    u32 sceneNodeBase = 0;
+    u32 moveEntryBase = 0;
+    u32 moveEntryCount = 0;
+    u32 sceneObj = 0;
+    u8 pending = 0;
+    u8 ready = 0;
+    u8 assetsReady = 0;
+    u8 sceneState = 0;
+    u16 parserState = 0;
+    u16 currentX = 0;
+    u16 currentY = 0;
+
+    if (!g_autotestEnabled || Global_R9 == 0 || elapsedMs < nextDumpMs)
+        return;
+    nextDumpMs = elapsedMs + 3000;
+
+    uc_mem_read(MTK, Global_R9 + 0x5CB0, &sceneNodeBase, sizeof(sceneNodeBase));
+    uc_mem_read(MTK, Global_R9 + 0x5CE4, &moveEntryBase, sizeof(moveEntryBase));
+    uc_mem_read(MTK, Global_R9 + 0x5D40, &moveEntryCount, sizeof(moveEntryCount));
+    uc_mem_read(MTK, Global_R9 + 0x54AC, &sceneObj, sizeof(sceneObj));
+    uc_mem_read(MTK, Global_R9 + 0x5C6B, &pending, sizeof(pending));
+    uc_mem_read(MTK, Global_R9 + 0x5C67, &ready, sizeof(ready));
+    uc_mem_read(MTK, Global_R9 + 0x5C68, &assetsReady, sizeof(assetsReady));
+    uc_mem_read(MTK, Global_R9 + 0x4CB6, &sceneState, sizeof(sceneState));
+    uc_mem_read(MTK, Global_R9 + 0x5C8E, &currentX, sizeof(currentX));
+    uc_mem_read(MTK, Global_R9 + 0x5C90, &currentY, sizeof(currentY));
+    if (sceneObj != 0)
+        uc_mem_read(MTK, sceneObj + 0x1B4, &parserState, sizeof(parserState));
+    vm_autotest_note("scene_probe elapsed=%u sceneObj=%08x sceneState=%u pending=%u ready=%u assets=%u parserState=%u pos=(%u,%u) sceneNodeBase=%08x moveEntryBase=%08x moveEntryCount=%u\n",
+                     elapsedMs, sceneObj, sceneState, pending, ready, assetsReady, parserState, currentX, currentY,
+                     sceneNodeBase, moveEntryBase, moveEntryCount);
+
+    if (moveEntryBase != 0 && moveEntryCount < 64)
+    {
+        u32 limit = moveEntryCount < 12 ? moveEntryCount : 12;
+        for (u32 i = 0; i < limit; ++i)
+        {
+            u32 entry = moveEntryBase + i * 32;
+            u16 actorId = 0;
+            u16 x = 0;
+            u16 y = 0;
+            u16 tx = 0;
+            u16 ty = 0;
+            u16 facing = 0;
+            u16 pose = 0;
+            u32 namePtr = 0;
+            u8 moveState = 0;
+            u8 kind = 0;
+            u16 targetActorId = 0;
+            u32 titlePtr = 0;
+            uc_mem_read(MTK, entry + 0x00, &actorId, sizeof(actorId));
+            uc_mem_read(MTK, entry + 0x02, &x, sizeof(x));
+            uc_mem_read(MTK, entry + 0x04, &y, sizeof(y));
+            uc_mem_read(MTK, entry + 0x06, &tx, sizeof(tx));
+            uc_mem_read(MTK, entry + 0x08, &ty, sizeof(ty));
+            uc_mem_read(MTK, entry + 0x0A, &facing, sizeof(facing));
+            uc_mem_read(MTK, entry + 0x0C, &pose, sizeof(pose));
+            uc_mem_read(MTK, entry + 0x10, &namePtr, sizeof(namePtr));
+            uc_mem_read(MTK, entry + 0x16, &moveState, sizeof(moveState));
+            uc_mem_read(MTK, entry + 0x17, &kind, sizeof(kind));
+            uc_mem_read(MTK, entry + 0x18, &targetActorId, sizeof(targetActorId));
+            uc_mem_read(MTK, entry + 0x1C, &titlePtr, sizeof(titlePtr));
+            vm_autotest_note("scene_probe_move[%u] id=%u pos=(%u,%u) target=(%u,%u) facing=%u pose=%u namePtr=%08x state=%u kind=%u targetId=%u titlePtr=%08x\n",
+                             i, actorId, x, y, tx, ty, facing, pose, namePtr, moveState, kind, targetActorId, titlePtr);
+        }
+    }
+
+    if (sceneNodeBase != 0)
+    {
+        for (u32 i = 0; i < 8; ++i)
+        {
+            u32 node = sceneNodeBase + i * 340;
+            u32 actorId = 0;
+            u16 x = 0;
+            u16 y = 0;
+            u32 labelPtr = 0;
+            u8 nodeKind = 0;
+            u8 promptKind = 0;
+            u8 active = 0;
+            u8 visualVariant = 0;
+            u8 visualGroup = 0;
+            u8 targetX = 0;
+            u8 targetY = 0;
+            uc_mem_read(MTK, node + 0x64, &actorId, sizeof(actorId));
+            uc_mem_read(MTK, node + 0x00, &x, sizeof(x));
+            uc_mem_read(MTK, node + 0x02, &y, sizeof(y));
+            uc_mem_read(MTK, node + 0x44, &labelPtr, sizeof(labelPtr));
+            uc_mem_read(MTK, node + 0x13B, &nodeKind, sizeof(nodeKind));
+            uc_mem_read(MTK, node + 0x13C, &promptKind, sizeof(promptKind));
+            uc_mem_read(MTK, node + 0x13F, &active, sizeof(active));
+            uc_mem_read(MTK, node + 0x140, &visualVariant, sizeof(visualVariant));
+            uc_mem_read(MTK, node + 0x141, &visualGroup, sizeof(visualGroup));
+            uc_mem_read(MTK, node + 0x11E, &targetX, sizeof(targetX));
+            uc_mem_read(MTK, node + 0x120, &targetY, sizeof(targetY));
+            if (actorId != 0 || active != 0 || nodeKind != 0 || promptKind != 0)
+            {
+                vm_autotest_note("scene_probe_node[%u] actorId=%u pos=(%u,%u) labelPtr=%08x kind=%u prompt=%u active=%u visual=(%u,%u) target=(%u,%u)\n",
+                                 i, actorId, x, y, labelPtr, nodeKind, promptKind, active,
+                                 visualVariant, visualGroup, targetX, targetY);
+            }
+        }
+    }
+}
+
 static void vm_autotest_save_screenshot(u32 elapsedMs)
 {
     char path[128];
@@ -1973,6 +2127,8 @@ static void vm_autotest_tick(void)
         g_autotestNextShotMs = 0;
     }
     u32 elapsed = now - g_autotestStartMs;
+
+    vm_autotest_dump_scene_tables(elapsed);
 
     if (elapsed >= g_autotestNextShotMs)
     {
@@ -2543,6 +2699,8 @@ void RunArmProgram(void *param)
                     p = vm_emu_start(screenInitEntry, exitAddr);
                 else
                     p = UC_ERR_OK;
+                vm_autotest_note("screen_run kind=init caller=%08x this=%08x init=%08x logic=%08x render=%08x\n",
+                                 lastAddress, screenThisPtr, screenInitEntry, screenLogicEntry, screenRenderEntry);
                 printf("ScreenInit Ok\n");
             }
             if (p == UC_ERR_OK)
@@ -6196,6 +6354,8 @@ static bool hook_vm_manager_screen_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
         if (tmp1 != 0 && tmp1 != vmAddedScreen)
         {
+            vm_autotest_note("screen_mgr idx=2 type=replace caller=%08x screen=%08x added=%08x r1=%08x r2=%08x r3=%08x\n",
+                             lastAddress, tmp1, vmAddedScreen, tmp2, tmp3, tmp4);
             uc_mem_write(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &tmp1, 4);
             tmp2 = 0;
             uc_mem_write(MTK, VM_SCREEN_isInQuit_ADDRESS, &tmp2, 4);
@@ -6206,18 +6366,45 @@ static bool hook_vm_manager_screen_func(u32 address)
         {
             if (tmp1 != 0 &&
                 tmp1 == vmAddedScreen &&
-                lastAddress == 0x010182A6)
+                (lastAddress == 0x010182A6 || lastAddress == 0x01018150))
             {
+                bool acceptSameSceneReenter = true;
+                const vm_net_mock_scene_change_target *activeTarget = NULL;
                 /*
                  * Same-class scene switches call the platform screen-change API
-                 * with the current screen. Treat that as a real lifecycle
-                 * request so the screen can re-enter its scene setup path.
+                 * with the current screen. Treat both the local portal
+                 * FindEmptyActorSlot() path and the EnterSceneByMapName() path
+                 * as real lifecycle requests so the scene screen can re-enter
+                 * its setup path.
                  */
+                if (lastAddress == 0x01018150)
+                {
+                    activeTarget = vm_active_scene_reenter_target();
+                    if (vm_scene_same_reenter_matches_target(activeTarget))
+                    {
+                        acceptSameSceneReenter = false;
+                        vm_autotest_note("screen_mgr idx=2 type=same-suppressed caller=%08x screen=%08x added=%08x scene=%s pos=(%u,%u) exit=%u\n",
+                                         lastAddress, tmp1, vmAddedScreen,
+                                         activeTarget ? activeTarget->scene : "",
+                                         activeTarget ? activeTarget->x : 0,
+                                         activeTarget ? activeTarget->y : 0,
+                                         activeTarget ? activeTarget->exitId : 0);
+                    }
+                    else
+                    {
+                        vm_scene_same_reenter_remember_target(activeTarget);
+                    }
+                }
+                if (acceptSameSceneReenter)
+                {
+                vm_autotest_note("screen_mgr idx=2 type=same caller=%08x screen=%08x added=%08x r1=%08x r2=%08x r3=%08x\n",
+                                 lastAddress, tmp1, vmAddedScreen, tmp2, tmp3, tmp4);
                 uc_mem_write(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &tmp1, 4);
                 tmp2 = 0;
                 uc_mem_write(MTK, VM_SCREEN_isInQuit_ADDRESS, &tmp2, 4);
                 screenStructChange = 1;
                 g_screenRemovedWithoutNext = 0;
+                }
             }
         }
         vm_set_call_result(VM_SCREEN_isInQuit_ADDRESS);
