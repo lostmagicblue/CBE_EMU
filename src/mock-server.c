@@ -18,6 +18,8 @@ typedef struct
 
 static u8 g_netMockTitleServerListPending = 0;
 static u8 g_netMockTitleServerSelectConfirmed = 0;
+static u8 g_netMockBackpackFullItemsDelivered = 0;
+static u8 g_netMockBackpackGridDelivered = 0;
 static u32 g_netMockTitleServerListTick = 0;
 static u32 g_netMockTitleServerSelectTick = 0;
 static u32 g_netMockTitleSelectedServerId = 0;
@@ -594,6 +596,8 @@ static void vm_net_mock_title_login_phase_reset(const char *reason)
     }
     g_netMockTitleServerListPending = 0;
     g_netMockTitleServerSelectConfirmed = 0;
+    g_netMockBackpackFullItemsDelivered = 0;
+    g_netMockBackpackGridDelivered = 0;
     g_netMockTitleServerListTick = 0;
     g_netMockTitleServerSelectTick = 0;
     g_netMockTitleSelectedServerId = 0;
@@ -1758,6 +1762,230 @@ static u32 vm_net_mock_build_pos_info(u8 *out, u32 outCap, u16 x, u16 y)
     return pos;
 }
 
+static bool vm_net_mock_append_books42_object(u8 *out, u32 outCap, u32 *pos);
+
+enum
+{
+    VM_NET_MOCK_BACKPACK_CAPACITY = 40,
+    VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_ID = 800,
+    VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_SEQ = 1,
+    VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_COUNT = 5,
+    VM_NET_MOCK_ITEM_EXTRA_ATTR_SLOTS = 4
+};
+
+static bool vm_net_mock_seq_put_empty_item_attr_slot(u8 *out, u32 outCap, u32 *pos)
+{
+    if (!vm_net_mock_seq_put_u8(out, outCap, pos, 0))
+        return false;
+    if (!vm_net_mock_seq_put_u8(out, outCap, pos, 0))
+        return false;
+    if (!vm_net_mock_seq_put_u8(out, outCap, pos, 0))
+        return false;
+    return vm_net_mock_seq_put_i16(out, outCap, pos, 0);
+}
+
+static bool vm_net_mock_seq_put_item_common_extra(u8 *out, u32 outCap, u32 *pos, u8 stackRuntimeByte)
+{
+    /*
+     * mmGameMstarWqvga.cbm uses one common item-extra reader for full backpack
+     * (sub_418C) and item delta updates (sub_D04). The reader consumes two
+     * bytes, one i16 runtime value, then four 6-byte attr slots.
+     */
+    if (!vm_net_mock_seq_put_u8(out, outCap, pos, stackRuntimeByte))
+        return false;
+    if (!vm_net_mock_seq_put_u8(out, outCap, pos, 0))
+        return false;
+    if (!vm_net_mock_seq_put_i16(out, outCap, pos, 0))
+        return false;
+
+    for (u32 i = 0; i < VM_NET_MOCK_ITEM_EXTRA_ATTR_SLOTS; ++i)
+    {
+        if (!vm_net_mock_seq_put_empty_item_attr_slot(out, outCap, pos))
+            return false;
+    }
+    return true;
+}
+
+static bool vm_net_mock_build_backpack_iteminfo_blob(u8 *out, u32 outCap, u32 *blobLenOut)
+{
+    u32 pos = 0;
+    if (out == NULL || blobLenOut == NULL)
+        return false;
+
+    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 1))
+        return false;
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_ID))
+        return false;
+    if (!vm_net_mock_seq_put_item_common_extra(out, outCap, &pos, VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_COUNT))
+        return false;
+
+    *blobLenOut = pos;
+    return true;
+}
+
+static bool vm_net_mock_build_backpack_grid_iteminfo_blob(u8 *out, u32 outCap, u32 *blobLenOut)
+{
+    u32 pos = 0;
+    if (out == NULL || blobLenOut == NULL)
+        return false;
+
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_ID))
+        return false;
+    if (!vm_net_mock_seq_put_i16(out, outCap, &pos, VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_SEQ))
+        return false;
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_COUNT))
+        return false;
+    if (!vm_net_mock_seq_put_item_common_extra(out, outCap, &pos, 0))
+        return false;
+
+    *blobLenOut = pos;
+    return true;
+}
+
+static bool vm_net_mock_is_backpack_items_request(const u8 *request, u32 requestLen)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T')
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        return false;
+    return offset == requestLen &&
+           object.major == 1 &&
+           object.kind == 17 &&
+           object.subtype == 1 &&
+           object.payloadLen == 0;
+}
+
+static bool vm_net_mock_is_backpack_open_request(const u8 *request, u32 requestLen)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T')
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        return false;
+    return offset == requestLen &&
+           object.major == 1 &&
+           object.kind == 7 &&
+           object.subtype == 42 &&
+           object.payloadLen == 0;
+}
+
+static bool vm_net_mock_append_backpack_items_object(u8 *out, u32 outCap, u32 *pos)
+{
+    u32 objectStart = 0;
+    u8 itemInfo[128];
+    u32 itemInfoLen = 0;
+
+    if (out == NULL || pos == NULL)
+        return false;
+    memset(itemInfo, 0, sizeof(itemInfo));
+    if (!vm_net_mock_build_backpack_iteminfo_blob(itemInfo, sizeof(itemInfo), &itemInfoLen))
+        return false;
+    if (itemInfoLen == 0 || itemInfoLen > 0xffff)
+        return false;
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 17, 1, &objectStart))
+        return false;
+    if (!vm_net_mock_put_object_u16(out, outCap, pos, "maxnum", VM_NET_MOCK_BACKPACK_CAPACITY))
+        return false;
+    if (!vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo", itemInfo, (u16)itemInfoLen))
+        return false;
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+
+    vm_autotest_note("mock_backpack_items capacity=%u item=%u count=%u iteminfo_len=%u evidence=mmGame:0x418C\n",
+                     VM_NET_MOCK_BACKPACK_CAPACITY,
+                     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_ID,
+                     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_COUNT,
+                     itemInfoLen);
+    return true;
+}
+
+static bool vm_net_mock_append_backpack_grid_object(u8 *out, u32 outCap, u32 *pos)
+{
+    u32 objectStart = 0;
+    u8 itemInfo[128];
+    u32 itemInfoLen = 0;
+
+    if (out == NULL || pos == NULL)
+        return false;
+    memset(itemInfo, 0, sizeof(itemInfo));
+    if (!vm_net_mock_build_backpack_grid_iteminfo_blob(itemInfo, sizeof(itemInfo), &itemInfoLen))
+        return false;
+    if (itemInfoLen == 0 || itemInfoLen > 0xffff)
+        return false;
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 30, 21, &objectStart))
+        return false;
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", 1))
+        return false;
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "gridnum", 1))
+        return false;
+    if (!vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo", itemInfo, (u16)itemInfoLen))
+        return false;
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+
+    vm_autotest_note("mock_backpack_grid kind=30 subtype=21 gridnum=1 item=%u seq=%u count=%u iteminfo_len=%u evidence=JianghuOL:0x1039952\n",
+                     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_ID,
+                     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_SEQ,
+                     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_COUNT,
+                     itemInfoLen);
+    return true;
+}
+
+static bool vm_net_mock_append_backpack_default_item_main_objects(u8 *out, u32 outCap, u32 *pos, u8 *objectCount)
+{
+    if (out == NULL || pos == NULL || objectCount == NULL)
+        return false;
+    if (!g_netMockBackpackGridDelivered)
+    {
+        if (!vm_net_mock_append_backpack_grid_object(out, outCap, pos))
+            return false;
+        *objectCount = (u8)(*objectCount + 1);
+        g_netMockBackpackGridDelivered = 1;
+    }
+    return true;
+}
+
+static u32 vm_net_mock_build_backpack_items_response(u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+
+    if (outCap < pos)
+        return 0;
+    if (!vm_net_mock_append_backpack_items_object(out, outCap, &pos))
+        return 0;
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+
+    return pos;
+}
+
+static u32 vm_net_mock_build_backpack_open_response(u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u8 objectCount = 0;
+
+    if (outCap < pos)
+        return 0;
+    /*
+     * mmGameMstarWqvga.cbm:sub_2434 opens the backpack component and sends
+     * 7/42. Its registered network parser is sub_418C, which handles both
+     * 17/1 iteminfo and 7/42 book info while the backpack component is active.
+     */
+    if (!vm_net_mock_append_backpack_items_object(out, outCap, &pos))
+        return 0;
+    objectCount += 1;
+    if (!vm_net_mock_append_books42_object(out, outCap, &pos))
+        return 0;
+    objectCount += 1;
+
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    return pos;
+}
+
 typedef struct
 {
     char magic[4];
@@ -2869,6 +3097,8 @@ static u32 vm_net_mock_build_group_type1_response(const u8 *request, u32 request
         return 0;
     if (hasType1)
         objectCount += 1;
+    if (hasType1 && !vm_net_mock_append_backpack_default_item_main_objects(out, outCap, &pos, &objectCount))
+        return 0;
     if (hasType1 && enableMiscSync8 && !vm_net_mock_append_misc_player_sync8_object(out, outCap, &pos))
         return 0;
     if (hasType1 && enableMiscSync8)
@@ -2912,9 +3142,13 @@ static u32 vm_net_mock_build_scene_change_response(const u8 *request, u32 reques
     return pos;
 }
 
-static bool vm_net_mock_append_login_tail_skill_objects(u8 *out, u32 outCap, u32 *pos)
+static bool vm_net_mock_append_login_tail_skill_objects(u8 *out, u32 outCap, u32 *pos, u8 *addedCount)
 {
     u32 objectStart = 0;
+    if (addedCount == NULL)
+        return false;
+    *addedCount = 0;
+
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 0x0c, 1, &objectStart))
         return false;
     if (!vm_net_mock_put_object_u32(out, outCap, pos, "learnednum", 0))
@@ -2922,6 +3156,7 @@ static bool vm_net_mock_append_login_tail_skill_objects(u8 *out, u32 outCap, u32
     if (!vm_net_mock_put_object_blob(out, outCap, pos, "learnedskill", NULL, 0))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    *addedCount = (u8)(*addedCount + 1);
 
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 42, &objectStart))
         return false;
@@ -2930,6 +3165,15 @@ static bool vm_net_mock_append_login_tail_skill_objects(u8 *out, u32 outCap, u32
     if (!vm_net_mock_put_object_blob(out, outCap, pos, "booksinfo", NULL, 0))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    *addedCount = (u8)(*addedCount + 1);
+
+    if (!g_netMockBackpackFullItemsDelivered)
+    {
+        if (!vm_net_mock_append_backpack_items_object(out, outCap, pos))
+            return false;
+        *addedCount = (u8)(*addedCount + 1);
+        g_netMockBackpackFullItemsDelivered = 1;
+    }
     return true;
 }
 
@@ -3378,9 +3622,10 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
     }
     if (needSkill)
     {
-        if (!vm_net_mock_append_login_tail_skill_objects(out, outCap, &pos))
+        u8 added = 0;
+        if (!vm_net_mock_append_login_tail_skill_objects(out, outCap, &pos, &added))
             return 0;
-        objectCount += 2;
+        objectCount = (u8)(objectCount + added);
     }
     else if (needBooks)
     {
@@ -3508,7 +3753,8 @@ static u32 vm_net_mock_build_scene_default_event_response(u8 *out, u32 outCap)
     if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 4))
         return 0;
     vm_net_mock_finish_wt_object(out, objectStart, pos);
-    vm_net_mock_finish_wt_packet(out, pos, 1);
+    objectCount += 1;
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
     return pos;
 }
 
@@ -6119,9 +6365,10 @@ static bool vm_net_mock_append_scene_resource_followup_objects(u8 *out, u32 outC
      */
     if (includeSkillBooks)
     {
-        if (!vm_net_mock_append_login_tail_skill_objects(out, outCap, pos))
+        u8 added = 0;
+        if (!vm_net_mock_append_login_tail_skill_objects(out, outCap, pos, &added))
             return false;
-        *objectCount += 2;
+        *objectCount = (u8)(*objectCount + added);
     }
 
     if (!vm_net_mock_append_taskinfo_empty1_object(out, outCap, pos))
@@ -6325,6 +6572,7 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
         return 0;
     }
     objectCount += 1;
+
     if (sceneNpcInfo11SeedInFollowup)
     {
         /*
@@ -6445,6 +6693,7 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
                                                            false, true, true, true, false, false,
                                                            seedSubsetNpcOther))
         return 0;
+
     if (completeDeferredScene)
     {
         const vm_net_mock_scene_change_target *target = &g_vm_net_mock_last_scene_change_target;
@@ -6637,12 +6886,13 @@ static bool vm_net_mock_is_login_tail_skill_request(const u8 *request, u32 reque
 static u32 vm_net_mock_build_login_tail_skill_response(u8 *out, u32 outCap)
 {
     u32 pos = 5;
+    u8 objectCount = 0;
     if (outCap < pos)
         return 0;
-    if (!vm_net_mock_append_login_tail_skill_objects(out, outCap, &pos))
+    if (!vm_net_mock_append_login_tail_skill_objects(out, outCap, &pos, &objectCount))
         return 0;
 
-    vm_net_mock_finish_wt_packet(out, pos, 2);
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
     return pos;
 }
 
@@ -6706,7 +6956,8 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
     u32 actorSummaryValue = vm_net_mock_env_u32("CBE_ACTOR_SUMMARY_VALUE", 0);
     u32 actorGap09C0 = vm_net_mock_env_u32("CBE_ACTOR_GAP09C0", 0);
     u32 actorSummaryStatus = vm_net_mock_env_u32("CBE_ACTOR_STATUS_WORD", roleLevel);
-    u8 actorStateByte0 = vm_net_mock_env_u8("CBE_ACTOR_STATE_BYTE0", 0);
+    u8 actorBackpackCapacity = vm_net_mock_env_u8("CBE_ACTOR_BACKPACK_CAPACITY",
+                                                  VM_NET_MOCK_BACKPACK_CAPACITY);
     u8 actorStateByte1 = vm_net_mock_env_u8("CBE_ACTOR_STATE_BYTE1", 0);
     u8 actorTargetX = 12;
     u8 actorTargetY = 10;
@@ -6793,7 +7044,7 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
      *   six truncated u32 -> word fields
      *   u32 summary176
      *   u32 gap09C0
-     *   u8 state0
+     *   u8 backpackCapacity (stored into main item manager +38)
      *   u8 state1
      *   u32 primaryDisplayMax
      *   u32 secondaryDisplayMax
@@ -6833,7 +7084,7 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
         return 0;
     if (!vm_net_mock_seq_put_u32(out, outCap, &pos, actorGap09C0))
         return 0;
-    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, actorStateByte0))
+    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, actorBackpackCapacity))
         return 0;
     if (!vm_net_mock_seq_put_u8(out, outCap, &pos, actorStateByte1))
         return 0;
@@ -7676,9 +7927,51 @@ static u32 vm_net_mock_build_enter_game_response(u8 *out, u32 outCap)
     return pos;
 }
 
+static bool vm_net_mock_append_game_type_response_object(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap, u32 *pos,
+    u8 requestType, u8 responseType, u8 responseSub)
+{
+    u32 objectStart = 0;
+
+    if (request == NULL || requestLen < 8 || out == NULL || pos == NULL)
+        return false;
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, request[4], responseType, responseSub, &objectStart))
+        return false;
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", 1))
+        return false;
+    if (requestType == 1)
+    {
+        if (!vm_net_mock_put_object_u8(out, outCap, pos, "type", requestType))
+            return false;
+        if (!vm_net_mock_put_object_u8(out, outCap, pos, "npcnum", 0))
+            return false;
+        if (!vm_net_mock_put_object_string(out, outCap, pos, "name", "Codex"))
+            return false;
+        if (!vm_net_mock_put_object_u32(out, outCap, pos, "money", 0))
+            return false;
+    }
+    else if (requestType == 2)
+    {
+        if (!vm_net_mock_put_object_u8(out, outCap, pos, "pcimg", 0))
+            return false;
+    }
+    else if (requestType == 3)
+    {
+        if (!vm_net_mock_put_object_u8(out, outCap, pos, "expcard", 0))
+            return false;
+    }
+
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
 static u32 vm_net_mock_build_game_type_response(const u8 *request, u32 requestLen, u8 *out, u32 outCap, u8 requestType)
 {
-    u32 pos = 11;
+    u32 pos = 5;
+    u8 objectCount = 0;
+    u8 requestKind = 0;
+    u8 requestSubtype = 0;
+
     if (outCap < pos || request == NULL || requestLen < 8)
         return 0;
     u8 responseType = request[6];
@@ -7690,41 +7983,15 @@ static u32 vm_net_mock_build_game_type_response(const u8 *request, u32 requestLe
     else if (requestType == 3)
         responseSub = 32;
 
-    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
+    if (!vm_net_mock_append_game_type_response_object(request, requestLen, out, outCap, &pos,
+                                                      requestType, responseType, responseSub))
         return 0;
-    if (requestType == 1)
-    {
-        if (!vm_net_mock_put_object_u8(out, outCap, &pos, "type", requestType))
-            return 0;
-        if (!vm_net_mock_put_object_u8(out, outCap, &pos, "npcnum", 0))
-            return 0;
-        if (!vm_net_mock_put_object_string(out, outCap, &pos, "name", "Codex"))
-            return 0;
-        if (!vm_net_mock_put_object_u32(out, outCap, &pos, "money", 0))
-            return 0;
-    }
-    else if (requestType == 2)
-    {
-        if (!vm_net_mock_put_object_u8(out, outCap, &pos, "pcimg", 0))
-            return 0;
-    }
-    else if (requestType == 3)
-    {
-        if (!vm_net_mock_put_object_u8(out, outCap, &pos, "expcard", 0))
-            return 0;
-    }
+    objectCount += 1;
 
-    out[0] = 'W';
-    out[1] = 'T';
-    out[2] = (u8)(pos >> 8);
-    out[3] = (u8)pos;
-    out[4] = request[4];
-    out[5] = request[5];
-    out[6] = responseType;
-    out[7] = responseSub;
-    out[8] = 0;
-    out[9] = (u8)((pos - 5) >> 8);
-    out[10] = (u8)(pos - 5);
+    (void)requestKind;
+    (void)requestSubtype;
+
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
     return pos;
 }
 
@@ -7966,6 +8233,26 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     {
         vm_net_log_handled_packet("builtin-shop-actor-query14", request, requestLen, hookedLen);
         return hookedLen;
+    }
+
+    if (vm_net_mock_is_backpack_open_request(request, requestLen))
+    {
+        hookedLen = vm_net_mock_build_backpack_open_response(out, outCap);
+        if (hookedLen)
+        {
+            vm_net_log_handled_packet("builtin-backpack-open", request, requestLen, hookedLen);
+            return hookedLen;
+        }
+    }
+
+    if (vm_net_mock_is_backpack_items_request(request, requestLen))
+    {
+        hookedLen = vm_net_mock_build_backpack_items_response(out, outCap);
+        if (hookedLen)
+        {
+            vm_net_log_handled_packet("builtin-backpack-items", request, requestLen, hookedLen);
+            return hookedLen;
+        }
     }
 
     if (vm_net_mock_is_current_scene_task_subset_followup_request(request, requestLen))

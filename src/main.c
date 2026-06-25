@@ -720,9 +720,16 @@ static void normalize_program_exit_pc(u32 fallbackPc)
 
 static uc_err vm_emu_start(u32 begin, u32 until)
 {
+    u32 cpsr = 0;
     g_currentEmuEntry = begin;
     if (Global_R9)
         vm_restore_r9_for_entry(begin);
+    uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr);
+    if (begin & 1)
+        cpsr |= 0x20;
+    else
+        cpsr &= ~0x20u;
+    uc_reg_write(MTK, UC_ARM_REG_CPSR, &cpsr);
     uc_err err = uc_emu_start(MTK, begin, until, 0, 0);
     normalize_program_exit_pc(begin);
     return err;
@@ -730,9 +737,16 @@ static uc_err vm_emu_start(u32 begin, u32 until)
 
 static uc_err vm_emu_start_count(u32 begin, u32 until, uint64_t count)
 {
+    u32 cpsr = 0;
     g_currentEmuEntry = begin;
     if (Global_R9)
         vm_restore_r9_for_entry(begin);
+    uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr);
+    if (begin & 1)
+        cpsr |= 0x20;
+    else
+        cpsr &= ~0x20u;
+    uc_reg_write(MTK, UC_ARM_REG_CPSR, &cpsr);
     uc_err err = uc_emu_start(MTK, begin, until, 0, count);
     normalize_program_exit_pc(begin);
     return err;
@@ -2047,6 +2061,618 @@ static void vm_autotest_note_scene_actor_parser_pc(u32 pc)
         vm_autotest_note("scene_actor_parser case10_otherinfo pc=%08x count=%u\n",
                          pc, seenActorOtherCase10);
     }
+}
+
+static void vm_autotest_note_backpack_parser_pc(u32 pc)
+{
+    static u32 seenMainStatusEntry = 0;
+    static u32 seenMainStatusCommit = 0;
+    static u32 seenBusinessFollowup = 0;
+    static u32 seenBusinessFallback = 0;
+    static u32 seenBusinessFallbackCall = 0;
+    static u32 seenMainItemAcquire = 0;
+    static u32 seenMainItemAcquireDone = 0;
+    static u32 seenMainItemOp = 0;
+    static u32 seenMainItemOpDone = 0;
+    static u32 seenModuleInit = 0;
+    static u32 seenModuleInitManagers = 0;
+    static u32 seenUiInit = 0;
+    static u32 seenUiSyncCall = 0;
+    static u32 seenUiRequest = 0;
+    static u32 seenEntry = 0;
+    static u32 seenCommit = 0;
+    static u32 seenGridEntry = 0;
+    static u32 seenGridCommit = 0;
+    static u32 seenGridInsertEntry = 0;
+    static u32 seenGridLoadResult = 0;
+    static u32 seenGlobalNetEntry = 0;
+    static u32 seenItemDeltaEntry = 0;
+    static u32 seenItemDeltaApply = 0;
+    static u32 seenBottomInit = 0;
+    static u32 seenBottomInitDone = 0;
+    static u32 seenBottomRender = 0;
+    static u32 seenFullBackpackInit = 0;
+    static u32 seenFullBackpackRender = 0;
+    static u32 seenCbmRegister = 0;
+    u32 r9 = 0;
+
+    if (!g_autotestEnabled)
+        return;
+    if (pc != 0x0102657A && pc != 0x010265E4 &&
+        pc != 0x01012F7E && pc != 0x01012F8E && pc != 0x01012FA4 &&
+        pc != 0x0101191A && pc != 0x010119DE &&
+        pc != 0x01033544 && pc != 0x0103374E &&
+        pc != 0x01039952 && pc != 0x01039AF8 &&
+        pc != 0x0101918E && pc != 0x010191A2 &&
+        pc != 0x0518164A && pc != 0x0518169C &&
+        pc != 0x05182434 && pc != 0x0518248E && pc != 0x051824A4 &&
+        pc != 0x0518418C && pc != 0x05184538 &&
+        pc != 0x051811CE &&
+        pc != 0x05180D04 && pc != 0x05181094 &&
+        pc != 0x05185B58 && pc != 0x05185BC6 &&
+        pc != 0x05185FBE &&
+        pc != 0x051865B6 &&
+        pc != 0x05183E44 && pc != 0x0518251A)
+        return;
+
+    uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+    if (r9 == 0)
+        r9 = Global_R9;
+
+#define READ_MAIN_BACKPACK_STATE(manager_, count_, cap_, list_, item0_, seq0_, stack242_, stack272_) \
+    do                                                                                              \
+    {                                                                                               \
+        if ((manager_) != 0)                                                                        \
+        {                                                                                           \
+            uc_mem_read(MTK, (manager_) + 36, &(count_), sizeof(count_));                           \
+            uc_mem_read(MTK, (manager_) + 40, &(cap_), sizeof(cap_));                               \
+            uc_mem_read(MTK, (manager_) + 32, &(list_), sizeof(list_));                              \
+            if ((list_) != 0 && (count_) > 0)                                                       \
+            {                                                                                       \
+                uc_mem_read(MTK, (list_), &(item0_), sizeof(item0_));                               \
+                uc_mem_read(MTK, (list_) + 276, &(seq0_), sizeof(seq0_));                           \
+                uc_mem_read(MTK, (list_) + 242, &(stack242_), sizeof(stack242_));                   \
+                uc_mem_read(MTK, (list_) + 272, &(stack272_), sizeof(stack272_));                   \
+            }                                                                                       \
+        }                                                                                           \
+    } while (0)
+
+    if (pc == 0x01012F7E && seenBusinessFollowup < 16)
+    {
+        u32 result = 0;
+        u32 entryCount = 0;
+        u32 fallback = 0;
+        ++seenBusinessFollowup;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &result);
+        if (Global_R9 != 0)
+        {
+            uc_mem_read(MTK, Global_R9 + 21904, &entryCount, sizeof(entryCount));
+            uc_mem_read(MTK, Global_R9 + 23856, &fallback, sizeof(fallback));
+        }
+        vm_autotest_note("backpack_business_followup pc=%08x result=%u entries=%u fallback=%08x seen=%u\n",
+                         pc, result, entryCount, fallback, seenBusinessFollowup);
+    }
+    else if (pc == 0x01012F8E && seenBusinessFallback < 16)
+    {
+        u32 fallback = 0;
+        u32 r0 = 0;
+        u32 r1 = 0;
+        u32 r2 = 0;
+        u32 r3 = 0;
+        ++seenBusinessFallback;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+        if (Global_R9 != 0)
+            uc_mem_read(MTK, Global_R9 + 23856, &fallback, sizeof(fallback));
+        vm_autotest_note("backpack_business_fallback pc=%08x fallback=%08x r0=%08x r1=%08x r2=%08x event=%u seen=%u\n",
+                         pc, fallback, r0, r1, r2, r3, seenBusinessFallback);
+    }
+    else if (pc == 0x01012FA4 && seenBusinessFallbackCall < 16)
+    {
+        u32 fallback = 0;
+        u32 r0 = 0;
+        u32 r1 = 0;
+        u32 r2 = 0;
+        u32 r3 = 0;
+        ++seenBusinessFallbackCall;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+        if (Global_R9 != 0)
+            uc_mem_read(MTK, Global_R9 + 23856, &fallback, sizeof(fallback));
+        vm_autotest_note("backpack_business_fallback_call pc=%08x fallback=%08x r0=%08x r1=%08x r2=%08x event=%u seen=%u\n",
+                         pc, fallback, r0, r1, r2, r3, seenBusinessFallbackCall);
+    }
+    else if (pc == 0x051865B6 && seenCbmRegister < 8)
+    {
+        u32 r0 = 0;
+        u32 r1 = 0;
+        u32 r2 = 0;
+        u32 r3 = 0;
+        u32 r5 = 0;
+        u32 sp = 0;
+        u32 arg4 = 0;
+        u32 arg5 = 0;
+        u32 apiTable = 0;
+        ++seenCbmRegister;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+        uc_reg_read(MTK, UC_ARM_REG_R5, &r5);
+        uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+        if (sp != 0)
+        {
+            uc_mem_read(MTK, sp, &arg4, sizeof(arg4));
+            uc_mem_read(MTK, sp + 4, &arg5, sizeof(arg5));
+        }
+        if (r9 != 0)
+            uc_mem_read(MTK, r9 + 8276, &apiTable, sizeof(apiTable));
+        vm_autotest_note("backpack_cbm_register pc=%08x r9=%08x table=%08x init=%08x event=%08x logic=%08x render=%08x net=%08x target=%08x api=%08x count=%u\n",
+                         pc, r9, r0, r1, r2, r3, arg4, arg5, r5, apiTable, seenCbmRegister);
+    }
+    else if (pc == 0x0102657A && seenMainStatusEntry < 8)
+    {
+        u32 object = 0;
+        u32 kind = 0;
+        u32 subtype = 0;
+        ++seenMainStatusEntry;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &object);
+        if (object != 0)
+        {
+            uc_mem_read(MTK, object + 4, &kind, sizeof(kind));
+            uc_mem_read(MTK, object + 8, &subtype, sizeof(subtype));
+        }
+        vm_autotest_note("backpack_status25 entry pc=%08x object=%08x kind=%u subtype=%u r9=%08x count=%u\n",
+                         pc, object, kind, subtype, r9, seenMainStatusEntry);
+    }
+    else if (pc == 0x010265E4 && seenMainStatusCommit < 8)
+    {
+        u32 business = 0;
+        u16 maxnum = 0;
+        u8 itemCount = 0;
+        u32 itemId = 0;
+        u8 stack = 0;
+        ++seenMainStatusCommit;
+        if (Global_R9 != 0)
+        {
+            uc_mem_read(MTK, Global_R9 + 21676, &business, sizeof(business));
+            if (business != 0)
+            {
+                uc_mem_read(MTK, business + 546, &maxnum, sizeof(maxnum));
+                uc_mem_read(MTK, business + 548, &itemCount, sizeof(itemCount));
+                uc_mem_read(MTK, business + 549, &itemId, sizeof(itemId));
+                uc_mem_read(MTK, business + 553, &stack, sizeof(stack));
+            }
+        }
+        vm_autotest_note("backpack_status25 commit pc=%08x business=%08x maxnum=%u item_count=%u item0=%u stack=%u count=%u\n",
+                         pc, business, maxnum, itemCount, itemId, stack, seenMainStatusCommit);
+    }
+    else if (pc == 0x0101191A && seenMainItemAcquire < 8)
+    {
+        u32 object = 0;
+        u32 kind = 0;
+        u32 subtype = 0;
+        u32 manager = Global_R9 + 24640;
+        u16 itemCount = 0;
+        u16 itemCap = 0;
+        u32 itemList = 0;
+        u32 item0 = 0;
+        u16 seq0 = 0;
+        u16 stack242 = 0;
+        u16 stack272 = 0;
+        ++seenMainItemAcquire;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &object);
+        if (object != 0)
+        {
+            uc_mem_read(MTK, object + 4, &kind, sizeof(kind));
+            uc_mem_read(MTK, object + 8, &subtype, sizeof(subtype));
+        }
+        if (Global_R9 != 0)
+            READ_MAIN_BACKPACK_STATE(manager, itemCount, itemCap, itemList, item0, seq0, stack242, stack272);
+        vm_autotest_note("backpack_main_item_acquire entry pc=%08x object=%08x kind=%u subtype=%u manager=%08x count_before=%u cap=%u list=%08x item0=%u seq0=%u stack242=%u stack272=%u seen=%u\n",
+                         pc, object, kind, subtype, manager, itemCount, itemCap,
+                         itemList, item0, seq0, stack242, stack272, seenMainItemAcquire);
+    }
+    else if (pc == 0x010119DE && seenMainItemAcquireDone < 8)
+    {
+        u32 manager = Global_R9 + 24640;
+        u32 gameItemManager = 0;
+        u32 gameItemList = 0;
+        u32 gameItemCount = 0;
+        u16 itemCount = 0;
+        u16 itemCap = 0;
+        u32 itemList = 0;
+        u32 item0 = 0;
+        u16 seq0 = 0;
+        u16 stack242 = 0;
+        u16 stack272 = 0;
+        ++seenMainItemAcquireDone;
+        if (Global_R9 != 0)
+        {
+            READ_MAIN_BACKPACK_STATE(manager, itemCount, itemCap, itemList, item0, seq0, stack242, stack272);
+            uc_mem_read(MTK, Global_R9 + 10324, &gameItemManager, sizeof(gameItemManager));
+            if (gameItemManager != 0)
+            {
+                uc_mem_read(MTK, gameItemManager + 32, &gameItemList, sizeof(gameItemList));
+                uc_mem_read(MTK, gameItemManager + 36, &gameItemCount, sizeof(gameItemCount));
+            }
+        }
+        vm_autotest_note("backpack_main_item_acquire done pc=%08x manager=%08x count_after=%u cap=%u list=%08x item0=%u seq0=%u stack242=%u stack272=%u game_mgr=%08x game_list=%08x game_count=%u seen=%u\n",
+                         pc, manager, itemCount, itemCap, itemList, item0, seq0,
+                         stack242, stack272, gameItemManager, gameItemList,
+                         gameItemCount, seenMainItemAcquireDone);
+    }
+    else if (pc == 0x01033544 && seenMainItemOp < 12)
+    {
+        u32 manager = 0;
+        u32 object = 0;
+        u32 kind = 0;
+        u32 subtype = 0;
+        u16 itemCount = 0;
+        u16 itemCap = 0;
+        u32 itemList = 0;
+        u32 item0 = 0;
+        u16 seq0 = 0;
+        u16 stack242 = 0;
+        u16 stack272 = 0;
+        ++seenMainItemOp;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &manager);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &object);
+        if (object != 0)
+        {
+            uc_mem_read(MTK, object + 4, &kind, sizeof(kind));
+            uc_mem_read(MTK, object + 8, &subtype, sizeof(subtype));
+        }
+        if (manager != 0)
+            READ_MAIN_BACKPACK_STATE(manager, itemCount, itemCap, itemList, item0, seq0, stack242, stack272);
+        vm_autotest_note("backpack_main_item_op entry pc=%08x manager=%08x object=%08x kind=%u subtype=%u count=%u cap=%u list=%08x item0=%u seq0=%u stack242=%u stack272=%u seen=%u\n",
+                         pc, manager, object, kind, subtype, itemCount, itemCap,
+                         itemList, item0, seq0, stack242, stack272, seenMainItemOp);
+    }
+    else if (pc == 0x0103374E && seenMainItemOpDone < 8)
+    {
+        u32 manager = Global_R9 + 24640;
+        u16 itemCount = 0;
+        u16 itemCap = 0;
+        u32 itemList = 0;
+        u32 item0 = 0;
+        u16 seq0 = 0;
+        u16 stack242 = 0;
+        u16 stack272 = 0;
+        ++seenMainItemOpDone;
+        if (Global_R9 != 0)
+            READ_MAIN_BACKPACK_STATE(manager, itemCount, itemCap, itemList, item0, seq0, stack242, stack272);
+        vm_autotest_note("backpack_main_item_op count_done pc=%08x manager=%08x count=%u cap=%u list=%08x item0=%u seq0=%u stack242=%u stack272=%u seen=%u\n",
+                         pc, manager, itemCount, itemCap, itemList, item0,
+                         seq0, stack242, stack272, seenMainItemOpDone);
+    }
+    else if (pc == 0x0518164A && seenModuleInit < 4)
+    {
+        ++seenModuleInit;
+        vm_autotest_note("backpack_module_init entry pc=%08x r9=%08x seen=%u\n",
+                         pc, r9, seenModuleInit);
+    }
+    else if (pc == 0x0518169C && seenModuleInitManagers < 4)
+    {
+        u32 itemManager = 0;
+        u32 bottomManager = 0;
+        ++seenModuleInitManagers;
+        if (r9 != 0)
+        {
+            uc_mem_read(MTK, r9 + 10324, &itemManager, sizeof(itemManager));
+            uc_mem_read(MTK, r9 + 10344, &bottomManager, sizeof(bottomManager));
+        }
+        vm_autotest_note("backpack_module_init managers pc=%08x r9=%08x item_mgr=%08x bottom_mgr=%08x seen=%u\n",
+                         pc, r9, itemManager, bottomManager, seenModuleInitManagers);
+    }
+    else if (pc == 0x05182434 && seenUiInit < 8)
+    {
+        ++seenUiInit;
+        vm_autotest_note("backpack_ui init pc=%08x r9=%08x count=%u\n", pc, r9, seenUiInit);
+    }
+    else if (pc == 0x0518248E && seenUiSyncCall < 8)
+    {
+        u32 syncFn = 0;
+        u32 itemBase = 0;
+        u32 itemCount = 0;
+        u32 mainManager = Global_R9 + 24640;
+        u16 mainCount = 0;
+        u16 mainCap = 0;
+        ++seenUiSyncCall;
+        if (r9 != 0)
+        {
+            uc_mem_read(MTK, r9 + 11756, &syncFn, sizeof(syncFn));
+            uc_mem_read(MTK, r9 + 10680, &itemBase, sizeof(itemBase));
+            uc_mem_read(MTK, r9 + 10708, &itemCount, sizeof(itemCount));
+        }
+        if (Global_R9 != 0)
+        {
+            uc_mem_read(MTK, mainManager + 36, &mainCount, sizeof(mainCount));
+            uc_mem_read(MTK, mainManager + 40, &mainCap, sizeof(mainCap));
+        }
+        vm_autotest_note("backpack_ui sync_call pc=%08x r9=%08x sync_fn=%08x local_count=%u local_base=%08x main_count=%u main_cap=%u seen=%u\n",
+                         pc, r9, syncFn, itemCount, itemBase, mainCount, mainCap, seenUiSyncCall);
+    }
+    else if (pc == 0x051824A4 && seenUiRequest < 8)
+    {
+        u32 r0 = 0;
+        u32 r1 = 0;
+        u32 r2 = 0;
+        u32 r3 = 0;
+        ++seenUiRequest;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+        vm_autotest_note("backpack_ui request_call pc=%08x r0=%u r1=%u r2=%u r3=%u r9=%08x count=%u\n",
+                         pc, r0, r1, r2, r3, r9, seenUiRequest);
+    }
+    else if (pc == 0x0518418C && seenEntry < 8)
+    {
+        u32 object = 0;
+        u32 kind = 0;
+        u32 subtype = 0;
+        ++seenEntry;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &object);
+        if (object != 0)
+        {
+            uc_mem_read(MTK, object + 4, &kind, sizeof(kind));
+            uc_mem_read(MTK, object + 8, &subtype, sizeof(subtype));
+        }
+        vm_autotest_note("backpack_parser entry pc=%08x object=%08x kind=%u subtype=%u r9=%08x count=%u\n",
+                         pc, object, kind, subtype, r9, seenEntry);
+    }
+    else if (pc == 0x05184538 && seenCommit < 8)
+    {
+        u32 itemCount = 0;
+        u32 itemBase = 0;
+        u32 itemId = 0;
+        u16 stack242 = 0;
+        u8 extra286 = 0;
+        u8 extra287 = 0;
+        u16 attr290 = 0;
+        ++seenCommit;
+        if (r9 != 0)
+        {
+            uc_mem_read(MTK, r9 + 10708, &itemCount, sizeof(itemCount));
+            uc_mem_read(MTK, r9 + 10680, &itemBase, sizeof(itemBase));
+            if (itemBase != 0 && itemCount > 0)
+            {
+                uc_mem_read(MTK, itemBase, &itemId, sizeof(itemId));
+                uc_mem_read(MTK, itemBase + 242, &stack242, sizeof(stack242));
+                uc_mem_read(MTK, itemBase + 286, &extra286, sizeof(extra286));
+                uc_mem_read(MTK, itemBase + 287, &extra287, sizeof(extra287));
+                uc_mem_read(MTK, itemBase + 290, &attr290, sizeof(attr290));
+            }
+        }
+        vm_autotest_note("backpack_parser commit pc=%08x r9=%08x item_count=%u item_base=%08x item0=%u stack242=%u extra286=%u extra287=%u attr290=%u count=%u\n",
+                         pc, r9, itemCount, itemBase, itemId, stack242,
+                         extra286, extra287, attr290, seenCommit);
+    }
+    else if (pc == 0x01039952 && seenGridEntry < 8)
+    {
+        u32 object = 0;
+        u32 kind = 0;
+        u32 subtype = 0;
+        ++seenGridEntry;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &object);
+        if (object != 0)
+        {
+            uc_mem_read(MTK, object + 4, &kind, sizeof(kind));
+            uc_mem_read(MTK, object + 8, &subtype, sizeof(subtype));
+        }
+        vm_autotest_note("backpack_grid entry pc=%08x object=%08x kind=%u subtype=%u r9=%08x count=%u\n",
+                         pc, object, kind, subtype, r9, seenGridEntry);
+    }
+    else if (pc == 0x01039AF8 && seenGridCommit < 8)
+    {
+        u8 busy = 0xff;
+        u32 busyPtr = 0;
+        u32 manager = Global_R9 + 24640;
+        u16 itemCount = 0;
+        u16 itemCap = 0;
+        u32 itemList = 0;
+        u32 item0 = 0;
+        u16 seq0 = 0;
+        u16 stack242 = 0;
+        u16 stack272 = 0;
+        ++seenGridCommit;
+        if (Global_R9 != 0)
+        {
+            busyPtr = Global_R9 + 21808;
+            uc_mem_read(MTK, busyPtr, &busy, sizeof(busy));
+            READ_MAIN_BACKPACK_STATE(manager, itemCount, itemCap, itemList, item0, seq0, stack242, stack272);
+        }
+        vm_autotest_note("backpack_grid commit pc=%08x r9=%08x busy_ptr=%08x busy=%u manager=%08x item_count=%u cap=%u list=%08x item0=%u seq0=%u stack242=%u stack272=%u count=%u\n",
+                         pc, r9, busyPtr, busy, manager, itemCount, itemCap,
+                         itemList, item0, seq0, stack242, stack272, seenGridCommit);
+    }
+    else if (pc == 0x0101918E && seenGridInsertEntry < 8)
+    {
+        u32 itemStruct = 0;
+        u32 itemId = 0;
+        u32 count = 0;
+        u32 seq = 0;
+        u32 stackPtr = 0;
+        u32 item0 = 0;
+        ++seenGridInsertEntry;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &itemStruct);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &itemId);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &count);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &seq);
+        uc_reg_read(MTK, UC_ARM_REG_SP, &stackPtr);
+        if (itemStruct != 0)
+            uc_mem_read(MTK, itemStruct, &item0, sizeof(item0));
+        vm_autotest_note("backpack_grid insert_entry pc=%08x item_struct=%08x item_id=%u count=%u seq=%u item0=%u sp=%08x seen=%u\n",
+                         pc, itemStruct, itemId, count, seq, item0, stackPtr, seenGridInsertEntry);
+    }
+    else if (pc == 0x010191A2 && seenGridLoadResult < 8)
+    {
+        u32 loadResult = 0;
+        u32 itemStruct = 0;
+        u32 item0 = 0;
+        u8 itemType = 0;
+        ++seenGridLoadResult;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &loadResult);
+        uc_reg_read(MTK, UC_ARM_REG_R4, &itemStruct);
+        if (itemStruct != 0)
+        {
+            uc_mem_read(MTK, itemStruct, &item0, sizeof(item0));
+            uc_mem_read(MTK, itemStruct + 282, &itemType, sizeof(itemType));
+        }
+        vm_autotest_note("backpack_grid load_result pc=%08x result=%u item_struct=%08x item0=%u type282=%u seen=%u\n",
+                         pc, loadResult, itemStruct, item0, itemType, seenGridLoadResult);
+    }
+    else if (pc == 0x051811CE && seenGlobalNetEntry < 16)
+    {
+        u32 r0 = 0;
+        u32 r1 = 0;
+        u32 r2 = 0;
+        u32 r3 = 0;
+        ++seenGlobalNetEntry;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+        vm_autotest_note("backpack_global_net entry pc=%08x r0=%08x r1=%08x r2=%08x event=%u r9=%08x count=%u\n",
+                         pc, r0, r1, r2, r3, r9, seenGlobalNetEntry);
+    }
+    else if (pc == 0x05180D04 && seenItemDeltaEntry < 8)
+    {
+        u32 object = 0;
+        u32 kind = 0;
+        u32 subtype = 0;
+        ++seenItemDeltaEntry;
+        uc_reg_read(MTK, UC_ARM_REG_R1, &object);
+        if (object != 0)
+        {
+            uc_mem_read(MTK, object + 4, &kind, sizeof(kind));
+            uc_mem_read(MTK, object + 8, &subtype, sizeof(subtype));
+        }
+        vm_autotest_note("backpack_item_delta entry pc=%08x object=%08x kind=%u subtype=%u r9=%08x count=%u\n",
+                         pc, object, kind, subtype, r9, seenItemDeltaEntry);
+    }
+    else if (pc == 0x05181094 && seenItemDeltaApply < 8)
+    {
+        ++seenItemDeltaApply;
+        vm_autotest_note("backpack_item_delta apply pc=%08x r9=%08x count=%u\n",
+                         pc, r9, seenItemDeltaApply);
+    }
+    else if (pc == 0x05185B58 && seenBottomInit < 8)
+    {
+        u32 manager = 0;
+        u32 listHead = 0;
+        ++seenBottomInit;
+        if (r9 != 0)
+        {
+            uc_mem_read(MTK, r9 + 10344, &manager, sizeof(manager));
+            if (manager != 0)
+                uc_mem_read(MTK, manager, &listHead, sizeof(listHead));
+        }
+        vm_autotest_note("backpack_bottom init pc=%08x r9=%08x manager=%08x list_head=%08x count=%u\n",
+                         pc, r9, manager, listHead, seenBottomInit);
+    }
+    else if (pc == 0x05185BC6 && seenBottomInitDone < 8)
+    {
+        u16 localCount = 0;
+        u32 listHead = 0;
+        ++seenBottomInitDone;
+        if (r9 != 0)
+        {
+            uc_mem_read(MTK, r9 + 10624, &localCount, sizeof(localCount));
+            uc_mem_read(MTK, r9 + 10724, &listHead, sizeof(listHead));
+        }
+        vm_autotest_note("backpack_bottom init_done pc=%08x r9=%08x local_count=%u list_head=%08x count=%u\n",
+                         pc, r9, localCount, listHead, seenBottomInitDone);
+    }
+    else if (pc == 0x05185FBE && seenBottomRender < 12)
+    {
+        u32 statusPtr = 0;
+        u32 statusUsed = 0;
+        u16 localCount = 0;
+        u32 listHead = 0;
+        u8 nodeActive = 0;
+        u32 nodeCount = 0;
+        u32 nodeNext = 0;
+        ++seenBottomRender;
+        if (r9 != 0)
+        {
+            uc_mem_read(MTK, r9 + 10328, &statusPtr, sizeof(statusPtr));
+            if (statusPtr != 0)
+                uc_mem_read(MTK, statusPtr + 184, &statusUsed, sizeof(statusUsed));
+            uc_mem_read(MTK, r9 + 10624, &localCount, sizeof(localCount));
+            uc_mem_read(MTK, r9 + 10724, &listHead, sizeof(listHead));
+            if (listHead != 0)
+            {
+                uc_mem_read(MTK, listHead + 98, &nodeActive, sizeof(nodeActive));
+                uc_mem_read(MTK, listHead + 112, &nodeCount, sizeof(nodeCount));
+                uc_mem_read(MTK, listHead + 136, &nodeNext, sizeof(nodeNext));
+            }
+        }
+        vm_autotest_note("backpack_bottom render pc=%08x r9=%08x status_used=%u local_count=%u list_head=%08x active=%u node_count=%u next=%08x count=%u\n",
+                         pc, r9, statusUsed, localCount, listHead,
+                         nodeActive, nodeCount, nodeNext, seenBottomRender);
+    }
+    else if ((pc == 0x05183E44 || pc == 0x0518251A) &&
+             (pc == 0x05183E44 ? seenFullBackpackInit < 8 : seenFullBackpackRender < 16))
+    {
+        u8 phase = 0;
+        u32 itemCount = 0;
+        u32 itemBase = 0;
+        u32 itemId = 0;
+        u16 stack = 0;
+        u16 stackMax = 0;
+        u8 extra286 = 0;
+        u8 extra287 = 0;
+        u32 price = 0;
+        u32 gameItemManager = 0;
+        u32 gameItemList = 0;
+        u32 gameItemCount = 0;
+        u32 gameItem0 = 0;
+        u16 gameItem0Stack = 0;
+        u32 seen = 0;
+        if (pc == 0x05183E44)
+            seen = ++seenFullBackpackInit;
+        else
+            seen = ++seenFullBackpackRender;
+        if (r9 != 0)
+        {
+            uc_mem_read(MTK, r9 + 10622, &phase, sizeof(phase));
+            uc_mem_read(MTK, r9 + 10708, &itemCount, sizeof(itemCount));
+            uc_mem_read(MTK, r9 + 10680, &itemBase, sizeof(itemBase));
+            uc_mem_read(MTK, r9 + 10324, &gameItemManager, sizeof(gameItemManager));
+            if (gameItemManager != 0)
+            {
+                uc_mem_read(MTK, gameItemManager + 32, &gameItemList, sizeof(gameItemList));
+                uc_mem_read(MTK, gameItemManager + 36, &gameItemCount, sizeof(gameItemCount));
+                if (gameItemList != 0 && gameItemCount > 0)
+                {
+                    uc_mem_read(MTK, gameItemList, &gameItem0, sizeof(gameItem0));
+                    uc_mem_read(MTK, gameItemList + 242, &gameItem0Stack, sizeof(gameItem0Stack));
+                }
+            }
+            if (itemBase != 0 && itemCount > 0)
+            {
+                uc_mem_read(MTK, itemBase, &itemId, sizeof(itemId));
+                uc_mem_read(MTK, itemBase + 20, &price, sizeof(price));
+                uc_mem_read(MTK, itemBase + 242, &stack, sizeof(stack));
+                uc_mem_read(MTK, itemBase + 244, &stackMax, sizeof(stackMax));
+                uc_mem_read(MTK, itemBase + 286, &extra286, sizeof(extra286));
+                uc_mem_read(MTK, itemBase + 287, &extra287, sizeof(extra287));
+            }
+        }
+        vm_autotest_note("backpack_full %s pc=%08x r9=%08x phase=%u item_count=%u item_base=%08x item0=%u stack=%u stack_max=%u price=%u extra286=%u extra287=%u game_mgr=%08x game_count=%u game_list=%08x game_item0=%u game_stack=%u count=%u\n",
+                         pc == 0x05183E44 ? "init_label" : "render_label",
+                         pc, r9, phase, itemCount, itemBase, itemId, stack,
+                         stackMax, price, extra286, extra287, gameItemManager,
+                         gameItemCount, gameItemList, gameItem0, gameItem0Stack, seen);
+    }
+
+#undef READ_MAIN_BACKPACK_STATE
 }
 
 static void vm_autotest_dump_scene_tables(u32 elapsedMs)
@@ -8556,6 +9182,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     vm_restore_main_r9_for_rom_code((u32)address);
     vm_autotest_note_startup_pc((u32)address & ~1u);
     vm_autotest_note_scene_actor_parser_pc((u32)address & ~1u);
+    vm_autotest_note_backpack_parser_pc((u32)address & ~1u);
 
     if (vm_is_manager_func_stub_address((u32)address))
         return;
