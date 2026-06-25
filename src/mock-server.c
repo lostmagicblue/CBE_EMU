@@ -281,6 +281,21 @@ static void vm_net_mock_battle_default_wire_slots(bool playerOnRight, u8 side,
     u8 playerSlot = playerOnRight ? 1 : 0;
     u8 enemySlot = playerOnRight ? 0 : 1;
 
+    if (g_mockBattleSceneMonsterStartActive != 0)
+    {
+        /*
+         * Runtime subtype-5 evidence shows side=1 remaps wire 1 to the role
+         * slot and wire 0 to the touched scene monster slot.
+         */
+        playerSlot = (side == 1) ? 1 : 0;
+        enemySlot = (side == 1) ? 0 : 1;
+        if (playerSlotOut)
+            *playerSlotOut = playerSlot;
+        if (enemySlotOut)
+            *enemySlotOut = enemySlot;
+        return;
+    }
+
     if (side == 1)
     {
         playerSlot = playerOnRight ? 0 : 1;
@@ -624,6 +639,14 @@ static bool vm_net_mock_put_le16(u8 *out, u32 outCap, u32 *pos, u16 value)
     out[(*pos)++] = (u8)(value & 0xff);
     out[(*pos)++] = (u8)(value >> 8);
     return true;
+}
+
+static void vm_net_mock_store_le32(u8 *out, u32 offset, u32 value)
+{
+    out[offset + 0] = (u8)(value & 0xff);
+    out[offset + 1] = (u8)((value >> 8) & 0xff);
+    out[offset + 2] = (u8)((value >> 16) & 0xff);
+    out[offset + 3] = (u8)((value >> 24) & 0xff);
 }
 
 static u32 vm_net_mock_build_minimal_actor_motion_resource(u8 *out, u32 outCap)
@@ -4406,6 +4429,130 @@ static bool vm_net_mock_append_actor_moveinfo_empty_ack_object(u8 *out, u32 outC
     return true;
 }
 
+static bool vm_net_mock_seq_put_len16_blob(u8 *out, u32 outCap, u32 *pos,
+                                           const u8 *data, u16 dataLen)
+{
+    return vm_net_mock_put_be16(out, outCap, pos, dataLen) &&
+           vm_net_mock_put_bytes(out, outCap, pos, data, dataLen);
+}
+
+static bool vm_net_mock_build_scene_monster_moveinfo_blob(u8 *out, u32 outCap,
+                                                          u32 *blobLenOut,
+                                                          u32 actorId,
+                                                          u32 posx,
+                                                          u32 posy)
+{
+    u32 pos = 0;
+    u8 state[64];
+    u32 enemyHp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", 20);
+    u32 enemyMaxHp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MAX_HP", enemyHp);
+    u32 enemyMp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MP", 20);
+    u32 enemyMaxMp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MAX_MP", enemyMp);
+
+    if (out == NULL || blobLenOut == NULL || actorId == 0)
+        return false;
+    if (enemyMaxHp < enemyHp)
+        enemyMaxHp = enemyHp;
+    if (enemyMaxMp < enemyMp)
+        enemyMaxMp = enemyMp;
+
+    memset(state, 0, sizeof(state));
+    /*
+     * net_handle_actor_move_info case 2 copies this raw blob into
+     * ActorSceneNode+0x88. Battle.cbm subtype 5 then reads HP/MP from
+     * node+0xB4/+0xB8/+0xBC/+0xC0, i.e. blob+44/+48/+52/+56.
+     */
+    vm_net_mock_store_le32(state, 44, enemyHp);
+    vm_net_mock_store_le32(state, 48, enemyMp);
+    vm_net_mock_store_le32(state, 52, enemyMaxHp);
+    vm_net_mock_store_le32(state, 56, enemyMaxMp);
+
+    if (!vm_net_mock_seq_put_i16(out, outCap, &pos, (u16)posx))
+        return false;
+    if (!vm_net_mock_seq_put_i16(out, outCap, &pos, (u16)posy))
+        return false;
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, actorId))
+        return false;
+    if (!vm_net_mock_seq_put_len16_blob(out, outCap, &pos, state, (u16)sizeof(state)))
+        return false;
+
+    *blobLenOut = pos;
+    return true;
+}
+
+static bool vm_net_mock_append_scene_monster_moveinfo2_object(u8 *out, u32 outCap,
+                                                              u32 *pos,
+                                                              u32 actorId,
+                                                              u32 posx,
+                                                              u32 posy)
+{
+    u8 moveInfo[128];
+    u32 moveInfoLen = 0;
+    u32 objectStart = 0;
+
+    memset(moveInfo, 0, sizeof(moveInfo));
+    if (!vm_net_mock_build_scene_monster_moveinfo_blob(moveInfo, sizeof(moveInfo),
+                                                       &moveInfoLen,
+                                                       actorId, posx, posy))
+        return false;
+    if (moveInfoLen == 0 || moveInfoLen > 0xffff)
+        return false;
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 2, 2, &objectStart))
+        return false;
+    if (!vm_net_mock_put_object_entry(out, outCap, pos, "moveinfo",
+                                      moveInfo, (u16)moveInfoLen))
+        return false;
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    vm_autotest_note("mock_scene_monster_moveinfo actor=%u pos=(%u,%u) hp=%u/%u mp=%u/%u len=%u\n",
+                     actorId, posx, posy,
+                     vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", 20),
+                     vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MAX_HP",
+                                         vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", 20)),
+                     vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MP", 20),
+                     vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MAX_MP",
+                                         vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MP", 20)),
+                     moveInfoLen);
+    return true;
+}
+
+static bool vm_net_mock_select_scene_actor_moveinfo_target(u32 actorId,
+                                                           u32 *indexOut,
+                                                           u32 *posxOut,
+                                                           u32 *posyOut)
+{
+    u32 sceneNodeBase = 0;
+
+    if (actorId == 0 || Global_R9 == 0)
+        return false;
+    if (uc_mem_read(MTK, Global_R9 + 0x5CB0, &sceneNodeBase, sizeof(sceneNodeBase)) != UC_ERR_OK ||
+        sceneNodeBase == 0)
+        return false;
+
+    for (u32 i = 0; i < 25; ++i)
+    {
+        u32 node = sceneNodeBase + i * 340u;
+        u32 nodeActorId = 0;
+        u32 nodePosX = 0;
+        u32 nodePosY = 0;
+        u8 active = 0;
+        if (uc_mem_read(MTK, node + 319, &active, sizeof(active)) != UC_ERR_OK || active == 0)
+            continue;
+        if (uc_mem_read(MTK, node + 100, &nodeActorId, sizeof(nodeActorId)) != UC_ERR_OK ||
+            nodeActorId != actorId)
+            continue;
+        (void)uc_mem_read(MTK, node + 240, &nodePosX, sizeof(nodePosX));
+        (void)uc_mem_read(MTK, node + 244, &nodePosY, sizeof(nodePosY));
+        if (indexOut)
+            *indexOut = i;
+        if (posxOut)
+            *posxOut = nodePosX;
+        if (posyOut)
+            *posyOut = nodePosY;
+        return true;
+    }
+    return false;
+}
+
 static bool vm_net_mock_snapshot_current_player_pos(const char *reason)
 {
     u32 currentSceneNode = 0;
@@ -4657,6 +4804,51 @@ static u32 vm_net_mock_build_battle_start_info_blob(u8 *out, u32 outCap,
     if (!vm_net_mock_seq_put_u32(out, outCap, &pos, rightMp))
         return 0;
     if (!vm_net_mock_seq_put_u32(out, outCap, &pos, rightMaxMp))
+        return 0;
+    return pos;
+}
+
+static u32 vm_net_mock_build_battle_scene_start_info_blob(u8 *out, u32 outCap,
+                                                          u32 sceneMonsterIndex,
+                                                          u32 sceneMonsterX,
+                                                          u32 sceneMonsterY,
+                                                          u32 roleId)
+{
+    u32 pos = 0;
+    u32 roleHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP", 120);
+    u32 roleMaxHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_HP", roleHp);
+    u32 roleMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MP", 40);
+    u32 roleMaxMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_MP", roleMp);
+
+    if (roleId == 0)
+        roleId = 10001;
+
+    /*
+     * Battle.cbm HandleBattleStartMsg(0x66CC), subtype 5, is the native
+     * scene-monster entry path. After the first count it reads scene index,
+     * posx, and posy, then copies the left fighter from the Battle.cbm scene
+     * actor table at *(R9+13476). This keeps the monster name/sprite tied to
+     * the touched scene node instead of guessing two sub_23F6 visual bytes.
+     */
+    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 1))
+        return 0;
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, sceneMonsterIndex))
+        return 0;
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, sceneMonsterX))
+        return 0;
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, sceneMonsterY))
+        return 0;
+    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 1))
+        return 0;
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, roleId))
+        return 0;
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, roleHp))
+        return 0;
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, roleMaxHp))
+        return 0;
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, roleMp))
+        return 0;
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, roleMaxMp))
         return 0;
     return pos;
 }
@@ -5651,6 +5843,9 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
     u32 index = 0;
     u32 posx = 0;
     u32 posy = 0;
+    u32 sceneMonsterIndex = 0;
+    u32 sceneMonsterPosX = 0;
+    u32 sceneMonsterPosY = 0;
     u32 roleId = vm_net_mock_env_u32("CBE_BATTLE_ROLE_ID", 10001);
     u32 roleHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP", 120);
     u32 roleMaxHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_HP", roleHp);
@@ -5659,6 +5854,11 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
     bool playerOnRight = vm_net_mock_battle_player_on_right();
     u8 battleSide = (u8)vm_net_mock_env_u32("CBE_BATTLE_SIDE",
                                             vm_net_mock_battle_default_side(playerOnRight));
+    bool useSceneMonsterStart = playerOnRight &&
+                                vm_net_mock_env_u8("CBE_BATTLE_SCENE_MONSTER_START", 1) != 0;
+    u8 battleStartSubtype = useSceneMonsterStart ? 5 : 10;
+    bool seedSceneMonsterMoveinfo = useSceneMonsterStart &&
+                                    vm_net_mock_env_u8("CBE_BATTLE_SCENE_MONSTER_MOVEINFO", 1) != 0;
     bool prefillEnemyTemplate = false;
     bool prefillPlayerTemplate = false;
     u32 responseObjectCount = 1;
@@ -5674,9 +5874,25 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
     (void)vm_net_mock_get_object_u32_field(request, requestLen, "posx", &posx);
     (void)vm_net_mock_get_object_u32_field(request, requestLen, "posy", &posy);
 
+    sceneMonsterIndex = index;
+    sceneMonsterPosX = posx;
+    sceneMonsterPosY = posy;
     requestedEnemyId = vm_net_mock_normalize_battle_enemy_id(id);
     enemyWireId = vm_net_mock_resolve_battle_enemy_id(requestedEnemyId, &enemyTable, enemyTableIds);
-    if (playerOnRight)
+    if (seedSceneMonsterMoveinfo)
+    {
+        /*
+         * net_handle_actor_move_info case 2 locates a scene node by actorId
+         * only. The bundled SCE has multiple 毒泥怪 rows with actorId 105, so
+         * use the same first-active row for both moveinfo and subtype-5 battle
+         * start until the unique live monster instance id contract is recovered.
+         */
+        (void)vm_net_mock_select_scene_actor_moveinfo_target(requestedEnemyId,
+                                                            &sceneMonsterIndex,
+                                                            &sceneMonsterPosX,
+                                                            &sceneMonsterPosY);
+    }
+    if (playerOnRight && !useSceneMonsterStart)
         enemyWireId = requestedEnemyId;
     prefillEnemyTemplate = !playerOnRight &&
                            vm_net_mock_env_u8("CBE_BATTLE_PREFILL_ENEMY_TEMPLATE", 1) != 0 &&
@@ -5687,9 +5903,20 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
     prefillPlayerTemplate = playerOnRight &&
                             vm_net_mock_env_u8("CBE_BATTLE_PREFILL_PLAYER_TEMPLATE", 1) != 0 &&
                             roleId != 0;
-    battleInfoLen = vm_net_mock_build_battle_start_info_blob(battleInfo, sizeof(battleInfo),
-                                                             roleId, enemyWireId,
-                                                             playerOnRight);
+    if (useSceneMonsterStart)
+    {
+        battleInfoLen = vm_net_mock_build_battle_scene_start_info_blob(battleInfo, sizeof(battleInfo),
+                                                                       sceneMonsterIndex,
+                                                                       sceneMonsterPosX,
+                                                                       sceneMonsterPosY,
+                                                                       roleId);
+    }
+    else
+    {
+        battleInfoLen = vm_net_mock_build_battle_start_info_blob(battleInfo, sizeof(battleInfo),
+                                                                 roleId, enemyWireId,
+                                                                 playerOnRight);
+    }
     if (battleInfoLen == 0 || battleInfoLen > 0xffff)
         return 0;
 
@@ -5717,7 +5944,16 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
             return 0;
         ++responseObjectCount;
     }
-    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 4, 10, &objectStart))
+    if (seedSceneMonsterMoveinfo)
+    {
+        if (!vm_net_mock_append_scene_monster_moveinfo2_object(out, outCap, &pos,
+                                                              requestedEnemyId,
+                                                              sceneMonsterPosX,
+                                                              sceneMonsterPosY))
+            return 0;
+        ++responseObjectCount;
+    }
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 4, battleStartSubtype, &objectStart))
         return 0;
     /*
      * In the default player-on-right layout, side=1 makes wire slot 0 remap to
@@ -5739,6 +5975,7 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
     g_mockBattleOperateSessionFinished = 0;
     g_mockBattlePendingEnemyTurn = 0;
     g_mockBattleAwaitingSettlement = 0;
+    g_mockBattleSceneMonsterStartActive = useSceneMonsterStart ? 1 : 0;
     g_mockBattleOperateTurnCounter = 0;
     ++g_mockBattleOperateSessionSerial;
     g_mockBattleRoleHpCurrent = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP", 120);
@@ -5749,6 +5986,13 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
     g_mockBattleEnemyHpMax = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MAX_HP", g_mockBattleEnemyHpCurrent);
     if (g_mockBattleEnemyHpMax < g_mockBattleEnemyHpCurrent)
         g_mockBattleEnemyHpMax = g_mockBattleEnemyHpCurrent;
+    vm_autotest_note("mock_challenge_battle_start id=%u requested=%u wire=%u index=%u pos=(%u,%u) reqIndex=%u reqPos=(%u,%u) subtype=%u side=%u scene_start=%u table=%08x ids=%u/%u/%u/%u\n",
+                     id, requestedEnemyId, enemyWireId,
+                     sceneMonsterIndex, sceneMonsterPosX, sceneMonsterPosY,
+                     index, posx, posy,
+                     battleStartSubtype, battleSide, useSceneMonsterStart ? 1 : 0,
+                     enemyTable, enemyTableIds[0], enemyTableIds[1],
+                     enemyTableIds[2], enemyTableIds[3]);
     return pos;
 }
 

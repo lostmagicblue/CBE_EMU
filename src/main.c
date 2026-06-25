@@ -265,6 +265,7 @@ static u8 g_mockBattleOperateSessionArmed = 0;
 static u8 g_mockBattleOperateSessionFinished = 0;
 static u8 g_mockBattlePendingEnemyTurn = 0;
 static u8 g_mockBattleAwaitingSettlement = 0;
+static u8 g_mockBattleSceneMonsterStartActive = 0;
 static u32 g_mockBattleRoleHpCurrent = 0;
 static u32 g_mockBattleRoleHpMax = 0;
 static u32 g_mockBattleEnemyHpCurrent = 0;
@@ -1998,6 +1999,56 @@ static void vm_autotest_note_startup_pc(u32 pc)
     }
 }
 
+static void vm_autotest_note_scene_actor_parser_pc(u32 pc)
+{
+    static u32 seenActorMoveCase2 = 0;
+    static u32 seenActorMoveUpdate = 0;
+    static u32 seenActorOtherCase10 = 0;
+
+    if (!g_autotestEnabled)
+        return;
+    if (pc == 0x01012B2E && seenActorMoveCase2 < 8)
+    {
+        ++seenActorMoveCase2;
+        vm_autotest_note("scene_actor_parser case2_moveinfo pc=%08x count=%u\n",
+                         pc, seenActorMoveCase2);
+    }
+    else if (pc == 0x01012A76 && seenActorMoveUpdate < 8)
+    {
+        u32 actorId = 0;
+        u32 movePtr = 0;
+        u32 moveLen = 0;
+        u32 gridX = 0;
+        u32 word0 = 0;
+        u32 word44 = 0;
+        u32 word48 = 0;
+        u32 word52 = 0;
+        u32 word56 = 0;
+        ++seenActorMoveUpdate;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &actorId);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &movePtr);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &moveLen);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &gridX);
+        if (movePtr != 0)
+        {
+            (void)uc_mem_read(MTK, movePtr, &word0, sizeof(word0));
+            (void)uc_mem_read(MTK, movePtr + 44, &word44, sizeof(word44));
+            (void)uc_mem_read(MTK, movePtr + 48, &word48, sizeof(word48));
+            (void)uc_mem_read(MTK, movePtr + 52, &word52, sizeof(word52));
+            (void)uc_mem_read(MTK, movePtr + 56, &word56, sizeof(word56));
+        }
+        vm_autotest_note("scene_actor_update_move actor=%u ptr=%08x len=%u gridX=%u raw0=%08x raw44=%u raw48=%u raw52=%u raw56=%u count=%u\n",
+                         actorId, movePtr, moveLen, gridX, word0,
+                         word44, word48, word52, word56, seenActorMoveUpdate);
+    }
+    else if (pc == 0x01012DD8 && seenActorOtherCase10 < 8)
+    {
+        ++seenActorOtherCase10;
+        vm_autotest_note("scene_actor_parser case10_otherinfo pc=%08x count=%u\n",
+                         pc, seenActorOtherCase10);
+    }
+}
+
 static void vm_autotest_dump_scene_tables(u32 elapsedMs)
 {
     static u32 nextDumpMs = 0;
@@ -2084,6 +2135,10 @@ static void vm_autotest_dump_scene_tables(u32 elapsedMs)
             u8 visualGroup = 0;
             u8 targetX = 0;
             u8 targetY = 0;
+            u32 battleX = 0;
+            u32 battleY = 0;
+            u32 battleHp = 0;
+            u32 battleHpMax = 0;
             uc_mem_read(MTK, node + 0x64, &actorId, sizeof(actorId));
             uc_mem_read(MTK, node + 0x00, &x, sizeof(x));
             uc_mem_read(MTK, node + 0x02, &y, sizeof(y));
@@ -2095,11 +2150,16 @@ static void vm_autotest_dump_scene_tables(u32 elapsedMs)
             uc_mem_read(MTK, node + 0x141, &visualGroup, sizeof(visualGroup));
             uc_mem_read(MTK, node + 0x11E, &targetX, sizeof(targetX));
             uc_mem_read(MTK, node + 0x120, &targetY, sizeof(targetY));
+            uc_mem_read(MTK, node + 0xB4, &battleHp, sizeof(battleHp));
+            uc_mem_read(MTK, node + 0xBC, &battleHpMax, sizeof(battleHpMax));
+            uc_mem_read(MTK, node + 0xF0, &battleX, sizeof(battleX));
+            uc_mem_read(MTK, node + 0xF4, &battleY, sizeof(battleY));
             if (actorId != 0 || active != 0 || nodeKind != 0 || promptKind != 0)
             {
-                vm_autotest_note("scene_probe_node[%u] actorId=%u pos=(%u,%u) labelPtr=%08x kind=%u prompt=%u active=%u visual=(%u,%u) target=(%u,%u)\n",
-                                 i, actorId, x, y, labelPtr, nodeKind, promptKind, active,
-                                 visualVariant, visualGroup, targetX, targetY);
+                vm_autotest_note("scene_probe_node[%u] actorId=%u pos=(%u,%u) battlePos=(%u,%u) battleHp=%u/%u labelPtr=%08x kind=%u prompt=%u active=%u visual=(%u,%u) target=(%u,%u)\n",
+                                 i, actorId, x, y, battleX, battleY, battleHp, battleHpMax,
+                                 labelPtr, nodeKind, promptKind, active, visualVariant,
+                                 visualGroup, targetX, targetY);
             }
         }
     }
@@ -2263,6 +2323,9 @@ static void vm_autotest_dump_battle_state(u32 elapsedMs)
         u32 id = 0;
         u32 kind = 0;
         u8 active = 0;
+        u8 visualA = 0;
+        u8 visualB = 0;
+        u8 typeByte10 = 0;
         u8 flag1322 = 0;
         u8 flag1323 = 0;
         u32 state1324 = 0;
@@ -2270,8 +2333,13 @@ static void vm_autotest_dump_battle_state(u32 elapsedMs)
         u32 hpMax = 0;
         u32 mp = 0;
         u32 mpMax = 0;
+        u32 nameWord0 = 0;
+        u32 spritePtr = 0;
 
         uc_mem_read(MTK, unit + 4, &id, sizeof(id));
+        uc_mem_read(MTK, unit + 8, &visualA, sizeof(visualA));
+        uc_mem_read(MTK, unit + 9, &visualB, sizeof(visualB));
+        uc_mem_read(MTK, unit + 10, &typeByte10, sizeof(typeByte10));
         uc_mem_read(MTK, unit + 11, &active, sizeof(active));
         uc_mem_read(MTK, unit + 12, &kind, sizeof(kind));
         uc_mem_read(MTK, unit + 1322, &flag1322, sizeof(flag1322));
@@ -2281,10 +2349,13 @@ static void vm_autotest_dump_battle_state(u32 elapsedMs)
         uc_mem_read(MTK, unit + 20, &hpMax, sizeof(hpMax));
         uc_mem_read(MTK, unit + 24, &mp, sizeof(mp));
         uc_mem_read(MTK, unit + 28, &mpMax, sizeof(mpMax));
+        uc_mem_read(MTK, unit + 54, &nameWord0, sizeof(nameWord0));
+        uc_mem_read(MTK, unit + 88, &spritePtr, sizeof(spritePtr));
         if (id != 0 || active != 0 || hp != 0 || hpMax != 0)
         {
-            vm_autotest_note("battle_probe_unit[%u] id=%u active=%u kind=%u flag1322=%u flag1323=%u state1324=%u hp=%d hpMax=%u mp=%d mpMax=%u\n",
-                             i, id, active, kind, flag1322, flag1323, state1324,
+            vm_autotest_note("battle_probe_unit[%u] id=%u active=%u kind=%u type10=%u visual=(%u,%u) sprite=%08x name0=%08x flag1322=%u flag1323=%u state1324=%u hp=%d hpMax=%u mp=%d mpMax=%u\n",
+                             i, id, active, kind, typeByte10, visualA, visualB,
+                             spritePtr, nameWord0, flag1322, flag1323, state1324,
                              (int32_t)hp, hpMax,
                              (int32_t)mp, mpMax);
         }
@@ -8484,6 +8555,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
 
     vm_restore_main_r9_for_rom_code((u32)address);
     vm_autotest_note_startup_pc((u32)address & ~1u);
+    vm_autotest_note_scene_actor_parser_pc((u32)address & ~1u);
 
     if (vm_is_manager_func_stub_address((u32)address))
         return;
