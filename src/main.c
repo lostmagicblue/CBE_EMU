@@ -263,6 +263,8 @@ static u32 g_mockBattleOperateSessionSerial = 0;
 static u32 g_mockBattleOperateTurnCounter = 0;
 static u8 g_mockBattleOperateSessionArmed = 0;
 static u8 g_mockBattleOperateSessionFinished = 0;
+static u8 g_mockBattlePendingEnemyTurn = 0;
+static u8 g_mockBattleAwaitingSettlement = 0;
 static u32 g_mockBattleRoleHpCurrent = 0;
 static u32 g_mockBattleRoleHpMax = 0;
 static u32 g_mockBattleEnemyHpCurrent = 0;
@@ -276,8 +278,8 @@ static bool vm_net_mock_append_battle_terminal_subtype8_object(u8 *out, u32 outC
 static bool vm_net_mock_append_battle_terminal_case4_object(u8 *out, u32 outCap, u32 *pos);
 static bool vm_net_mock_append_battle_terminal_case9_object(u8 *out, u32 outCap, u32 *pos);
 static bool vm_net_mock_append_battle_terminal_case11_object(u8 *out, u32 outCap, u32 *pos);
-static u32 vm_net_mock_build_battle_auto12_ack_response(const u8 *request, u32 requestLen,
-                                                        u8 *out, u32 outCap);
+static u32 vm_net_mock_build_battle_auto12_cancel_response(const u8 *request, u32 requestLen,
+                                                           u8 *out, u32 outCap);
 static u32 vm_net_mock_min_u32(u32 a, u32 b);
 static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
 static uc_err scheduler_dispatch_net_tasks(void);
@@ -1044,7 +1046,6 @@ static void scheduler_queue_net_event(u32 eventType, u32 r0, u32 r1, u32 r2, u32
                 vm_autotest_note("net_queue event=%u r0=%08x r1=%08x r2=%08x cb=%08x ctx=%08x\n",
                                  eventType, r0, r1, r2, callback, context);
             }
-            if (g_netTaskDispatchDepth > 0 && g_netTaskDispatchSlot >= 0 && (int)i <= g_netTaskDispatchSlot)
             return;
         }
     }
@@ -2104,6 +2105,192 @@ static void vm_autotest_dump_scene_tables(u32 elapsedMs)
     }
 }
 
+static bool vm_autotest_find_battle_screen(u32 *screenOut, u32 *codeBaseOut,
+                                           u32 *moduleR9Out, u32 *inferredModuleR9Out)
+{
+    u32 screen = 0;
+    u32 codeBase = 0;
+    u32 inferredModuleR9 = 0;
+    u32 stackModuleR9 = 0;
+
+    if (vm_infer_battle_module_from_screen(vmAddedScreen, &codeBase, &inferredModuleR9))
+    {
+        stackModuleR9 = vm_screen_stack_lookup_module_base(vmAddedScreen);
+        if (screenOut)
+            *screenOut = vmAddedScreen;
+        if (codeBaseOut)
+            *codeBaseOut = codeBase;
+        if (moduleR9Out)
+            *moduleR9Out = stackModuleR9 != 0 ? stackModuleR9 : inferredModuleR9;
+        if (inferredModuleR9Out)
+            *inferredModuleR9Out = inferredModuleR9;
+        return true;
+    }
+
+    for (u32 i = g_screenStackCount; i > 0; --i)
+    {
+        screen = g_screenStack[i - 1];
+        if (!vm_infer_battle_module_from_screen(screen, &codeBase, &inferredModuleR9))
+            continue;
+        stackModuleR9 = g_screenStackModuleBase[i - 1];
+        if (screenOut)
+            *screenOut = screen;
+        if (codeBaseOut)
+            *codeBaseOut = codeBase;
+        if (moduleR9Out)
+            *moduleR9Out = stackModuleR9 != 0 ? stackModuleR9 : inferredModuleR9;
+        if (inferredModuleR9Out)
+            *inferredModuleR9Out = inferredModuleR9;
+        return true;
+    }
+
+    return false;
+}
+
+static void vm_autotest_dump_battle_state(u32 elapsedMs)
+{
+    static u32 nextDumpMs = 0;
+    u32 screen = 0;
+    u32 codeBase = 0;
+    u32 battleR9 = 0;
+    u32 inferredR9 = 0;
+    u32 uiObj = 0;
+    u32 parserObj = 0;
+    u32 parserCount = 0;
+    u32 parserSlots = 0;
+    u16 phase = 0;
+    u32 side = 0;
+    u8 cmd2 = 0;
+    u8 cmd3 = 0;
+    u8 cmd4 = 0;
+    u8 cmd5 = 0;
+    u8 ui986 = 0;
+    u8 ui992 = 0;
+    u8 ui1136 = 0;
+    u8 ui1138 = 0;
+    u8 ui1140 = 0;
+    u8 ui1206 = 0;
+    u8 ui1207 = 0;
+    u8 ui1278 = 0;
+    u8 actionAnimCount = 0;
+    u8 actionDamageCount = 0;
+
+    if (!g_autotestEnabled || Global_R9 == 0 || elapsedMs < nextDumpMs)
+        return;
+    nextDumpMs = elapsedMs + 3000;
+    if (g_mockBattleOperateSessionArmed == 0 && g_mockBattleEnemyHpMax == 0)
+        return;
+    if (!vm_autotest_find_battle_screen(&screen, &codeBase, &battleR9, &inferredR9))
+        return;
+
+    uc_mem_read(MTK, battleR9 + 8272, &uiObj, sizeof(uiObj));
+    uc_mem_read(MTK, battleR9 + 10340, &parserObj, sizeof(parserObj));
+    uc_mem_read(MTK, battleR9 + 13412, &phase, sizeof(phase));
+    uc_mem_read(MTK, battleR9 + 13488, &side, sizeof(side));
+    uc_mem_read(MTK, battleR9 + 10522, &cmd2, sizeof(cmd2));
+    uc_mem_read(MTK, battleR9 + 10523, &cmd3, sizeof(cmd3));
+    uc_mem_read(MTK, battleR9 + 10524, &cmd4, sizeof(cmd4));
+    uc_mem_read(MTK, battleR9 + 10525, &cmd5, sizeof(cmd5));
+    uc_mem_read(MTK, battleR9 + 15804, &actionAnimCount, sizeof(actionAnimCount));
+    uc_mem_read(MTK, battleR9 + 15814, &actionDamageCount, sizeof(actionDamageCount));
+    if (parserObj != 0)
+    {
+        uc_mem_read(MTK, parserObj + 16, &parserCount, sizeof(parserCount));
+        uc_mem_read(MTK, parserObj + 24, &parserSlots, sizeof(parserSlots));
+    }
+    if (uiObj != 0)
+    {
+        uc_mem_read(MTK, uiObj + 986, &ui986, sizeof(ui986));
+        uc_mem_read(MTK, uiObj + 992, &ui992, sizeof(ui992));
+        uc_mem_read(MTK, uiObj + 1136, &ui1136, sizeof(ui1136));
+        uc_mem_read(MTK, uiObj + 1138, &ui1138, sizeof(ui1138));
+        uc_mem_read(MTK, uiObj + 1140, &ui1140, sizeof(ui1140));
+        uc_mem_read(MTK, uiObj + 1206, &ui1206, sizeof(ui1206));
+        uc_mem_read(MTK, uiObj + 1207, &ui1207, sizeof(ui1207));
+        uc_mem_read(MTK, uiObj + 1278, &ui1278, sizeof(ui1278));
+    }
+
+    vm_autotest_note("battle_probe elapsed=%u screen=%08x code=%08x r9=%08x inferredR9=%08x phase=%u side=%u cmd=%u/%u/%u/%u ui=%08x flags986=%u flags992=%u flags1136=%u flags1138=%u flags1140=%u flags1206=%u flags1207=%u flags1278=%u parser=%08x parserCount=%u parserSlots=%08x animCount=%u damageCount=%u\n",
+                     elapsedMs, screen, codeBase, battleR9, inferredR9, phase, side,
+                     cmd2, cmd3, cmd4, cmd5, uiObj, ui986, ui992, ui1136, ui1138,
+                     ui1140, ui1206, ui1207, ui1278, parserObj, parserCount,
+                     parserSlots, actionAnimCount, actionDamageCount);
+
+    for (u32 i = 0; i < 3; ++i)
+    {
+        u32 slot = battleR9 + 10532 + i * 100;
+        u8 active = 0;
+        u8 type = 0;
+        u8 actor = 0;
+        u8 childCount = 0;
+        u8 target = 0;
+        u8 childFlag = 0;
+        u8 childConsumed = 0;
+        u8 tail0 = 0;
+        u8 tail1 = 0;
+        u8 tail2 = 0;
+        u32 valueA = 0;
+        u32 valueB = 0;
+        u32 effect = 0;
+
+        uc_mem_read(MTK, slot + 0, &active, sizeof(active));
+        uc_mem_read(MTK, slot + 1, &type, sizeof(type));
+        uc_mem_read(MTK, slot + 2, &actor, sizeof(actor));
+        uc_mem_read(MTK, slot + 3, &childCount, sizeof(childCount));
+        uc_mem_read(MTK, slot + 20, &childConsumed, sizeof(childConsumed));
+        uc_mem_read(MTK, slot + 21, &target, sizeof(target));
+        uc_mem_read(MTK, slot + 22, &childFlag, sizeof(childFlag));
+        uc_mem_read(MTK, slot + 24, &valueA, sizeof(valueA));
+        uc_mem_read(MTK, slot + 28, &valueB, sizeof(valueB));
+        uc_mem_read(MTK, slot + 92, &effect, sizeof(effect));
+        uc_mem_read(MTK, slot + 96, &tail0, sizeof(tail0));
+        uc_mem_read(MTK, slot + 97, &tail1, sizeof(tail1));
+        uc_mem_read(MTK, slot + 98, &tail2, sizeof(tail2));
+        if (active != 0 || type != 0 || actor != 0 || childCount != 0 ||
+            target != 0 || childFlag != 0 || valueA != 0 || valueB != 0 ||
+            effect != 0 || tail0 != 0 || tail1 != 0 || tail2 != 0)
+        {
+            vm_autotest_note("battle_probe_action[%u] active=%u type=%u actor=%u childCount=%u childConsumed=%u target=%u childFlag=%u valueA=%u valueB=%u effect=%u tail=%u/%u/%u\n",
+                             i, active, type, actor, childCount, childConsumed,
+                             target, childFlag, valueA, valueB, effect,
+                             tail0, tail1, tail2);
+        }
+    }
+
+    for (u32 i = 0; i < 3; ++i)
+    {
+        u32 unit = battleR9 + 10520 + 1312 + i * 196;
+        u32 id = 0;
+        u32 kind = 0;
+        u8 active = 0;
+        u8 flag1322 = 0;
+        u8 flag1323 = 0;
+        u32 state1324 = 0;
+        u32 hp = 0;
+        u32 hpMax = 0;
+        u32 mp = 0;
+        u32 mpMax = 0;
+
+        uc_mem_read(MTK, unit + 4, &id, sizeof(id));
+        uc_mem_read(MTK, unit + 11, &active, sizeof(active));
+        uc_mem_read(MTK, unit + 12, &kind, sizeof(kind));
+        uc_mem_read(MTK, unit + 1322, &flag1322, sizeof(flag1322));
+        uc_mem_read(MTK, unit + 1323, &flag1323, sizeof(flag1323));
+        uc_mem_read(MTK, unit + 1324, &state1324, sizeof(state1324));
+        uc_mem_read(MTK, unit + 16, &hp, sizeof(hp));
+        uc_mem_read(MTK, unit + 20, &hpMax, sizeof(hpMax));
+        uc_mem_read(MTK, unit + 24, &mp, sizeof(mp));
+        uc_mem_read(MTK, unit + 28, &mpMax, sizeof(mpMax));
+        if (id != 0 || active != 0 || hp != 0 || hpMax != 0)
+        {
+            vm_autotest_note("battle_probe_unit[%u] id=%u active=%u kind=%u flag1322=%u flag1323=%u state1324=%u hp=%d hpMax=%u mp=%d mpMax=%u\n",
+                             i, id, active, kind, flag1322, flag1323, state1324,
+                             (int32_t)hp, hpMax,
+                             (int32_t)mp, mpMax);
+        }
+    }
+}
+
 static void vm_autotest_save_screenshot(u32 elapsedMs)
 {
     char path[128];
@@ -2129,6 +2316,7 @@ static void vm_autotest_tick(void)
     u32 elapsed = now - g_autotestStartMs;
 
     vm_autotest_dump_scene_tables(elapsed);
+    vm_autotest_dump_battle_state(elapsed);
 
     if (elapsed >= g_autotestNextShotMs)
     {
