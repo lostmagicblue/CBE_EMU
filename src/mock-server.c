@@ -474,6 +474,56 @@ static bool vm_net_mock_parse_title_role_create_payload_positional(const u8 *pay
     return true;
 }
 
+static bool vm_net_mock_parse_title_role_create_payload_raw_stream(const u8 *payload,
+                                                                   u32 payloadLen,
+                                                                   vm_net_mock_title_role_create_request *fields)
+{
+    u8 numericFields[2] = {0};
+    u32 numericCount = 0;
+    u32 p = 0;
+
+    if (payload == NULL || fields == NULL)
+        return false;
+
+    while (numericCount < 2 && p + 3 <= payloadLen)
+    {
+        if (payload[p] == 0 && payload[p + 1] == 1)
+        {
+            numericFields[numericCount++] = payload[p + 2];
+            p += 3;
+            continue;
+        }
+        if (p + 4 <= payloadLen && payload[p] == 0x03 && payload[p + 1] == 0 && payload[p + 2] == 1)
+        {
+            numericFields[numericCount++] = payload[p + 3];
+            p += 4;
+            continue;
+        }
+        break;
+    }
+
+    if (numericCount < 2)
+        return false;
+
+    if (p + 2 <= payloadLen)
+    {
+        u16 stringLen = (u16)(((u16)payload[p] << 8) | payload[p + 1]);
+        if (stringLen > 0 && p + 2 + stringLen <= payloadLen)
+            vm_net_mock_copy_request_text(fields->name, sizeof(fields->name), payload + p + 2, stringLen);
+    }
+    if (fields->name[0] == 0 && p + 4 <= payloadLen)
+    {
+        u16 wrappedLen = (u16)(((u16)payload[p] << 8) | payload[p + 1]);
+        u16 blobLen = (u16)(((u16)payload[p + 2] << 8) | payload[p + 3]);
+        if (wrappedLen >= 2 && (u32)blobLen + 2 == wrappedLen && p + 4 + blobLen <= payloadLen)
+            vm_net_mock_copy_request_text(fields->name, sizeof(fields->name), payload + p + 4, blobLen);
+    }
+
+    fields->rawSex = numericFields[0];
+    fields->rawJob = numericFields[1];
+    return true;
+}
+
 static bool vm_net_mock_parse_title_role_create_payload(const u8 *payload,
                                                         u32 payloadLen,
                                                         vm_net_mock_title_role_create_request *fields)
@@ -502,7 +552,9 @@ static bool vm_net_mock_parse_title_role_create_payload(const u8 *payload,
 
     if (haveSex && haveJob && haveName)
         return true;
-    return vm_net_mock_parse_title_role_create_payload_positional(payload, payloadLen, fields);
+    if (vm_net_mock_parse_title_role_create_payload_positional(payload, payloadLen, fields))
+        return true;
+    return vm_net_mock_parse_title_role_create_payload_raw_stream(payload, payloadLen, fields);
 }
 
 static bool vm_net_mock_parse_title_role_create_request(const u8 *request,
@@ -514,7 +566,15 @@ static bool vm_net_mock_parse_title_role_create_request(const u8 *request,
     u32 offset = 4;
     u32 objectCount = 0;
     bool matched = false;
+    bool parsedFields = false;
     vm_net_mock_request_object object;
+
+    if (fields)
+    {
+        memset(fields, 0, sizeof(*fields));
+        fields->rawSex = 0;
+        fields->rawJob = 1;
+    }
 
     if (!vm_net_mock_get_wt_header_kind_subtype(request, requestLen, &kind, &subtype) ||
         kind != 1 ||
@@ -530,12 +590,12 @@ static bool vm_net_mock_parse_title_role_create_request(const u8 *request,
             continue;
         if (matched || object.payloadLen < 8 || object.payloadLen > 96)
             return false;
-        matched = vm_net_mock_parse_title_role_create_payload(object.payload,
-                                                             object.payloadLen,
-                                                             fields);
-        if (!matched)
-            return false;
+        matched = true;
+        parsedFields = vm_net_mock_parse_title_role_create_payload(object.payload,
+                                                                  object.payloadLen,
+                                                                  fields);
     }
+    (void)parsedFields;
     return matched && objectCount == 1 && offset == requestLen;
 }
 

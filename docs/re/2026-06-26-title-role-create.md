@@ -7,6 +7,7 @@ request:
 
 ```text
 [error][network] unhandled wt=1/7 len=34 objects=1 first=1/1/7:25 last_source=- last_resp=0
+[error][network] unhandled wt=1/7 len=35 objects=1 first=1/1/7:26 last_source=- last_resp=0
 ```
 
 This is a single title-side WT object `1/1/7`. The request payload is produced
@@ -98,8 +99,17 @@ The detector is intentionally narrow:
 - WT header kind/subtype must be `1/7`
 - exactly one request object must parse
 - object must be `1/1/7`
-- payload must decode as two small numeric fields and a string field, either
-  by known field names or by the positional serializer shape recovered from IDA
+- payload length must stay in the small title-create range
+- field decoding is best-effort. The client response parser only needs
+  `actorid/result`; local DB creation uses decoded sex/job/name when available,
+  otherwise falls back to default job/sex/name.
+
+The request parser supports three observed or plausible serializer shapes:
+
+- named object fields such as `sex/job/name`
+- named positional fields with typed values
+- the raw `v10, v10, v9` stream produced by `mmTitle:0x3E66`, i.e. two numeric
+  values followed by a string blob
 
 Autotest log line:
 
