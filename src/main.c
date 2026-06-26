@@ -154,6 +154,9 @@ static int g_vmInputOverlayX = 12;
 static int g_vmInputOverlayY = 348;
 static int g_vmInputOverlayW = 216;
 static int g_vmInputOverlayH = 22;
+static char g_vmInputComposition[64];
+static int g_vmInputSdlTextInputWanted = 0;
+static int g_vmInputSdlTextInputActive = 0;
 u32 screenStructChange = 0;
 u32 screenStructNotifyLoadRes = 0;
 u32 vmAddedScreen = 0;
@@ -1372,6 +1375,104 @@ static void vm_input_write_u16(u32 addr, u16 value)
 
 static u32 vm_input_wcslen_limit(u32 addr, u32 maxLen);
 
+static void vm_input_update_sdl_text_rect(void)
+{
+    if (!window)
+        return;
+    int winW = LCD_WIDTH;
+    int winH = LCD_HEIGHT;
+    SDL_GetWindowSize(window, &winW, &winH);
+    SDL_Rect rect;
+    rect.x = g_vmInputOverlayX * winW / LCD_WIDTH;
+    rect.y = g_vmInputOverlayY * winH / LCD_HEIGHT;
+    rect.w = g_vmInputOverlayW * winW / LCD_WIDTH;
+    rect.h = g_vmInputOverlayH * winH / LCD_HEIGHT;
+    SDL_SetTextInputRect(&rect);
+}
+
+static void vm_input_request_sdl_text_input(int open)
+{
+    g_vmInputSdlTextInputWanted = open ? 1 : 0;
+}
+
+static void vm_input_sync_sdl_text_input(void)
+{
+    if (g_vmInputSdlTextInputWanted && !g_vmInputSdlTextInputActive)
+    {
+        vm_input_update_sdl_text_rect();
+        SDL_StartTextInput();
+        g_vmInputSdlTextInputActive = 1;
+    }
+    else if (!g_vmInputSdlTextInputWanted && g_vmInputSdlTextInputActive)
+    {
+        SDL_StopTextInput();
+        g_vmInputSdlTextInputActive = 0;
+        g_vmInputComposition[0] = 0;
+    }
+    else if (g_vmInputSdlTextInputWanted && g_vmInputSdlTextInputActive)
+    {
+        vm_input_update_sdl_text_rect();
+    }
+}
+
+static u32 vm_input_decode_utf8_char(const char **cursor)
+{
+    const unsigned char *s = (const unsigned char *)(cursor ? *cursor : NULL);
+    u32 ch = 0;
+
+    if (s == NULL || *s == 0)
+        return 0;
+    if (s[0] < 0x80)
+    {
+        ch = s[0];
+        *cursor += 1;
+        return ch;
+    }
+    if ((s[0] & 0xE0) == 0xC0 && (s[1] & 0xC0) == 0x80)
+    {
+        ch = ((u32)(s[0] & 0x1F) << 6) |
+             (u32)(s[1] & 0x3F);
+        *cursor += 2;
+        return ch;
+    }
+    if ((s[0] & 0xF0) == 0xE0 &&
+        (s[1] & 0xC0) == 0x80 &&
+        (s[2] & 0xC0) == 0x80)
+    {
+        ch = ((u32)(s[0] & 0x0F) << 12) |
+             ((u32)(s[1] & 0x3F) << 6) |
+             (u32)(s[2] & 0x3F);
+        *cursor += 3;
+        return ch;
+    }
+    if ((s[0] & 0xF8) == 0xF0 &&
+        (s[1] & 0xC0) == 0x80 &&
+        (s[2] & 0xC0) == 0x80 &&
+        (s[3] & 0xC0) == 0x80)
+    {
+        ch = ((u32)(s[0] & 0x07) << 18) |
+             ((u32)(s[1] & 0x3F) << 12) |
+             ((u32)(s[2] & 0x3F) << 6) |
+             (u32)(s[3] & 0x3F);
+        *cursor += 4;
+        return ch;
+    }
+
+    *cursor += 1;
+    return 0;
+}
+
+static void vm_input_enqueue_utf8_text(const char *text)
+{
+    const char *cursor = text;
+    while (cursor != NULL && *cursor)
+    {
+        u32 ch = vm_input_decode_utf8_char(&cursor);
+        if (ch >= 0x20 && ch <= 0xffff)
+            EnqueueVMEvent(VM_EVENT_INPUT_CHAR, ch, 0);
+    }
+}
+
 static void vm_lcd_fill_rect_local(int x, int y, int w, int h, u16 color)
 {
     if (x < 0)
@@ -1525,9 +1626,17 @@ static void vm_input_draw_overlay(void)
     vm_lcd_draw_rect_local(x, y, w, h, 0x9fe6);
     vm_lcd_draw_rect_local(x + 1, y + 1, w - 2, h - 2, 0x2b6d);
     u8 hintGbk[64] = {0};
-    utf8_to_gbk((u8 *)"已进入输入状态", hintGbk, sizeof(hintGbk));
+    utf8_to_gbk((u8 *)"SDL文本输入", hintGbk, sizeof(hintGbk));
     drawFontString(hintGbk, x + 4, y - 18, 0xffe0);
     drawFontString(sprintfBuff, x + 5, y + 4, 0xffff);
+    if (!g_vmInputPassword && g_vmInputComposition[0] != 0)
+    {
+        u8 compositionGbk[64] = {0};
+        utf8_to_gbk((u8 *)g_vmInputComposition, compositionGbk, sizeof(compositionGbk));
+        int compositionX = x + 7 + mesureStringWidth((char *)sprintfBuff);
+        if (compositionX < x + w - 12)
+            drawFontString(compositionGbk, compositionX, y + 4, 0x9fe6);
+    }
     if ((clock() / (CLOCKS_PER_SEC / 2)) % 2 == 0)
     {
         int caretX = x + 6 + mesureStringWidth((char *)sprintfBuff);
@@ -1562,7 +1671,7 @@ static void vm_input_append_char(u32 ch)
     if (!g_vmInputOpen || !g_vmInputBuffer || g_vmInputMaxLen <= 1)
         return;
 
-    if (ch < 0x20 || ch > 0x7e)
+    if (ch < 0x20 || ch > 0xffff)
         return;
 
     u32 len = vm_input_wcslen_limit(g_vmInputBuffer, g_vmInputMaxLen);
@@ -1592,12 +1701,14 @@ static uc_err vm_input_finish(u32 result)
 
     u32 callback = g_vmInputCallback;
     u32 buffer = g_vmInputBuffer;
+    vm_input_request_sdl_text_input(0);
     g_vmInputOpen = 0;
     g_vmInputCallback = 0;
     g_vmInputBuffer = 0;
     g_vmInputMaxLen = 0;
     g_vmInputInputType = 0;
     g_vmInputPassword = 0;
+    g_vmInputComposition[0] = 0;
 
     if (!callback)
         return UC_ERR_OK;
@@ -1658,6 +1769,8 @@ static void vm_input_open(u32 callback, u32 param, int password)
     g_vmInputOverlayY = password ? 372 : 344;
     g_vmInputOverlayW = 216;
     g_vmInputOverlayH = 22;
+    g_vmInputComposition[0] = 0;
+    vm_input_request_sdl_text_input(1);
     vm_set_call_result(1);
 }
 
@@ -3281,6 +3394,7 @@ void loop()
     bool isLoop = true;
     while (isLoop)
     {
+        vm_input_sync_sdl_text_input();
         while (SDL_PollEvent(&ev))
         {
             if (ev.type == SDL_QUIT)
@@ -3300,8 +3414,6 @@ void loop()
                         EnqueueVMEvent(VM_EVENT_INPUT_DONE, 1, 0);
                     else if (key == SDLK_BACKSPACE)
                         EnqueueVMEvent(VM_EVENT_INPUT_BACKSPACE, 0, 0);
-                    else if (key >= 0x20 && key <= 0x7e)
-                        EnqueueVMEvent(VM_EVENT_INPUT_CHAR, key, 0);
                     break;
                 }
                 if (isKeyDown == SDLK_UNKNOWN)
@@ -3333,11 +3445,27 @@ void loop()
                 isMouseDown = false;
                 mouseEvent(MR_MOUSE_UP, ev.button.x, ev.button.y);
                 break;
+            case SDL_TEXTINPUT:
+                if (g_vmInputOpen)
+                {
+                    g_vmInputComposition[0] = 0;
+                    vm_input_enqueue_utf8_text(ev.text.text);
+                }
+                break;
+            case SDL_TEXTEDITING:
+                if (g_vmInputOpen)
+                {
+                    snprintf(g_vmInputComposition, sizeof(g_vmInputComposition),
+                             "%s", ev.edit.text);
+                }
+                break;
             }
         }
         vm_autotest_tick();
         SDL_Delay(5);
     }
+    g_vmInputSdlTextInputWanted = 0;
+    vm_input_sync_sdl_text_input();
     pthread_join(&EmuThread, &thread_ret);
     pthread_join(&MainUpdareThread, &thread_ret);
     if (SD_File_Handle != NULL)
@@ -4823,12 +4951,14 @@ return 4;
     }
     else if (idx == 45)
     {
+        vm_input_request_sdl_text_input(0);
         g_vmInputOpen = 0;
         g_vmInputCallback = 0;
         g_vmInputBuffer = 0;
         g_vmInputMaxLen = 0;
         g_vmInputInputType = 0;
         g_vmInputPassword = 0;
+        g_vmInputComposition[0] = 0;
         vm_set_call_result(0);
     }
     else if (idx == 46)
