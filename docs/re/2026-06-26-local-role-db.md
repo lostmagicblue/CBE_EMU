@@ -123,7 +123,7 @@ hp/mp = 120/100
 money = 1000
 backpackCapacity = 40
 scene = default local Penglai scene
-position = 223,382 unless migrated from the legacy position file
+position = 223,382
 ```
 
 Compatibility file:
@@ -132,8 +132,10 @@ Compatibility file:
 nvram/jhol_mock_player_pos.bin
 ```
 
-When the role DB does not exist yet, the mock migrates this legacy position into
-the default role. New position saves update both files.
+This file is now a compatibility mirror only. Role DB initialization, title role
+selection, and scene/login actorinfo read position from the active role row
+instead of importing the legacy file. Role selection, role creation, role
+deletion fallback, and new position saves update the mirror.
 
 ## Server Behavior
 
@@ -158,9 +160,12 @@ Title role list:
   `sex = role->sex + 1`. This matches `mmTitle:0x3544` and the create-success
   row layout at `mmTitle:0x5324`.
 - role select handles request `1/1/6`, parses `actorID`, and updates
-  `activeRoleId` before scene/login actorinfo is built.
+  `activeRoleId` before scene/login actorinfo is built. The selected role's
+  `scene/x/y` also refresh the legacy mirror/cache so later scene helpers do not
+  reuse a previous global position.
 - title role create handles request `1/1/7`, appends a persisted role when
-  capacity allows it, and returns `actorid/result` to the title parser.
+  capacity allows it, starts the new role at the default Penglai position, and
+  returns `actorid/result` to the title parser.
 - role DB load repairs duplicate legacy rows that were previously persisted
   with the default name after a create-payload decode miss. The first default
   role keeps the GBK default name; later duplicate default rows become stable
