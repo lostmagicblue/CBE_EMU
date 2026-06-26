@@ -8,6 +8,8 @@ server-side role database.
 Current contract:
 
 - store a role list locally, max 5 roles for the title role-list parser
+- allow 0 persisted roles after deleting the last role; the title client then
+  displays only its create-role sentinel row
 - persist HP, MP, money, scene, position, level, and total EXP
 - derive level as `exp / 100 + 1`
 - grant 10 EXP once per victorious monster battle settlement
@@ -147,6 +149,10 @@ Title role list:
 - `vm_net_mock_build_title_role_list_actorinfo()` emits all stored roles up to
   the client limit of 5.
 - role select updates `activeRoleId` when the requested role exists.
+- title role create handles request `1/1/7`, appends a persisted role when
+  capacity allows it, and returns `actorid/result` to the title parser.
+- title role delete handles request `1/1/8`, removes the matching persisted
+  role by `actorID`, and returns `result=0` only on success.
 
 Money sync:
 

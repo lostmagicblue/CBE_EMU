@@ -369,6 +369,228 @@ static bool vm_net_mock_is_title_role_select_request(const u8 *request, u32 requ
            vm_net_mock_request_contains(request, requestLen, "actorID");
 }
 
+typedef struct
+{
+    u8 rawSex;
+    u8 rawJob;
+    char name[32];
+} vm_net_mock_title_role_create_request;
+
+static void vm_net_mock_copy_request_text(char *out, u32 outCap, const u8 *value, u32 valueLen)
+{
+    u32 copyLen = 0;
+    if (out == NULL || outCap == 0)
+        return;
+    out[0] = 0;
+    if (value == NULL || valueLen == 0)
+        return;
+    copyLen = SDL_min(valueLen, outCap - 1);
+    while (copyLen > 0 && value[copyLen - 1] == 0)
+        --copyLen;
+    if (copyLen > 0)
+        memcpy(out, value, copyLen);
+    out[copyLen] = 0;
+}
+
+static bool vm_net_mock_parse_title_role_create_payload_positional(const u8 *payload,
+                                                                   u32 payloadLen,
+                                                                   vm_net_mock_title_role_create_request *fields)
+{
+    u8 numericFields[2] = {0};
+    u32 numericCount = 0;
+    bool sawNameString = false;
+    u32 p = 0;
+
+    if (payload == NULL || fields == NULL)
+        return false;
+    while (p + 1 <= payloadLen)
+    {
+        u32 fieldStart = p;
+        u8 fieldLen = payload[p++];
+        if (fieldLen == 0 || fieldLen > 48 || p + fieldLen > payloadLen)
+            break;
+        p += fieldLen;
+
+        if (p < payloadLen && payload[p] == 0 &&
+            p + 5 <= payloadLen &&
+            payload[p + 1] == 0x03 &&
+            payload[p + 2] == 0 &&
+            payload[p + 3] == 1)
+        {
+            if (numericCount < 2)
+                numericFields[numericCount++] = payload[p + 4];
+            p += 5;
+            continue;
+        }
+
+        if (p + 4 <= payloadLen &&
+            payload[p] == 0x03 &&
+            payload[p + 1] == 0 &&
+            payload[p + 2] == 1)
+        {
+            if (numericCount < 2)
+                numericFields[numericCount++] = payload[p + 3];
+            p += 4;
+            continue;
+        }
+
+        if (p + 3 <= payloadLen &&
+            payload[p] == 0 &&
+            payload[p + 1] == 1)
+        {
+            if (numericCount < 2)
+                numericFields[numericCount++] = payload[p + 2];
+            p += 3;
+            continue;
+        }
+
+        if (p + 4 <= payloadLen)
+        {
+            u16 wrappedLen = (u16)(((u16)payload[p] << 8) | payload[p + 1]);
+            if (wrappedLen >= 2 && p + 2 + wrappedLen <= payloadLen)
+            {
+                u16 blobLen = (u16)(((u16)payload[p + 2] << 8) | payload[p + 3]);
+                if ((u32)blobLen + 2 == wrappedLen && p + 4 + blobLen <= payloadLen)
+                {
+                    vm_net_mock_copy_request_text(fields->name,
+                                                  sizeof(fields->name),
+                                                  payload + p + 4,
+                                                  blobLen);
+                    sawNameString = true;
+                    p += 2 + wrappedLen;
+                    continue;
+                }
+            }
+        }
+
+        p = fieldStart;
+        break;
+    }
+
+    if (numericCount < 2 || !sawNameString || p == 0)
+        return false;
+    fields->rawSex = numericFields[0];
+    fields->rawJob = numericFields[1];
+    return true;
+}
+
+static bool vm_net_mock_parse_title_role_create_payload(const u8 *payload,
+                                                        u32 payloadLen,
+                                                        vm_net_mock_title_role_create_request *fields)
+{
+    bool haveSex = false;
+    bool haveJob = false;
+    bool haveName = false;
+
+    if (payload == NULL || fields == NULL)
+        return false;
+    memset(fields, 0, sizeof(*fields));
+
+    haveSex = vm_net_mock_get_object_u8_field(payload, payloadLen, "sex", &fields->rawSex) ||
+              vm_net_mock_get_object_u8_field(payload, payloadLen, "Sex", &fields->rawSex) ||
+              vm_net_mock_get_object_u8_field(payload, payloadLen, "gender", &fields->rawSex) ||
+              vm_net_mock_get_object_u8_field(payload, payloadLen, "genderID", &fields->rawSex);
+    haveJob = vm_net_mock_get_object_u8_field(payload, payloadLen, "job", &fields->rawJob) ||
+              vm_net_mock_get_object_u8_field(payload, payloadLen, "Job", &fields->rawJob) ||
+              vm_net_mock_get_object_u8_field(payload, payloadLen, "jobID", &fields->rawJob) ||
+              vm_net_mock_get_object_u8_field(payload, payloadLen, "career", &fields->rawJob);
+    haveName = vm_net_mock_get_object_string_field(payload, payloadLen, "name", fields->name, sizeof(fields->name)) ||
+               vm_net_mock_get_object_string_field(payload, payloadLen, "Name", fields->name, sizeof(fields->name)) ||
+               vm_net_mock_get_object_string_field(payload, payloadLen, "actorname", fields->name, sizeof(fields->name)) ||
+               vm_net_mock_get_object_string_field(payload, payloadLen, "actorName", fields->name, sizeof(fields->name)) ||
+               vm_net_mock_get_object_string_field(payload, payloadLen, "roleName", fields->name, sizeof(fields->name));
+
+    if (haveSex && haveJob && haveName)
+        return true;
+    return vm_net_mock_parse_title_role_create_payload_positional(payload, payloadLen, fields);
+}
+
+static bool vm_net_mock_parse_title_role_create_request(const u8 *request,
+                                                        u32 requestLen,
+                                                        vm_net_mock_title_role_create_request *fields)
+{
+    u8 kind = 0;
+    u8 subtype = 0;
+    u32 offset = 4;
+    u32 objectCount = 0;
+    bool matched = false;
+    vm_net_mock_request_object object;
+
+    if (!vm_net_mock_get_wt_header_kind_subtype(request, requestLen, &kind, &subtype) ||
+        kind != 1 ||
+        subtype != 7)
+    {
+        return false;
+    }
+
+    while (vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+    {
+        ++objectCount;
+        if (object.major != 1 || object.kind != 1 || object.subtype != 7)
+            continue;
+        if (matched || object.payloadLen < 8 || object.payloadLen > 96)
+            return false;
+        matched = vm_net_mock_parse_title_role_create_payload(object.payload,
+                                                             object.payloadLen,
+                                                             fields);
+        if (!matched)
+            return false;
+    }
+    return matched && objectCount == 1 && offset == requestLen;
+}
+
+static bool vm_net_mock_is_title_role_create_request(const u8 *request, u32 requestLen)
+{
+    vm_net_mock_title_role_create_request fields;
+    return vm_net_mock_parse_title_role_create_request(request, requestLen, &fields);
+}
+
+static bool vm_net_mock_parse_title_role_delete_request(const u8 *request,
+                                                        u32 requestLen,
+                                                        u32 *actorIdOut)
+{
+    u8 kind = 0;
+    u8 subtype = 0;
+    u32 offset = 4;
+    u32 objectCount = 0;
+    bool matched = false;
+    u32 actorId = 0;
+    vm_net_mock_request_object object;
+
+    if (actorIdOut)
+        *actorIdOut = 0;
+    if (!vm_net_mock_get_wt_header_kind_subtype(request, requestLen, &kind, &subtype) ||
+        kind != 1 ||
+        subtype != 8)
+    {
+        return false;
+    }
+
+    while (vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+    {
+        ++objectCount;
+        if (object.major != 1 || object.kind != 1 || object.subtype != 8)
+            continue;
+        if (matched || object.payloadLen < 8 || object.payloadLen > 48)
+            return false;
+        matched = vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "actorID", &actorId) ||
+                  vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "actorid", &actorId);
+        if (!matched)
+            return false;
+    }
+    if (!matched || objectCount != 1 || offset != requestLen || actorId == 0)
+        return false;
+    if (actorIdOut)
+        *actorIdOut = actorId;
+    return true;
+}
+
+static bool vm_net_mock_is_title_role_delete_request(const u8 *request, u32 requestLen)
+{
+    u32 actorId = 0;
+    return vm_net_mock_parse_title_role_delete_request(request, requestLen, &actorId);
+}
+
 static bool vm_net_mock_is_login_validation_request(const u8 *request, u32 requestLen, u8 *requestSubtype)
 {
     u8 kind = 0;
@@ -3245,11 +3467,10 @@ static void vm_net_mock_role_db_save(const char *reason)
         return;
     memcpy(g_vm_net_mock_role_db.magic, "JHR1", 4);
     g_vm_net_mock_role_db.version = VM_NET_MOCK_ROLE_DB_VERSION;
-    if (g_vm_net_mock_role_db.roleCount == 0 ||
-        g_vm_net_mock_role_db.roleCount > VM_NET_MOCK_ROLE_DB_MAX_ROLES)
-    {
-        g_vm_net_mock_role_db.roleCount = 1;
-    }
+    if (g_vm_net_mock_role_db.roleCount > VM_NET_MOCK_ROLE_DB_MAX_ROLES)
+        g_vm_net_mock_role_db.roleCount = VM_NET_MOCK_ROLE_DB_MAX_ROLES;
+    if (g_vm_net_mock_role_db.roleCount == 0)
+        g_vm_net_mock_role_db.activeRoleId = 0;
 #ifdef _WIN32
     _mkdir("nvram");
 #else
@@ -3295,7 +3516,6 @@ static void vm_net_mock_role_db_load(void)
         if (readLen == sizeof(loaded) &&
             memcmp(loaded.magic, "JHR1", 4) == 0 &&
             loaded.version == VM_NET_MOCK_ROLE_DB_VERSION &&
-            loaded.roleCount > 0 &&
             loaded.roleCount <= VM_NET_MOCK_ROLE_DB_MAX_ROLES)
         {
             g_vm_net_mock_role_db = loaded;
@@ -3316,8 +3536,7 @@ static void vm_net_mock_role_db_load(void)
         }
     }
 
-    if (g_vm_net_mock_role_db.roleCount == 0 ||
-        g_vm_net_mock_role_db.roleCount > VM_NET_MOCK_ROLE_DB_MAX_ROLES)
+    if (g_vm_net_mock_role_db.roleCount > VM_NET_MOCK_ROLE_DB_MAX_ROLES)
     {
         g_vm_net_mock_role_db.roleCount = 1;
         needsSave = true;
@@ -3334,9 +3553,14 @@ static void vm_net_mock_role_db_load(void)
             break;
         }
     }
-    if (!activeFound)
+    if (!activeFound && g_vm_net_mock_role_db.roleCount > 0)
     {
         g_vm_net_mock_role_db.activeRoleId = g_vm_net_mock_role_db.roles[0].roleId;
+        needsSave = true;
+    }
+    else if (g_vm_net_mock_role_db.roleCount == 0 && g_vm_net_mock_role_db.activeRoleId != 0)
+    {
+        g_vm_net_mock_role_db.activeRoleId = 0;
         needsSave = true;
     }
     g_vm_net_mock_role_db_valid = true;
@@ -3375,6 +3599,165 @@ static void vm_net_mock_select_active_role(u32 roleId)
             return;
         }
     }
+}
+
+static u8 vm_net_mock_role_db_sex_from_title_value(u8 rawSex)
+{
+    if (rawSex >= 1 && rawSex <= 2)
+        return (u8)(rawSex - 1);
+    if (rawSex == 0)
+        return 0;
+    return 0;
+}
+
+static u8 vm_net_mock_role_db_job_from_title_value(u8 rawJob)
+{
+    if (rawJob >= 1 && rawJob <= 3)
+        return rawJob;
+    if (rawJob == 0)
+        return 1;
+    return 1;
+}
+
+static u32 vm_net_mock_role_db_next_role_id(void)
+{
+    u32 nextRoleId = VM_NET_MOCK_ROLE_DEFAULT_ID;
+    vm_net_mock_role_db_load();
+    if (g_vm_net_mock_role_db_valid)
+    {
+        for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+        {
+            if (g_vm_net_mock_role_db.roles[i].roleId >= nextRoleId)
+                nextRoleId = g_vm_net_mock_role_db.roles[i].roleId + 1;
+        }
+    }
+    if (nextRoleId == 0)
+        nextRoleId = VM_NET_MOCK_ROLE_DEFAULT_ID;
+    return nextRoleId;
+}
+
+static void vm_net_mock_copy_role_name(char *out, size_t outCap, const char *name)
+{
+    size_t copyLen = 0;
+    if (out == NULL || outCap == 0)
+        return;
+    out[0] = 0;
+    if (name != NULL)
+    {
+        copyLen = strlen(name);
+        if (copyLen >= outCap)
+            copyLen = outCap - 1;
+        while (copyLen > 0 && name[copyLen - 1] == 0)
+            --copyLen;
+        if (copyLen > 0)
+            memcpy(out, name, copyLen);
+        out[copyLen] = 0;
+    }
+    if (out[0] == 0)
+        snprintf(out, outCap, "%s", vm_net_mock_default_role_name());
+}
+
+static bool vm_net_mock_role_db_create_from_title(const vm_net_mock_title_role_create_request *request,
+                                                  u32 *actorIdOut,
+                                                  u8 *resultOut)
+{
+    vm_net_mock_role_state *role = NULL;
+    u32 actorId = 0;
+    u8 result = 1;
+
+    if (actorIdOut)
+        *actorIdOut = 0;
+    if (resultOut)
+        *resultOut = result;
+    if (request == NULL)
+        return false;
+
+    vm_net_mock_role_db_load();
+    if (!g_vm_net_mock_role_db_valid ||
+        g_vm_net_mock_role_db.roleCount >= VM_NET_MOCK_ROLE_DB_MAX_ROLES)
+    {
+        return true;
+    }
+
+    actorId = vm_net_mock_role_db_next_role_id();
+    role = &g_vm_net_mock_role_db.roles[g_vm_net_mock_role_db.roleCount];
+    vm_net_mock_role_init_default(role);
+    role->roleId = actorId;
+    vm_net_mock_copy_role_name(role->name, sizeof(role->name), request->name);
+    role->job = vm_net_mock_role_db_job_from_title_value(request->rawJob);
+    role->sex = vm_net_mock_role_db_sex_from_title_value(request->rawSex);
+    vm_net_mock_role_normalize(role);
+
+    g_vm_net_mock_role_db.roleCount += 1;
+    g_vm_net_mock_role_db.activeRoleId = actorId;
+    vm_net_mock_role_db_save("role-create");
+
+    result = 0;
+    if (actorIdOut)
+        *actorIdOut = actorId;
+    if (resultOut)
+        *resultOut = result;
+    return true;
+}
+
+static bool vm_net_mock_role_db_delete_by_id(u32 actorId, u8 *resultOut, u32 *roleCountOut)
+{
+    u8 result = 1;
+    u32 deleteIndex = VM_NET_MOCK_ROLE_DB_MAX_ROLES;
+
+    if (resultOut)
+        *resultOut = result;
+    if (roleCountOut)
+        *roleCountOut = 0;
+    if (actorId == 0)
+        return false;
+
+    vm_net_mock_role_db_load();
+    if (!g_vm_net_mock_role_db_valid)
+        return false;
+
+    for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+    {
+        if (g_vm_net_mock_role_db.roles[i].roleId == actorId)
+        {
+            deleteIndex = i;
+            break;
+        }
+    }
+
+    if (deleteIndex == VM_NET_MOCK_ROLE_DB_MAX_ROLES)
+    {
+        if (roleCountOut)
+            *roleCountOut = g_vm_net_mock_role_db.roleCount;
+        return true;
+    }
+
+    for (u32 i = deleteIndex; i + 1 < g_vm_net_mock_role_db.roleCount; ++i)
+        g_vm_net_mock_role_db.roles[i] = g_vm_net_mock_role_db.roles[i + 1];
+    if (g_vm_net_mock_role_db.roleCount > 0)
+    {
+        memset(&g_vm_net_mock_role_db.roles[g_vm_net_mock_role_db.roleCount - 1],
+               0,
+               sizeof(g_vm_net_mock_role_db.roles[g_vm_net_mock_role_db.roleCount - 1]));
+        g_vm_net_mock_role_db.roleCount -= 1;
+    }
+
+    if (g_vm_net_mock_role_db.roleCount == 0)
+    {
+        g_vm_net_mock_role_db.activeRoleId = 0;
+    }
+    else if (g_vm_net_mock_role_db.activeRoleId == actorId)
+    {
+        g_vm_net_mock_role_db.activeRoleId = g_vm_net_mock_role_db.roles[0].roleId;
+    }
+
+    vm_net_mock_role_db_save("role-delete");
+    result = 0;
+    if (resultOut)
+        *resultOut = result;
+    if (roleCountOut)
+        *roleCountOut = g_vm_net_mock_role_db.roleCount;
+    return true;
 }
 
 static void vm_net_mock_write_legacy_player_pos_state(const vm_net_mock_role_state *role)
@@ -10001,8 +10384,8 @@ static u32 vm_net_mock_build_title_role_list_actorinfo(u8 *out, u32 outCap)
     u32 pos = 0;
     vm_net_mock_role_db_load();
     u32 roleCount = g_vm_net_mock_role_db_valid ? g_vm_net_mock_role_db.roleCount : 1;
-    if (roleCount == 0 || roleCount > VM_NET_MOCK_ROLE_DB_MAX_ROLES)
-        roleCount = 1;
+    if (roleCount > VM_NET_MOCK_ROLE_DB_MAX_ROLES)
+        roleCount = VM_NET_MOCK_ROLE_DB_MAX_ROLES;
 
     /*
      * title target50_render() derives a role portrait table index from the
@@ -10448,6 +10831,80 @@ static u32 vm_net_mock_build_title_rolelist_wait_server_select_response(u8 *out,
         return 0;
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);
+    return pos;
+}
+
+static u32 vm_net_mock_build_title_role_create_response(const u8 *request,
+                                                        u32 requestLen,
+                                                        u8 *out,
+                                                        u32 outCap)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+    vm_net_mock_title_role_create_request fields;
+    u32 actorId = 0;
+    u8 result = 1;
+    u32 roleCount = 0;
+
+    if (outCap < pos)
+        return 0;
+    if (!vm_net_mock_parse_title_role_create_request(request, requestLen, &fields))
+        return 0;
+
+    if (!vm_net_mock_role_db_create_from_title(&fields, &actorId, &result))
+        result = 1;
+    if (g_vm_net_mock_role_db_valid)
+        roleCount = g_vm_net_mock_role_db.roleCount;
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 1, 7, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "actorid", actorId))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", result))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+
+    vm_autotest_note("mock_title_role_create result=%u actorid=%u raw_sex=%u raw_job=%u roles=%u name_len=%u response=1/1/7 evidence=mmTitle:0x3E66/0x5324 runtime=wt1/7-len34\n",
+                     result,
+                     actorId,
+                     fields.rawSex,
+                     fields.rawJob,
+                     roleCount,
+                     (u32)strlen(fields.name));
+    return pos;
+}
+
+static u32 vm_net_mock_build_title_role_delete_response(const u8 *request,
+                                                        u32 requestLen,
+                                                        u8 *out,
+                                                        u32 outCap)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u32 actorId = 0;
+    u8 result = 1;
+    u32 roleCount = 0;
+
+    if (outCap < pos)
+        return 0;
+    if (!vm_net_mock_parse_title_role_delete_request(request, requestLen, &actorId))
+        return 0;
+
+    if (!vm_net_mock_role_db_delete_by_id(actorId, &result, &roleCount))
+        result = 1;
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 1, 8, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", result))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+
+    vm_autotest_note("mock_title_role_delete result=%u actorid=%u roles=%u response=1/1/8 evidence=mmTitle:0x1F90/0x53EC runtime=wt1/8-len25\n",
+                     result,
+                     actorId,
+                     roleCount);
     return pos;
 }
 
@@ -11311,6 +11768,24 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     u8 requestSubtype = 0;
     if (vm_net_mock_get_wt_header_kind_subtype(request, requestLen, &requestKind, &requestSubtype))
     {
+        if (vm_net_mock_is_title_role_create_request(request, requestLen))
+        {
+            hookedLen = vm_net_mock_build_title_role_create_response(request, requestLen, out, outCap);
+            if (hookedLen)
+            {
+                vm_net_log_handled_packet("builtin-title-role-create", request, requestLen, hookedLen);
+                return hookedLen;
+            }
+        }
+        if (vm_net_mock_is_title_role_delete_request(request, requestLen))
+        {
+            hookedLen = vm_net_mock_build_title_role_delete_response(request, requestLen, out, outCap);
+            if (hookedLen)
+            {
+                vm_net_log_handled_packet("builtin-title-role-delete", request, requestLen, hookedLen);
+                return hookedLen;
+            }
+        }
         if (vm_net_mock_is_title_role_select_request(request, requestLen))
         {
             hookedLen = vm_net_mock_build_title_role_select_response(request, requestLen, out, outCap);
