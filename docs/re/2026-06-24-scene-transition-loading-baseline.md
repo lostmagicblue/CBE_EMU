@@ -296,3 +296,115 @@ Status: validated
   - 修复为 `current-scene-repeat` 必须同时满足“近期已完成过同一目标”，首次跨图 `2/3 + 27/11 + 27/4 + 7/42` 继续走普通 scene-change/bootstrap 路径。
   - 继续验证发现普通 scene-change 对这种“本地已切到目标图”的包仍只返回 162 字节 ack 组合，缺少 `27/12.posinfo` completion，导致资源表已是桃花岛但玩家坐标仍停在旧图。
   - 修复为：当前 runtime scene 已等于目标图且目标尚未 recent-completed 时，归入 current-scene completion；带 `27/4` 的本地切图 completion 保留 `vm_net_mock_get_scene_change_target()` 解析出的目标入口坐标，不再用旧图运行坐标覆盖。
+
+## 17. 追加取证：运行时 SCE 传送与重复 loading 收敛
+
+- 日期：2026-06-25
+- 当前最小目标：
+  - 地图传送点与 SCE 文件中的 `edge_portal` 保持一致；
+  - 刚进目标图后不再因为后续 `25/5` 或 `2/10` 被误识别而重复进入 loading；
+  - 先修通 `c00蓬莱仙岛_03 -> 01桃花岛_01`，再推广到任意 SCE 边缘传送。
+
+### IDA / 客户端证据
+
+| binary | function/address | finding |
+| --- | --- | --- |
+| `江湖OL.CBE` | `scene_handle_enter_with_scene_pos` / `0x010396D6` | `30/2` 场景响应读取 `scene` 字符串和 tagged `posinfo`，成功后进入场景坐标写入路径。 |
+| `江湖OL.CBE` | `EnterSceneByMapName` / `0x01018150` | 复制目标 scene 名、写入坐标、重置 scene nodes，并触发屏幕/场景生命周期。 |
+| `江湖OL.CBE` | `ProcessSceneState` / `0x01003CFC` | `state == 100` 画 loading，`state == 101` 调用场景 callback；重复发起 scene enter 会表现成多段 loading。 |
+| `江湖OL.CBE` | `scene_runtime_tick` / `0x01014EE0` | 旧闪退位置仍是场景 init 生命周期被半重复推进后的内部事件空指针写入。 |
+
+### SCE 数据证据
+
+- `c00蓬莱仙岛_03.sce` 右侧 `edge_portal`：
+  - `spawn_point=(401,288)`
+  - `targetScene=01桃花岛_01.sce`
+  - `entryId=1`
+  - `trigger_rect=(421,268)-(441,308)`
+  - `targetEntryId=3`
+- `01桃花岛_01.sce` 的 `entryId=1` 边缘入口：
+  - `spawn_point=(225,116)`
+  - `trigger_rect=(240,96)-(272,128)`
+  - `targetScene=00蓬莱仙岛_04.sce`
+- 运行时验证表明，`c00蓬莱仙岛_03` 右侧进入桃花岛时，客户端请求里的 `exitID=1` 应落到 `01桃花岛_01` 的 entry `1` 附近，即 `(225,116)`，不是底部入口 `(230,425)`。
+
+### 实现结论
+
+- `src/mock-server.c` 新增轻量 `edge_portal` 运行时解析：
+  - 优先从 `tmp/all_sce_bundle/<scene>.sce/scene.json` 读取已解压的 SCE 导出；
+  - `bin/JHOnlineData/<scene>.sce` 是 type-2 压缩资源，不能直接按明文 `SCE2` 扫描；
+  - JSON 不存在时才回退旧 raw-SCE 探测和静态 fallback 表；
+  - 按玩家当前格点和 trigger rect 查找源地图出口，再按目标 scene 的 entry 查目标落点。
+- `vm_net_mock_get_scene_change_target()` 现在优先用目标 scene 的 SCE entry spawn 生成 `30/2 scene+posinfo` 坐标，避免继续维护分叉的手写路由。
+- SCE `spawn_point` 往往贴着 `trigger_rect`，运行时切图不能直接把它作为玩家落点；本轮增加 32px 安全间隔，只在 raw spawn 落入或贴近 trigger rect 时，把 `30/2.posinfo` 推到 trigger rect 外侧。
+- 对已经完成的目标图，后续 `25/5` 不再重复下发完整 `30/2 scene+posinfo`，只返回轻量 follow-up。否则客户端会再次走 `EnterSceneByMapName(0x01018150)`，可见表现就是刚进图出现多段 loading。
+- 刚完成进入目标图后的短窗口内，`2/10 Type=1` 不再走 portal 分支，而是落到 `builtin-actor-other-only10` 空响应。原因是此时 scene node / HUD 状态可能仍指向入口节点，直接按当前位置判 portal 会把“刚落地”误判成“又踩传送点”。
+
+### 验证结果
+
+- 自动化起点：`CBE_SCENE_KEY=c00蓬莱仙岛_03.sce`, `CBE_SCENE_POS_X=421`, `CBE_SCENE_POS_Y=288`。
+- 关键包链：
+  - `WT 2/3 len=77 -> builtin-scene-change resp=240`
+  - `WT 25/5 len=44 -> builtin-scene-task-subset-followup resp=177`
+  - 入图后 `WT 2/10 len=19 -> builtin-actor-other-only10 resp=42`
+- 修复前的失败形态：
+  - `25/5` 会返回带完整 scene enter 的大包，客户端再次触发 `screen_mgr same` / `ScreenInit`；
+  - 或刚进图的 `2/10` 被误判为新 portal，继续触发下一次切图，最后回到 `0x01014EE0`。
+- 修复后：
+  - `25/5` 后续保持轻量响应，不再出现目标图的重复 `ScreenInit`；
+  - `mock_scene_safe_landing scene=01桃花岛_01.sce raw=(225,116) safe=(208,116) rect=(240,96)-(272,128)`；
+  - scene probe 稳定显示 `01桃花岛_01` 的两个边缘入口：`(230,425)` 与 `(225,116)`；
+  - 不移动时可稳定停留在 `01桃花岛_01`，无断言。
+- 蓬莱迷境追加验证：
+  - 自动化起点：`00蓬莱仙岛_02.sce @ (396,473)`，登录后 `hold:d:2500` 触发 `_02 -> c00蓬莱仙岛_03`；
+  - `mock_scene_safe_landing scene=c00蓬莱仙岛_03.sce raw=(145,47) safe=(157,47) rect=(105,27)-(125,67)`；
+  - 关键包链为 `WT 2/3 len=80 -> builtin-scene-change resp=239`，随后 `WT 25/5 len=44 -> builtin-scene-task-subset-followup resp=177`；
+  - `48042ms` 到 `69057ms` scene probe 均为 `pending=0, ready=1, assets=1`，没有二次 `2/3` 或断言；
+  - 持久化位置保存为 `c00蓬莱仙岛_03 @ (157,47)`。
+
+### Unknowns
+
+- `edge_portal.targetEntryId` 的完整语义还没完全读透。当前运行证据显示这条链应优先使用请求 `exitID` / 源 `entryId` 去匹配目标 scene entry；如果后续地图发现反例，需要回到客户端 edge portal parser 继续核对。
+- 当前 JSON 读取器只覆盖已经确认会影响边缘传送的导出字段，不把它扩展成完整 JSON/SCE 反序列化器；后续每增加新字段都必须先有 IDA 或运行证据。
+
+## 18. 追加规则：缺 SCE 数据时触发客户端下载而不是坐标回退
+
+- 日期：2026-06-26
+- 用户约束：如果 mock-server 没读到目标地图的 SCE/JSON 数据，不允许再走手写 fallback 坐标；应让客户端触发对应场景文件下载。
+
+### IDA / 客户端证据
+
+| binary | function/address | finding |
+| --- | --- | --- |
+| `江湖OL.CBE` | `scene_handle_enter_with_scene_pos` / `0x010396D6` | `30/2` 场景响应只要带 `scene + posinfo`，就会推进到写当前场景与坐标的路径；缺 SCE 时不能伪造 `posinfo`。 |
+| `江湖OL.CBE` | `scene_handle_change_result_scene_pos` / `0x01039890` | `result == 1` 后同样读取 `scene + posinfo`；运行时切图路径也要遵守同一约束。 |
+| `江湖OL.CBE` | `HandleSceneTransition` / `0x0100369C` | `mode == 1` 会进入 `InitResourceDownload`，这是缺资源时客户端应走的路径。 |
+| `江湖OL.CBE` | `send_update_chunk_request` / `0x01036D80` | 资源下载请求 case 4 构造 `18/7`，字段包含 `name/screen/type/start/version`；现有 `builtin-update-chunk` 已按 `JHOnlineData/<name>` 提供分片。 |
+
+### 实现结论
+
+- `vm_net_mock_get_scene_change_target()` 增加 `hasSceEntry` 与 `needsSceneDownload`：
+  - 目标 SCE entry 可读时，照常用 SCE spawn 构造 `30/2 scene+posinfo`；
+  - 目标 scene 名是安全下载 key、但找不到 SCE entry 时，标记 `needsSceneDownload=true`，只保留 scene 名，不再写入 fallback 坐标。
+- `vm_net_mock_build_scene_change_combo_response()` 和 `vm_net_mock_build_scene_change_post_enter_followup_response()` 在 `needsSceneDownload` 时只返回 scene ack，不附带 `posinfo`，并且不记录 pending target、不标记 scene-change completed、不保存玩家位置。
+- portal 入口查询也改成证据优先：
+  - 若当前地图能读到 SCE/JSON，但当前位置找不到 `edge_portal`，直接不触发切图，禁止落到静态 fallback；
+  - 若当前地图本身缺 SCE/JSON，则记录 `mock_scene_missing_sce ... action=wait-client-download`，等待客户端走资源下载路径；
+  - 静态 `kVmNetMockPortalFallbacks` 只保留给非下载 key 的旧兼容面，不再覆盖普通地图数据。
+
+### 验证结果
+
+- 正常 SCE/JSON 存在时，`00蓬莱仙岛_02 -> c00蓬莱仙岛_03` 仍走 SCE spawn：
+  - `mock_scene_safe_landing scene=c00蓬莱仙岛_03.sce raw=(145,47) safe=(157,47) rect=(105,27)-(125,67) entry=0 targetEntry=1`
+  - `WT 2/3 len=80 -> builtin-scene-change resp=239`
+  - `WT 25/5 len=44 -> builtin-scene-task-subset-followup resp=177`
+- 控制实验中临时移走 `tmp/all_sce_bundle/c00蓬莱仙岛_03.sce/scene.json` 后，同一路径不再使用旧坐标回退：
+  - `mock_scene_missing_sce target=c00蓬莱仙岛_03.sce exit=0 action=download-ack`
+  - `mock_scene_download_ack scene=c00蓬莱仙岛_03.sce exit=0 response=scene-ack-without-posinfo evidence=JianghuOL:0x100369C/0x1036C66`
+  - `WT 2/3 len=80 -> builtin-scene-change resp=243`
+- 这次控制实验没有看到真实 `18/7`，原因是客户端本地仍有 `JHOnlineData/c00蓬莱仙岛_03.sce`；但服务端已停止下发伪 `posinfo`，如果客户端缺本地资源，应由 `HandleSceneTransition(mode==1)` 进入资源下载，并由现有 `builtin-update-chunk` 响应。
+
+### 后续约束
+
+- 后续任何地图切换问题都先确认目标 SCE/JSON 是否可读；不可读时只能走 download ack，不允许新增手写坐标 fallback。
+- 新增地图支持时，优先补 SCE 解包/JSON 读取或验证 `18/7` 下载链路；静态 fallback 只能作为明确标注的临时兼容项，并且不能覆盖普通 scene key。

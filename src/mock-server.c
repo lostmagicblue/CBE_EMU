@@ -1780,7 +1780,11 @@ enum
     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_ID = 800,
     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_SEQ = 1,
     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_COUNT = 5,
+    VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE = 1,
+    VM_NET_MOCK_SHOP_DEFAULT_ITEM_STOCK = 99,
+    VM_NET_MOCK_SHOP_PURCHASE_ITEM_SEQ = 2,
     VM_NET_MOCK_TELEPORT_STONE_DEFAULT_EXIT_ID = 1,
+    VM_NET_MOCK_SCENE_LANDING_SAFE_GAP = 32,
     VM_NET_MOCK_ITEM_EXTRA_ATTR_SLOTS = 4
 };
 
@@ -1853,6 +1857,41 @@ static bool vm_net_mock_build_backpack_grid_iteminfo_blob(u8 *out, u32 outCap, u
     return true;
 }
 
+static bool vm_net_mock_build_shop_iteminfo_blob(u8 *out, u32 outCap, u32 *blobLenOut)
+{
+    u32 pos = 0;
+    if (out == NULL || blobLenOut == NULL)
+        return false;
+
+    /*
+     * mmShopMstarWqvga.cbm:sub_7BC reads:
+     *   u8 row_count,
+     *   u32 itemId, string itemName, u8 visual/status, u8 stackOrLimit,
+     *   u32 price, u32 stock, u8 flag, then the common item-extra block.
+     */
+    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 1))
+        return false;
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_ID))
+        return false;
+    if (!vm_net_mock_seq_put_string(out, outCap, &pos, "Teleport Stone"))
+        return false;
+    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 1))
+        return false;
+    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_COUNT))
+        return false;
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE))
+        return false;
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, VM_NET_MOCK_SHOP_DEFAULT_ITEM_STOCK))
+        return false;
+    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 0))
+        return false;
+    if (!vm_net_mock_seq_put_item_common_extra(out, outCap, &pos, VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_COUNT))
+        return false;
+
+    *blobLenOut = pos;
+    return true;
+}
+
 static bool vm_net_mock_is_backpack_items_request(const u8 *request, u32 requestLen)
 {
     u32 offset = 4;
@@ -1883,6 +1922,43 @@ static bool vm_net_mock_is_backpack_open_request(const u8 *request, u32 requestL
            object.kind == 7 &&
            object.subtype == 42 &&
            object.payloadLen == 0;
+}
+
+static bool vm_net_mock_is_backpack_items_books_combo_request(const u8 *request, u32 requestLen,
+                                                              u16 *itemsPayloadLenOut)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object itemsObject;
+    vm_net_mock_request_object booksObject;
+
+    if (itemsPayloadLenOut)
+        *itemsPayloadLenOut = 0;
+    if (request == NULL || requestLen != 25 || request[0] != 'W' || request[1] != 'T')
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &itemsObject))
+        return false;
+    if (itemsObject.major != 1 ||
+        itemsObject.kind != 17 ||
+        itemsObject.subtype != 1 ||
+        itemsObject.payloadLen != 11)
+    {
+        return false;
+    }
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &booksObject))
+        return false;
+    if (booksObject.major != 1 ||
+        booksObject.kind != 7 ||
+        booksObject.subtype != 42 ||
+        booksObject.payloadLen != 0)
+    {
+        return false;
+    }
+    if (offset != requestLen)
+        return false;
+
+    if (itemsPayloadLenOut)
+        *itemsPayloadLenOut = itemsObject.payloadLen;
+    return true;
 }
 
 static bool vm_net_mock_append_backpack_items_object(u8 *out, u32 outCap, u32 *pos)
@@ -1997,6 +2073,25 @@ static u32 vm_net_mock_build_backpack_open_response(u8 *out, u32 outCap)
     return pos;
 }
 
+static u32 vm_net_mock_build_backpack_items_books_combo_response(const u8 *request, u32 requestLen,
+                                                                u8 *out, u32 outCap)
+{
+    u16 itemsPayloadLen = 0;
+    u32 responseLen = 0;
+
+    if (!vm_net_mock_is_backpack_items_books_combo_request(request, requestLen, &itemsPayloadLen))
+        return 0;
+
+    responseLen = vm_net_mock_build_backpack_open_response(out, outCap);
+    if (responseLen)
+    {
+        vm_autotest_note("mock_backpack_items_books_combo len=%u items_payload=%u response=17/1+7/42 evidence=mmGame:0x418C runtime=wt17/1-len25\n",
+                         requestLen,
+                         itemsPayloadLen);
+    }
+    return responseLen;
+}
+
 typedef struct
 {
     char magic[4];
@@ -2093,6 +2188,13 @@ static bool vm_net_mock_scene_name_has_path_separator(const char *scene)
             return true;
     }
     return false;
+}
+
+static bool vm_net_mock_scene_name_is_download_key(const char *scene)
+{
+    return scene != NULL &&
+           scene[0] != 0 &&
+           !vm_net_mock_scene_name_has_path_separator(scene);
 }
 
 static bool vm_net_mock_scene_resource_exists(const char *scene)
@@ -2213,6 +2315,8 @@ static bool vm_net_mock_scene_is_taohuadao01(const char *scene)
            strcmp(scene, "\x30\x31\xcc\xd2\xbb\xa8\xb5\xba\x5f\x30\x31\x2e\x73\x63\x65") == 0;
 }
 
+static bool vm_net_mock_adjust_safe_player_pos_from_sce(const char *scene, u16 *x, u16 *y);
+
 static void vm_net_mock_adjust_safe_player_pos_for_scene(const char *scene, u16 *x, u16 *y)
 {
     if (scene == NULL || x == NULL || y == NULL)
@@ -2238,7 +2342,10 @@ static void vm_net_mock_adjust_safe_player_pos_for_scene(const char *scene, u16 
     {
         *x = 105;
         *y = 360;
+        return;
     }
+
+    (void)vm_net_mock_adjust_safe_player_pos_from_sce(scene, x, y);
 }
 
 static void vm_net_mock_player_pos_path(char *path, size_t pathSize)
@@ -2446,7 +2553,22 @@ typedef struct
     u16 y;
     u32 exitId;
     u8 mapType;
+    bool hasSceEntry;
+    bool needsSceneDownload;
 } vm_net_mock_scene_change_target;
+
+typedef struct
+{
+    char targetScene[64];
+    u16 entryId;
+    u16 targetEntryId;
+    u16 left;
+    u16 top;
+    u16 right;
+    u16 bottom;
+    u16 spawnX;
+    u16 spawnY;
+} vm_net_mock_sce_edge_portal;
 
 static vm_net_mock_scene_change_target g_vm_net_mock_last_scene_change_target;
 static bool g_vm_net_mock_last_scene_change_target_valid = false;
@@ -2460,6 +2582,705 @@ static bool vm_net_mock_should_rearm_send_ready(void)
 {
     return g_vm_net_mock_last_scene_change_target_valid ||
            g_vm_net_mock_last_completed_scene_change_target_valid;
+}
+
+static u16 vm_net_mock_read_le16_at(const u8 *data, u32 off)
+{
+    return (u16)((u16)data[off] | ((u16)data[off + 1] << 8));
+}
+
+static u32 vm_net_mock_scene_payload_start(const u8 *data, u32 len)
+{
+    u32 base = 0;
+    u32 mapNameLen = 0;
+    u32 start = 0;
+
+    if (data == NULL || len < 15)
+        return 0;
+
+    for (base = 0; base + 15 <= len && base < 32; ++base)
+    {
+        if (memcmp(data + base, "SCE2", 4) == 0)
+            break;
+    }
+    if (base + 15 > len || base >= 32)
+        return 0;
+
+    mapNameLen = data[base + 10];
+    start = base + 10 + 1 + mapNameLen + 4;
+    if (start >= len)
+        return 0;
+    return start;
+}
+
+static bool vm_net_mock_read_sce_len_string(const u8 *data, u32 len, u32 *pos,
+                                            char *out, size_t outCap)
+{
+    u32 stringLen = 0;
+
+    if (data == NULL || pos == NULL || out == NULL || outCap == 0 || *pos >= len)
+        return false;
+    stringLen = data[*pos];
+    if (*pos + 1 + stringLen > len || stringLen >= outCap)
+        return false;
+    memcpy(out, data + *pos + 1, stringLen);
+    out[stringLen] = 0;
+    *pos += 1 + stringLen;
+    return true;
+}
+
+static bool vm_net_mock_read_sce_scalar_field(const u8 *data, u32 len, u32 *pos,
+                                              u16 expectedField, u16 *valueOut)
+{
+    if (data == NULL || pos == NULL || valueOut == NULL || *pos + 6 > len)
+        return false;
+    if (vm_net_mock_read_le16_at(data, *pos) != 1 ||
+        vm_net_mock_read_le16_at(data, *pos + 2) != expectedField)
+    {
+        return false;
+    }
+    *valueOut = vm_net_mock_read_le16_at(data, *pos + 4);
+    *pos += 6;
+    return true;
+}
+
+static bool vm_net_mock_parse_sce_edge_portal_at(const u8 *data, u32 len, u32 off,
+                                                 vm_net_mock_sce_edge_portal *portal,
+                                                 u32 *endOut)
+{
+    u32 pos = off;
+    u16 kind = 0;
+    u16 field = 0;
+
+    if (data == NULL || portal == NULL || off + 18 > len)
+        return false;
+    memset(portal, 0, sizeof(*portal));
+
+    kind = vm_net_mock_read_le16_at(data, pos);
+    pos += 2;
+    if (kind == 2)
+    {
+        if (pos + 4 > len)
+            return false;
+        portal->spawnX = vm_net_mock_read_le16_at(data, pos);
+        portal->spawnY = vm_net_mock_read_le16_at(data, pos + 2);
+        pos += 4;
+    }
+    else
+    {
+        if (pos + 6 > len || vm_net_mock_read_le16_at(data, pos) != 2)
+            return false;
+        portal->spawnX = vm_net_mock_read_le16_at(data, pos + 2);
+        portal->spawnY = vm_net_mock_read_le16_at(data, pos + 4);
+        pos += 6;
+    }
+
+    if (pos + 8 > len || vm_net_mock_read_le16_at(data, pos) != 8)
+        return false;
+    pos += 8;
+
+    if (pos + 5 > len || vm_net_mock_read_le16_at(data, pos) != 3)
+        return false;
+    field = vm_net_mock_read_le16_at(data, pos + 2);
+    pos += 4;
+    if (field != 6 ||
+        !vm_net_mock_read_sce_len_string(data, len, &pos, portal->targetScene, sizeof(portal->targetScene)) ||
+        !vm_net_mock_str_ends_with(portal->targetScene, ".sce") ||
+        !vm_net_mock_scene_name_is_safe(portal->targetScene))
+    {
+        return false;
+    }
+
+    if (!vm_net_mock_read_sce_scalar_field(data, len, &pos, 0x07, &portal->entryId) ||
+        !vm_net_mock_read_sce_scalar_field(data, len, &pos, 0x0a, &portal->left) ||
+        !vm_net_mock_read_sce_scalar_field(data, len, &pos, 0x0b, &portal->top) ||
+        !vm_net_mock_read_sce_scalar_field(data, len, &pos, 0x0c, &portal->right) ||
+        !vm_net_mock_read_sce_scalar_field(data, len, &pos, 0x0d, &portal->bottom) ||
+        !vm_net_mock_read_sce_scalar_field(data, len, &pos, 0x13, &portal->targetEntryId))
+    {
+        return false;
+    }
+
+    if (portal->right < portal->left || portal->bottom < portal->top)
+        return false;
+    if (endOut)
+        *endOut = pos;
+    return true;
+}
+
+static u32 vm_net_mock_load_scene_resource(const char *scene, u8 *out, u32 outCap)
+{
+    char path[256];
+    u32 len = 0;
+
+    if (scene == NULL || scene[0] == 0 || out == NULL || outCap == 0 ||
+        vm_net_mock_scene_name_has_path_separator(scene))
+    {
+        return 0;
+    }
+
+    snprintf(path, sizeof(path), "JHOnlineData/%s", scene);
+    len = vm_net_mock_load_response_file(path, out, outCap);
+    if (len == 0 && !vm_net_mock_str_ends_with(scene, ".sce"))
+    {
+        snprintf(path, sizeof(path), "JHOnlineData/%s.sce", scene);
+        len = vm_net_mock_load_response_file(path, out, outCap);
+    }
+    return len;
+}
+
+static u16 vm_net_mock_u16_add_cap(u16 value, u16 amount);
+
+static u32 vm_net_mock_load_scene_json(const char *scene, char *out, u32 outCap)
+{
+    char sceneName[80];
+    const char *prefixes[] = {
+        "../tmp/all_sce_bundle",
+        "tmp/all_sce_bundle"
+    };
+
+    if (scene == NULL || scene[0] == 0 || out == NULL || outCap < 2 ||
+        vm_net_mock_scene_name_has_path_separator(scene))
+    {
+        return 0;
+    }
+
+    snprintf(sceneName, sizeof(sceneName), "%s", scene);
+    for (u32 withExt = 0; withExt < 2; ++withExt)
+    {
+        if (withExt == 1)
+        {
+            if (vm_net_mock_str_ends_with(sceneName, ".sce"))
+                break;
+            snprintf(sceneName, sizeof(sceneName), "%s.sce", scene);
+        }
+        for (u32 i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); ++i)
+        {
+            char path[256];
+            u32 len = 0;
+            snprintf(path, sizeof(path), "%s/%s/scene.json", prefixes[i], sceneName);
+            len = vm_net_mock_load_response_file(path, (u8 *)out, outCap - 1);
+            if (len > 0)
+            {
+                out[len] = 0;
+                return len;
+            }
+        }
+    }
+
+    out[0] = 0;
+    return 0;
+}
+
+static bool vm_net_mock_scene_edge_data_available(const char *scene)
+{
+    char jsonProbe[8];
+    u8 data[8192];
+    u32 len = 0;
+
+    if (!vm_net_mock_scene_name_is_download_key(scene))
+        return false;
+    if (vm_net_mock_load_scene_json(scene, jsonProbe, sizeof(jsonProbe)) > 0)
+        return true;
+
+    len = vm_net_mock_load_scene_resource(scene, data, sizeof(data));
+    return vm_net_mock_scene_payload_start(data, len) != 0;
+}
+
+static const char *vm_net_mock_json_skip_string(const char *p, const char *end)
+{
+    if (p == NULL || end == NULL || p >= end || *p != '"')
+        return p;
+    ++p;
+    while (p < end)
+    {
+        if (*p == '\\')
+        {
+            p += (p + 1 < end) ? 2 : 1;
+            continue;
+        }
+        if (*p == '"')
+            return p + 1;
+        ++p;
+    }
+    return end;
+}
+
+static const char *vm_net_mock_json_find_object_end(const char *start, const char *end)
+{
+    const char *p = start;
+    int depth = 0;
+
+    if (start == NULL || end == NULL || start >= end || *start != '{')
+        return NULL;
+    while (p < end)
+    {
+        if (*p == '"')
+        {
+            p = vm_net_mock_json_skip_string(p, end);
+            continue;
+        }
+        if (*p == '{')
+            ++depth;
+        else if (*p == '}')
+        {
+            --depth;
+            if (depth == 0)
+                return p + 1;
+        }
+        ++p;
+    }
+    return NULL;
+}
+
+static const char *vm_net_mock_json_find_key(const char *start, const char *end,
+                                             const char *key)
+{
+    const char *p = start;
+    size_t keyLen = key ? strlen(key) : 0;
+
+    if (start == NULL || end == NULL || key == NULL || keyLen == 0)
+        return NULL;
+    while (p != NULL && p < end)
+    {
+        p = strstr(p, key);
+        if (p == NULL || p >= end)
+            return NULL;
+        if (p + keyLen <= end)
+            return p;
+        ++p;
+    }
+    return NULL;
+}
+
+static bool vm_net_mock_json_read_u16(const char *start, const char *end,
+                                      const char *key, u16 *valueOut)
+{
+    const char *p = vm_net_mock_json_find_key(start, end, key);
+    unsigned long value = 0;
+
+    if (p == NULL || valueOut == NULL)
+        return false;
+    p = strchr(p, ':');
+    if (p == NULL || p >= end)
+        return false;
+    ++p;
+    while (p < end && (*p == ' ' || *p == '\r' || *p == '\n' || *p == '\t'))
+        ++p;
+    if (p >= end || *p < '0' || *p > '9')
+        return false;
+    value = strtoul(p, NULL, 10);
+    if (value > 0xffff)
+        return false;
+    *valueOut = (u16)value;
+    return true;
+}
+
+static bool vm_net_mock_json_read_gbk_string(const char *start, const char *end,
+                                             const char *key, char *out, size_t outCap)
+{
+    const char *p = vm_net_mock_json_find_key(start, end, key);
+    char utf8[96];
+    size_t len = 0;
+
+    if (p == NULL || out == NULL || outCap == 0)
+        return false;
+    out[0] = 0;
+    p = strchr(p, ':');
+    if (p == NULL || p >= end)
+        return false;
+    ++p;
+    while (p < end && (*p == ' ' || *p == '\r' || *p == '\n' || *p == '\t'))
+        ++p;
+    if (p >= end || *p != '"')
+        return false;
+    ++p;
+    while (p + len < end && p[len] != '"' && len + 1 < sizeof(utf8))
+        ++len;
+    if (p + len >= end || p[len] != '"')
+        return false;
+    memcpy(utf8, p, len);
+    utf8[len] = 0;
+    utf8_to_gbk((u8 *)utf8, (u8 *)out, outCap);
+    out[outCap - 1] = 0;
+    return out[0] != 0;
+}
+
+static bool vm_net_mock_json_read_object_range(const char *start, const char *end,
+                                               const char *key,
+                                               const char **objStartOut,
+                                               const char **objEndOut)
+{
+    const char *p = vm_net_mock_json_find_key(start, end, key);
+    const char *objStart = NULL;
+    const char *objEnd = NULL;
+
+    if (p == NULL || objStartOut == NULL || objEndOut == NULL)
+        return false;
+    p = strchr(p, ':');
+    if (p == NULL || p >= end)
+        return false;
+    ++p;
+    while (p < end && (*p == ' ' || *p == '\r' || *p == '\n' || *p == '\t'))
+        ++p;
+    if (p >= end || *p != '{')
+        return false;
+    objStart = p;
+    objEnd = vm_net_mock_json_find_object_end(objStart, end);
+    if (objEnd == NULL)
+        return false;
+    *objStartOut = objStart;
+    *objEndOut = objEnd;
+    return true;
+}
+
+static bool vm_net_mock_parse_json_edge_portal_record(const char *start, const char *end,
+                                                      vm_net_mock_sce_edge_portal *portal)
+{
+    const char *spawnStart = NULL;
+    const char *spawnEnd = NULL;
+    const char *rectStart = NULL;
+    const char *rectEnd = NULL;
+
+    if (start == NULL || end == NULL || portal == NULL ||
+        vm_net_mock_json_find_key(start, end, "\"record_type\": \"edge_portal\"") == NULL)
+    {
+        return false;
+    }
+
+    memset(portal, 0, sizeof(*portal));
+    if (!vm_net_mock_json_read_object_range(start, end, "\"spawn_point\"", &spawnStart, &spawnEnd) ||
+        !vm_net_mock_json_read_u16(spawnStart, spawnEnd, "\"x\"", &portal->spawnX) ||
+        !vm_net_mock_json_read_u16(spawnStart, spawnEnd, "\"y\"", &portal->spawnY) ||
+        !vm_net_mock_json_read_gbk_string(start, end, "\"target_scene\"",
+                                          portal->targetScene, sizeof(portal->targetScene)) ||
+        !vm_net_mock_json_read_u16(start, end, "\"entry_id\"", &portal->entryId) ||
+        !vm_net_mock_json_read_object_range(start, end, "\"trigger_rect\"", &rectStart, &rectEnd) ||
+        !vm_net_mock_json_read_u16(rectStart, rectEnd, "\"left\"", &portal->left) ||
+        !vm_net_mock_json_read_u16(rectStart, rectEnd, "\"top\"", &portal->top) ||
+        !vm_net_mock_json_read_u16(rectStart, rectEnd, "\"right\"", &portal->right) ||
+        !vm_net_mock_json_read_u16(rectStart, rectEnd, "\"bottom\"", &portal->bottom) ||
+        !vm_net_mock_json_read_u16(start, end, "\"target_entry_id\"", &portal->targetEntryId))
+    {
+        return false;
+    }
+
+    return portal->right >= portal->left &&
+           portal->bottom >= portal->top &&
+           vm_net_mock_scene_name_is_safe(portal->targetScene);
+}
+
+static bool vm_net_mock_find_json_edge_portal(const char *scene,
+                                              bool byEntry,
+                                              u32 entryId,
+                                              u16 gridX,
+                                              u16 gridY,
+                                              u16 margin,
+                                              vm_net_mock_sce_edge_portal *portalOut)
+{
+    static char json[65536];
+    u32 len = vm_net_mock_load_scene_json(scene, json, sizeof(json));
+    const char *cursor = json;
+    const char *end = json + len;
+
+    if (portalOut)
+        memset(portalOut, 0, sizeof(*portalOut));
+    if (len == 0)
+        return false;
+
+    while (cursor < end)
+    {
+        const char *hit = strstr(cursor, "\"record_type\": \"edge_portal\"");
+        const char *objStart = hit;
+        const char *objEnd = NULL;
+        vm_net_mock_sce_edge_portal portal;
+
+        if (hit == NULL || hit >= end)
+            break;
+        while (objStart > json && *objStart != '{')
+            --objStart;
+        if (*objStart != '{')
+            break;
+        objEnd = vm_net_mock_json_find_object_end(objStart, end);
+        if (objEnd == NULL)
+            break;
+        cursor = objEnd;
+
+        if (!vm_net_mock_parse_json_edge_portal_record(objStart, objEnd, &portal))
+            continue;
+        if (byEntry)
+        {
+            if (entryId > 0xffff || portal.entryId != (u16)entryId)
+                continue;
+        }
+        else
+        {
+            u16 left = (portal.left > margin) ? (u16)(portal.left - margin) : 0;
+            u16 top = (portal.top > margin) ? (u16)(portal.top - margin) : 0;
+            u16 right = vm_net_mock_u16_add_cap(portal.right, margin);
+            u16 bottom = vm_net_mock_u16_add_cap(portal.bottom, margin);
+            if (gridX < left || gridX > right || gridY < top || gridY > bottom)
+                continue;
+        }
+        if (portalOut)
+            *portalOut = portal;
+        return true;
+    }
+    return false;
+}
+
+static bool vm_net_mock_find_sce_edge_portal_by_entry(const char *scene, u32 entryId,
+                                                      vm_net_mock_sce_edge_portal *portalOut)
+{
+    u8 data[8192];
+    u32 len = vm_net_mock_load_scene_resource(scene, data, sizeof(data));
+    u32 start = vm_net_mock_scene_payload_start(data, len);
+
+    if (portalOut)
+        memset(portalOut, 0, sizeof(*portalOut));
+    if (vm_net_mock_find_json_edge_portal(scene, true, entryId, 0, 0, 0, portalOut))
+        return true;
+    if (len == 0 || start == 0 || entryId > 0xffff)
+        return false;
+
+    for (u32 off = start; off + 18 <= len; ++off)
+    {
+        vm_net_mock_sce_edge_portal portal;
+        u32 end = 0;
+        if (!vm_net_mock_parse_sce_edge_portal_at(data, len, off, &portal, &end))
+            continue;
+        if (portal.entryId != (u16)entryId)
+            continue;
+        if (portalOut)
+            *portalOut = portal;
+        return true;
+    }
+    return false;
+}
+
+static bool vm_net_mock_find_sce_edge_portal_at_pos(const char *scene, u16 gridX, u16 gridY,
+                                                    u16 margin,
+                                                    vm_net_mock_sce_edge_portal *portalOut)
+{
+    u8 data[8192];
+    u32 len = vm_net_mock_load_scene_resource(scene, data, sizeof(data));
+    u32 start = vm_net_mock_scene_payload_start(data, len);
+
+    if (portalOut)
+        memset(portalOut, 0, sizeof(*portalOut));
+    if (vm_net_mock_find_json_edge_portal(scene, false, 0, gridX, gridY, margin, portalOut))
+        return true;
+    if (len == 0 || start == 0)
+        return false;
+
+    for (u32 off = start; off + 18 <= len; ++off)
+    {
+        vm_net_mock_sce_edge_portal portal;
+        u32 end = 0;
+        u16 left = 0;
+        u16 top = 0;
+        u16 right = 0;
+        u16 bottom = 0;
+        if (!vm_net_mock_parse_sce_edge_portal_at(data, len, off, &portal, &end))
+            continue;
+        left = (portal.left > margin) ? (u16)(portal.left - margin) : 0;
+        top = (portal.top > margin) ? (u16)(portal.top - margin) : 0;
+        right = (u16)(portal.right + margin);
+        bottom = (u16)(portal.bottom + margin);
+        if (gridX < left || gridX > right || gridY < top || gridY > bottom)
+            continue;
+        if (portalOut)
+            *portalOut = portal;
+        return true;
+    }
+    return false;
+}
+
+static u16 vm_net_mock_u16_sub_floor(u16 value, u16 amount)
+{
+    return value > amount ? (u16)(value - amount) : 0;
+}
+
+static u16 vm_net_mock_u16_add_cap(u16 value, u16 amount)
+{
+    return value > (u16)(0xffff - amount) ? 0xffff : (u16)(value + amount);
+}
+
+static void vm_net_mock_adjust_pos_away_from_sce_portal(const vm_net_mock_sce_edge_portal *portal,
+                                                        u16 safeGap, u16 *x, u16 *y)
+{
+    u16 px = 0;
+    u16 py = 0;
+    bool xInside = false;
+    bool yInside = false;
+    u32 dx = 0;
+    u32 dy = 0;
+
+    if (portal == NULL || x == NULL || y == NULL || safeGap == 0)
+        return;
+
+    px = *x;
+    py = *y;
+    xInside = px >= portal->left && px <= portal->right;
+    yInside = py >= portal->top && py <= portal->bottom;
+    dx = xInside ? 0 : (px < portal->left ? (u32)(portal->left - px) : (u32)(px - portal->right));
+    dy = yInside ? 0 : (py < portal->top ? (u32)(portal->top - py) : (u32)(py - portal->bottom));
+
+    if (!(xInside && yInside) && dx * dx + dy * dy >= (u32)safeGap * (u32)safeGap)
+        return;
+
+    if (xInside && py < portal->top)
+    {
+        *y = vm_net_mock_u16_sub_floor(portal->top, safeGap);
+        return;
+    }
+    if (xInside && py > portal->bottom)
+    {
+        *y = vm_net_mock_u16_add_cap(portal->bottom, safeGap);
+        return;
+    }
+    if (yInside && px < portal->left)
+    {
+        *x = vm_net_mock_u16_sub_floor(portal->left, safeGap);
+        return;
+    }
+    if (yInside && px > portal->right)
+    {
+        *x = vm_net_mock_u16_add_cap(portal->right, safeGap);
+        return;
+    }
+
+    if (!xInside || !yInside)
+    {
+        if (dy > 0 && (dx == 0 || dy <= dx))
+            *y = py < portal->top ? vm_net_mock_u16_sub_floor(portal->top, safeGap)
+                                  : vm_net_mock_u16_add_cap(portal->bottom, safeGap);
+        else if (dx > 0)
+            *x = px < portal->left ? vm_net_mock_u16_sub_floor(portal->left, safeGap)
+                                   : vm_net_mock_u16_add_cap(portal->right, safeGap);
+        return;
+    }
+
+    {
+        u32 best = 0xffffffffu;
+        char dir = 0;
+        u32 leftDist = (u32)(px - portal->left);
+        u32 rightDist = (u32)(portal->right - px);
+        u32 topDist = (u32)(py - portal->top);
+        u32 bottomDist = (u32)(portal->bottom - py);
+
+        if (portal->left > 0 && leftDist < best)
+        {
+            best = leftDist;
+            dir = 'l';
+        }
+        if (portal->top > 0 && topDist < best)
+        {
+            best = topDist;
+            dir = 't';
+        }
+        if (rightDist < best)
+        {
+            best = rightDist;
+            dir = 'r';
+        }
+        if (bottomDist < best)
+        {
+            dir = 'b';
+        }
+
+        if (dir == 'l')
+            *x = vm_net_mock_u16_sub_floor(portal->left, safeGap);
+        else if (dir == 't')
+            *y = vm_net_mock_u16_sub_floor(portal->top, safeGap);
+        else if (dir == 'r')
+            *x = vm_net_mock_u16_add_cap(portal->right, safeGap);
+        else if (dir == 'b')
+            *y = vm_net_mock_u16_add_cap(portal->bottom, safeGap);
+    }
+}
+
+static bool vm_net_mock_adjust_safe_player_pos_from_sce(const char *scene, u16 *x, u16 *y)
+{
+    vm_net_mock_sce_edge_portal portal;
+    u16 oldX = 0;
+    u16 oldY = 0;
+
+    if (scene == NULL || x == NULL || y == NULL)
+        return false;
+
+    oldX = *x;
+    oldY = *y;
+    if (!vm_net_mock_find_sce_edge_portal_at_pos(scene, oldX, oldY,
+                                                VM_NET_MOCK_SCENE_LANDING_SAFE_GAP,
+                                                &portal))
+    {
+        return false;
+    }
+
+    vm_net_mock_adjust_pos_away_from_sce_portal(&portal,
+                                                VM_NET_MOCK_SCENE_LANDING_SAFE_GAP,
+                                                x, y);
+    if (oldX != *x || oldY != *y)
+    {
+        vm_autotest_note("mock_scene_safe_landing scene=%s raw=(%u,%u) safe=(%u,%u) rect=(%u,%u)-(%u,%u) entry=%u targetEntry=%u\n",
+                         scene, oldX, oldY, *x, *y,
+                         portal.left, portal.top, portal.right, portal.bottom,
+                         portal.entryId, portal.targetEntryId);
+    }
+    return oldX != *x || oldY != *y;
+}
+
+static bool vm_net_mock_get_scene_entry_spawn_from_sce(const char *scene, u32 entryId,
+                                                       u16 *xOut, u16 *yOut)
+{
+    vm_net_mock_sce_edge_portal portal;
+    u16 x = 0;
+    u16 y = 0;
+
+    if (!vm_net_mock_find_sce_edge_portal_by_entry(scene, entryId, &portal))
+        return false;
+    x = portal.spawnX;
+    y = portal.spawnY;
+    vm_net_mock_adjust_safe_player_pos_for_scene(scene, &x, &y);
+    if (xOut)
+        *xOut = x;
+    if (yOut)
+        *yOut = y;
+    return portal.spawnX != 0 || portal.spawnY != 0;
+}
+
+static bool vm_net_mock_get_scene_portal_target_from_sce(const char *sourceScene,
+                                                         u16 gridX, u16 gridY, u16 margin,
+                                                         vm_net_mock_scene_change_target *target)
+{
+    vm_net_mock_sce_edge_portal portal;
+    const char *normalizedTarget = NULL;
+    u16 targetX = 0;
+    u16 targetY = 0;
+
+    if (target == NULL ||
+        !vm_net_mock_find_sce_edge_portal_at_pos(sourceScene, gridX, gridY, margin, &portal))
+    {
+        return false;
+    }
+
+    if (!vm_net_mock_get_scene_entry_spawn_from_sce(portal.targetScene, portal.entryId,
+                                                    &targetX, &targetY) &&
+        !vm_net_mock_get_scene_entry_spawn_from_sce(portal.targetScene, portal.targetEntryId,
+                                                    &targetX, &targetY))
+    {
+        return false;
+    }
+
+    memset(target, 0, sizeof(*target));
+    normalizedTarget = vm_net_mock_normalize_scene_name_for_enter(portal.targetScene);
+    snprintf(target->scene, sizeof(target->scene), "%s", normalizedTarget);
+    target->x = targetX;
+    target->y = targetY;
+    target->exitId = portal.entryId;
+    target->mapType = 2;
+    return true;
 }
 
 static void vm_net_mock_remember_scene_change_target(const vm_net_mock_scene_change_target *target)
@@ -2499,10 +3320,23 @@ static bool vm_net_mock_is_recent_completed_scene_change_target(const vm_net_moc
     return (g_schedulerTick - g_vm_net_mock_last_completed_scene_change_tick) < 90;
 }
 
+static bool vm_net_mock_is_recent_completed_scene_name(const char *scene, u32 windowTicks)
+{
+    if (scene == NULL ||
+        !g_vm_net_mock_last_completed_scene_change_target_valid ||
+        !vm_net_mock_scene_names_equal_loose(scene, g_vm_net_mock_last_completed_scene_change_target.scene))
+    {
+        return false;
+    }
+    return (g_schedulerTick - g_vm_net_mock_last_completed_scene_change_tick) < windowTicks;
+}
+
 static bool vm_net_mock_should_use_full_scene_bootstrap(const char *currentScene,
                                                         const vm_net_mock_scene_change_target *target)
 {
     if (target == NULL || target->scene[0] == 0)
+        return false;
+    if (target->needsSceneDownload)
         return false;
 
     if (vm_net_mock_scene_is_penglai02(target->scene))
@@ -2547,6 +3381,8 @@ static void vm_net_mock_get_scene_change_target(const u8 *request, u32 requestLe
 {
     char mapId[64];
     u32 exitId = 0;
+    u16 sceSpawnX = 0;
+    u16 sceSpawnY = 0;
     const char *currentScene = vm_net_mock_current_scene_name();
     memset(target, 0, sizeof(*target));
     snprintf(target->scene, sizeof(target->scene), "%s", vm_net_mock_default_scene_name());
@@ -2554,6 +3390,8 @@ static void vm_net_mock_get_scene_change_target(const u8 *request, u32 requestLe
     target->y = vm_net_mock_scene_spawn_y();
     target->exitId = 0;
     target->mapType = 2;
+    target->hasSceEntry = false;
+    target->needsSceneDownload = false;
 
     if (!vm_net_mock_get_object_string_field(request, requestLen, "mapID", mapId, sizeof(mapId)))
         return;
@@ -2563,6 +3401,27 @@ static void vm_net_mock_get_scene_change_target(const u8 *request, u32 requestLe
 
     if (mapId[0] != 0)
         snprintf(target->scene, sizeof(target->scene), "%s", mapId);
+
+    if (vm_net_mock_get_scene_entry_spawn_from_sce(mapId, exitId, &sceSpawnX, &sceSpawnY))
+    {
+        snprintf(target->scene, sizeof(target->scene), "%s",
+                 vm_net_mock_normalize_scene_name_for_enter(mapId));
+        target->x = sceSpawnX;
+        target->y = sceSpawnY;
+        target->hasSceEntry = true;
+        return;
+    }
+
+    if (vm_net_mock_scene_name_is_download_key(mapId))
+    {
+        snprintf(target->scene, sizeof(target->scene), "%s", mapId);
+        target->x = 0;
+        target->y = 0;
+        target->needsSceneDownload = true;
+        vm_autotest_note("mock_scene_missing_sce target=%s exit=%u action=download-ack\n",
+                         target->scene, exitId);
+        return;
+    }
 
     if (vm_net_mock_scene_is_penglai01(mapId) && exitId == 0)
     {
@@ -2640,6 +3499,8 @@ static void vm_net_mock_get_scene_change_target(const u8 *request, u32 requestLe
         target->x = (exitId == 1) ? 256 : 136;
         target->y = (exitId == 1) ? 300 : 58;
     }
+
+    vm_net_mock_adjust_safe_player_pos_for_scene(target->scene, &target->x, &target->y);
 }
 
 static bool vm_net_mock_is_teleport_stone_list_request(const u8 *request, u32 requestLen)
@@ -3735,6 +4596,8 @@ static bool vm_net_mock_is_penglai02_repeat_scene_change_request(const u8 *reque
     }
 
     vm_net_mock_get_scene_change_target(request, requestLen, &target);
+    if (target.needsSceneDownload)
+        return false;
     return vm_net_mock_scene_is_penglai02(target.scene) &&
            target.exitId == 0 &&
            vm_net_mock_is_recent_completed_scene_change_target(&target);
@@ -3755,7 +4618,7 @@ static bool vm_net_mock_is_current_scene_completion_request(const u8 *request, u
     }
 
     vm_net_mock_get_scene_change_target(request, requestLen, &target);
-    if (target.scene[0] == 0)
+    if (target.scene[0] == 0 || target.needsSceneDownload)
         return false;
 
     currentScene = vm_net_mock_current_scene_name();
@@ -3781,7 +4644,7 @@ static bool vm_net_mock_is_current_scene_repeat_scene_change_request(const u8 *r
     }
 
     vm_net_mock_get_scene_change_target(request, requestLen, &target);
-    if (target.scene[0] == 0)
+    if (target.scene[0] == 0 || target.needsSceneDownload)
         return false;
 
     currentScene = vm_net_mock_current_scene_name();
@@ -3953,6 +4816,7 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
     bool needFb11 = vm_net_mock_request_contains_object(request, requestLen, 1, 0x1b, 11);
     bool needFb4 = vm_net_mock_request_contains_object(request, requestLen, 1, 0x1b, 4);
     bool splitScenePosCommit = true;
+    bool currentSceneAlreadyTarget = false;
     u8 fb4Type = 1;
     u32 pos = 5;
     u32 objectStart = 0;
@@ -3965,6 +4829,10 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
     vm_net_mock_get_scene_change_target(request, requestLen, &target);
     recentCompletedTarget = vm_net_mock_is_recent_completed_scene_change_target(&target);
     currentScene = vm_net_mock_current_scene_name();
+    currentSceneAlreadyTarget = !target.needsSceneDownload &&
+                                currentScene != NULL &&
+                                vm_net_mock_scene_uses_current_scene_completion(currentScene) &&
+                                vm_net_mock_scene_names_equal_loose(currentScene, target.scene);
     if (vm_net_mock_should_use_full_scene_bootstrap(currentScene, &target))
     {
         /*
@@ -3998,7 +4866,15 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
             objectCount += 1;
         }
         vm_net_mock_finish_wt_packet(out, pos, objectCount);
-        vm_net_mock_remember_scene_change_target(&target);
+        /*
+         * The full-bootstrap path already includes the 30/2 scene+posinfo
+         * object. IDA scene_handle_enter_with_scene_pos(0x010396D6) feeds that
+         * object into EnterSceneByMapName(0x01018150), so leaving the same target
+         * pending makes the next 25/5 subset repeat the scene enter and shows an
+         * extra loading cycle.
+         */
+        vm_net_mock_mark_completed_scene_change_target(&target);
+        g_vm_net_mock_last_scene_change_target_valid = false;
         g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
         g_vm_net_mock_last_scene_change_fb4_type = 1;
         vm_net_mock_save_player_pos_state(target.scene, target.x, target.y, "scene-change-transfer-target");
@@ -4061,10 +4937,33 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
         objectCount += 1;
     }
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
-    if (!recentCompletedTarget)
+    if (target.needsSceneDownload)
+    {
+        g_vm_net_mock_last_scene_change_target_valid = false;
+        g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+        g_vm_net_mock_last_scene_change_fb4_type = fb4Type;
+        vm_autotest_note("mock_scene_download_ack scene=%s exit=%u response=scene-ack-without-posinfo evidence=JianghuOL:0x100369C/0x1036C66\n",
+                         target.scene, target.exitId);
+        return pos;
+    }
+    if (currentSceneAlreadyTarget)
+    {
+        /*
+         * Some edge portals locally create the destination scene screen before
+         * the skill/books-flavoured WT 2/3 request arrives. This request cannot
+         * hit the lighter current-scene completion detector because it also asks
+         * for 12/1 and 7/42, but keeping it pending makes the following 25/5
+         * send another 30/2 scene+posinfo object and re-enter the map.
+         */
+        vm_net_mock_mark_completed_scene_change_target(&target);
+        g_vm_net_mock_last_scene_change_target_valid = false;
+    }
+    else if (!recentCompletedTarget)
+    {
         vm_net_mock_remember_scene_change_target(&target);
+    }
     g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
-    if (!recentCompletedTarget)
+    if (!recentCompletedTarget || currentSceneAlreadyTarget)
         vm_net_mock_save_player_pos_state(target.scene, target.x, target.y, "scene-change-target");
     g_vm_net_mock_last_scene_change_fb4_type = fb4Type;
     return pos;
@@ -4228,6 +5127,33 @@ static u32 vm_net_mock_build_scene_change_post_enter_followup_response(const u8 
     vm_net_mock_get_scene_change_target(request, requestLen, &target);
     if (target.scene[0] == 0)
         return 0;
+
+    if (target.needsSceneDownload)
+    {
+        u32 objectStart = 0;
+
+        if (!vm_net_mock_append_info_banner_result5_object(out, outCap, &pos))
+            return 0;
+        objectCount += 1;
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 2, &objectStart))
+            return 0;
+        if (!vm_net_mock_put_scene_ack_without_posinfo(out, outCap, &pos, 2, target.scene))
+            return 0;
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        objectCount += 1;
+        if (!vm_net_mock_append_fb_target_empty11_object(out, outCap, &pos))
+            return 0;
+        objectCount += 1;
+        if (!vm_net_mock_append_books42_object(out, outCap, &pos))
+            return 0;
+        objectCount += 1;
+        vm_net_mock_finish_wt_packet(out, pos, objectCount);
+        g_vm_net_mock_last_scene_change_target_valid = false;
+        g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+        vm_autotest_note("mock_scene_download_followup_ack scene=%s exit=%u response=scene-ack-without-posinfo\n",
+                         target.scene, target.exitId);
+        return pos;
+    }
 
     if (!g_vm_net_mock_last_scene_change_target_valid ||
         !vm_net_mock_scene_change_targets_equal(&target, &g_vm_net_mock_last_scene_change_target))
@@ -4941,6 +5867,23 @@ static bool vm_net_mock_find_portal_fallback_with_margin(const char *scene, u16 
     if (scene == NULL || target == NULL)
         return false;
 
+    if (vm_net_mock_get_scene_portal_target_from_sce(scene, gridX, gridY, margin, target))
+    {
+        if (routeNameOut)
+            *routeNameOut = "sce-edge-portal";
+        return true;
+    }
+
+    if (vm_net_mock_scene_edge_data_available(scene))
+        return false;
+
+    if (vm_net_mock_scene_name_is_download_key(scene))
+    {
+        vm_autotest_note("mock_scene_missing_sce source=%s pos=(%u,%u) action=wait-client-download\n",
+                         scene, gridX, gridY);
+        return false;
+    }
+
     for (i = 0; i < sizeof(kVmNetMockPortalFallbacks) / sizeof(kVmNetMockPortalFallbacks[0]); ++i)
     {
         const vm_net_mock_portal_fallback *fallback = &kVmNetMockPortalFallbacks[i];
@@ -4995,9 +5938,12 @@ static u32 vm_net_mock_build_actor_other_portal_response(const u8 *request, u32 
     if (outCap < pos || !vm_net_mock_is_actor_other_only10_request(request, requestLen))
         return 0;
 
+    scene = vm_net_mock_current_scene_name();
+    if (vm_net_mock_is_recent_completed_scene_name(scene, 180))
+        return 0;
+
     if (!vm_net_mock_read_current_player_grid(NULL, NULL, &gridX, &gridY, NULL, NULL))
         return 0;
-    scene = vm_net_mock_current_scene_name();
     if (vm_net_mock_scene_is_penglai_transfer_scene(scene))
         return 0;
 
@@ -7253,20 +8199,18 @@ static u32 vm_net_mock_build_shop_actor_query14_response(const u8 *request, u32 
 {
     u32 offset = 4;
     u32 actorId = 0;
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u8 itemInfo[256];
+    u32 itemInfoLen = 0;
     vm_net_mock_request_object object;
 
     /*
-     * Current post-death flow now reaches a second-stage one-object request:
-     *   WT len=25 hdr=1/14 objs=1/1/14(actorId=0)
-     * Latest static/raw evidence also shows the camel-case field name
-     * `actorId` inside mmShopMstarWqvga.cbm rather than the main-CBE
-     * `actorID` title/login family, so treat this as a shop-side follow-up.
-     *
-     * The real 1/14 shop/revive payload contract is still unknown. Keep the
-     * transport alive with a same-packet echo until the response consumer is
-     * recovered.
+     * mmShopMstarWqvga.cbm:sub_11F0 sends WT 1/1/14(actorId) when the NPC
+     * shop "buy" branch opens. sub_9DE then consumes kind-14 response objects:
+     * 14/14 result+shopinfo, 14/4 money fields, and 14/5..13 item pages.
      */
-    if (request == NULL || requestLen < 9 || out == NULL)
+    if (request == NULL || requestLen < 9 || out == NULL || outCap < pos)
         return 0;
     if (request[0] != 'W' || request[1] != 'T')
         return 0;
@@ -7279,7 +8223,113 @@ static u32 vm_net_mock_build_shop_actor_query14_response(const u8 *request, u32 
     if (!vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "actorId", &actorId))
         return 0;
 
-    return vm_net_mock_copy_response(request, requestLen, out, outCap);
+    if (!vm_net_mock_build_shop_iteminfo_blob(itemInfo, sizeof(itemInfo), &itemInfoLen))
+        return 0;
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 14, 14, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
+        return 0;
+    if (!vm_net_mock_put_object_string(out, outCap, &pos, "shopinfo", "Codex Shop"))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 14, 4, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "coolmoney", 999999))
+        return 0;
+    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "ticket", 0))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 14, 5, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "totalnum", 1))
+        return 0;
+    if (!vm_net_mock_put_object_raw(out, outCap, &pos, "iteminfo", itemInfo, (u16)itemInfoLen))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 14, 6, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "totalnum", 0))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+
+    vm_net_mock_finish_wt_packet(out, pos, 4);
+    vm_autotest_note("mock_shop_open14 actorId=%u item=%u price=%u stock=%u iteminfo_len=%u evidence=mmShop:0x11F0/0x9DE/0x7BC\n",
+                     actorId,
+                     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_ID,
+                     VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE,
+                     VM_NET_MOCK_SHOP_DEFAULT_ITEM_STOCK,
+                     itemInfoLen);
+    return pos;
+}
+
+static bool vm_net_mock_is_shop_buy17_request(const u8 *request, u32 requestLen,
+                                              u32 *shopIdOut, u8 *countOut)
+{
+    u32 offset = 4;
+    u32 shopId = 0;
+    u8 count = 1;
+    vm_net_mock_request_object object;
+
+    if (shopIdOut)
+        *shopIdOut = 0;
+    if (countOut)
+        *countOut = 1;
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T')
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        return false;
+    if (offset != requestLen)
+        return false;
+    if (object.major != 1 || object.kind != 17 || object.subtype != 2)
+        return false;
+    if (!vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "shopId", &shopId))
+        return false;
+
+    (void)vm_net_mock_get_object_u8_field(object.payload, object.payloadLen, "num", &count);
+    if (count == 0)
+        count = 1;
+    if (shopIdOut)
+        *shopIdOut = shopId;
+    if (countOut)
+        *countOut = count;
+    return true;
+}
+
+static u32 vm_net_mock_build_shop_buy17_response(const u8 *request, u32 requestLen,
+                                                 u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u32 shopId = 0;
+    u8 count = 1;
+
+    if (outCap < pos || out == NULL)
+        return 0;
+    if (!vm_net_mock_is_shop_buy17_request(request, requestLen, &shopId, &count))
+        return 0;
+
+    /*
+     * mmShopMstarWqvga.cbm:sub_24E6 sends WT 17/2 with shopId when the buy
+     * confirmation is accepted. sub_418C handles WT 17/2 by reading result and,
+     * on success, one i16 item sequence that it writes into item+276 before
+     * invoking the normal item-manager insert callback.
+     */
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 17, 2, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
+        return 0;
+    if (!vm_net_mock_put_object_u16(out, outCap, &pos, "seq", VM_NET_MOCK_SHOP_PURCHASE_ITEM_SEQ))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+
+    vm_autotest_note("mock_shop_buy17 shopId=%u count=%u seq=%u evidence=mmShop:0x24E6/0x418C\n",
+                     shopId, count, VM_NET_MOCK_SHOP_PURCHASE_ITEM_SEQ);
+    return pos;
 }
 
 static bool vm_net_mock_is_login_tail_skill_request(const u8 *request, u32 requestLen)
@@ -8653,6 +9703,20 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     if (hookedLen)
     {
         vm_net_log_handled_packet("builtin-shop-actor-query14", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_shop_buy17_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-shop-buy17", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_backpack_items_books_combo_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-backpack-items-books-combo", request, requestLen, hookedLen);
         return hookedLen;
     }
 
