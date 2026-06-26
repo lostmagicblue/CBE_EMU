@@ -25,8 +25,7 @@ typedef struct
 
 static u8 g_netMockTitleServerListPending = 0;
 static u8 g_netMockTitleServerSelectConfirmed = 0;
-static u8 g_netMockBackpackFullItemsDelivered = 0;
-static u8 g_netMockBackpackGridDelivered = 0;
+static u32 g_netMockBackpackGridSeededRoleId = 0;
 static u8 g_netMockShop17ListPending = 0;
 static u32 g_netMockTitleServerListTick = 0;
 static u32 g_netMockTitleServerSelectTick = 0;
@@ -1202,8 +1201,7 @@ static void vm_net_mock_title_login_phase_reset(const char *reason)
     }
     g_netMockTitleServerListPending = 0;
     g_netMockTitleServerSelectConfirmed = 0;
-    g_netMockBackpackFullItemsDelivered = 0;
-    g_netMockBackpackGridDelivered = 0;
+    g_netMockBackpackGridSeededRoleId = 0;
     g_netMockTitleServerListTick = 0;
     g_netMockTitleServerSelectTick = 0;
     g_netMockTitleSelectedServerId = 0;
@@ -2386,6 +2384,7 @@ static bool vm_net_mock_append_fb_target_result4_object(u8 *out, u32 outCap, u32
 enum
 {
     VM_NET_MOCK_BACKPACK_CAPACITY = 40,
+    VM_NET_MOCK_BACKPACK_MAX_ITEMS = 40,
     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_ID = 800,
     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_SEQ = 1,
     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_COUNT = 5,
@@ -2395,11 +2394,11 @@ enum
     VM_NET_MOCK_SHOP17_MAX_CATALOG_ITEMS = 10,
     VM_NET_MOCK_SHOP_MAX_CATALOG_ITEMS = 2048,
     VM_NET_MOCK_SHOP_NAME_BYTES = 12,
-    VM_NET_MOCK_SHOP_PURCHASE_ITEM_SEQ = 2,
     VM_NET_MOCK_TELEPORT_STONE_DEFAULT_EXIT_ID = 1,
     VM_NET_MOCK_SCENE_LANDING_SAFE_GAP = 32,
     VM_NET_MOCK_ROLE_DB_MAX_ROLES = 5,
-    VM_NET_MOCK_ROLE_DB_VERSION = 1,
+    VM_NET_MOCK_ROLE_DB_LEGACY_VERSION = 1,
+    VM_NET_MOCK_ROLE_DB_VERSION = 2,
     VM_NET_MOCK_ROLE_EXP_PER_LEVEL = 100,
     VM_NET_MOCK_ROLE_MONSTER_EXP = 10,
     VM_NET_MOCK_ROLE_DEFAULT_ID = 10001,
@@ -2409,6 +2408,14 @@ enum
     VM_NET_MOCK_ROLE_INITIAL_X = 223,
     VM_NET_MOCK_ROLE_INITIAL_Y = 382
 };
+
+typedef struct
+{
+    u32 itemId;
+    u16 seq;
+    u16 reserved0;
+    u32 count;
+} vm_net_mock_backpack_item_state;
 
 typedef struct
 {
@@ -2428,7 +2435,40 @@ typedef struct
     char scene[64];
     u16 x;
     u16 y;
+    u8 backpackItemCount;
+    u8 reserved1;
+    u16 nextBackpackSeq;
+    vm_net_mock_backpack_item_state backpackItems[VM_NET_MOCK_BACKPACK_MAX_ITEMS];
 } vm_net_mock_role_state;
+
+typedef struct
+{
+    u32 roleId;
+    char name[32];
+    u8 job;
+    u8 sex;
+    u8 backpackCapacity;
+    u8 reserved0;
+    u32 level;
+    u32 exp;
+    u32 hp;
+    u32 hpMax;
+    u32 mp;
+    u32 mpMax;
+    u32 money;
+    char scene[64];
+    u16 x;
+    u16 y;
+} vm_net_mock_role_state_v1;
+
+typedef struct
+{
+    char magic[4];
+    u32 version;
+    u32 activeRoleId;
+    u32 roleCount;
+    vm_net_mock_role_state_v1 roles[VM_NET_MOCK_ROLE_DB_MAX_ROLES];
+} vm_net_mock_role_db_file_v1;
 
 typedef struct
 {
@@ -2440,10 +2480,29 @@ typedef struct
 } vm_net_mock_role_db_file;
 
 static vm_net_mock_role_state *vm_net_mock_active_role(void);
-static void vm_net_mock_write_legacy_player_pos_state(const vm_net_mock_role_state *role);
 static u32 vm_net_mock_role_level_from_exp(u32 exp);
 static u32 vm_net_mock_role_exp_percent(u32 exp);
 static u32 vm_net_mock_role_last_level_exp(u32 exp);
+
+static u8 vm_net_mock_role_backpack_count(const vm_net_mock_role_state *role)
+{
+    u32 count = 0;
+    if (role == NULL)
+        return 0;
+    count = role->backpackItemCount;
+    if (count > VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+        count = VM_NET_MOCK_BACKPACK_MAX_ITEMS;
+    if (count > role->backpackCapacity)
+        count = role->backpackCapacity;
+    return (u8)count;
+}
+
+static u8 vm_net_mock_backpack_stack_byte(const vm_net_mock_backpack_item_state *item)
+{
+    if (item == NULL || item->count == 0)
+        return 0;
+    return item->count > 255 ? 255 : (u8)item->count;
+}
 
 typedef struct
 {
@@ -2802,20 +2861,33 @@ static bool vm_net_mock_seq_put_shop_page_item_extra(u8 *out, u32 outCap, u32 *p
     return vm_net_mock_seq_put_u8(out, outCap, pos, 0);
 }
 
-static bool vm_net_mock_build_backpack_iteminfo_blob(u8 *out, u32 outCap, u32 *blobLenOut)
+static bool vm_net_mock_build_backpack_iteminfo_blob(u8 *out, u32 outCap,
+                                                     const vm_net_mock_role_state *role,
+                                                     u32 *blobLenOut, u32 *rowCountOut)
 {
     u32 pos = 0;
+    u8 itemCount = vm_net_mock_role_backpack_count(role);
     if (out == NULL || blobLenOut == NULL)
         return false;
+    if (rowCountOut)
+        *rowCountOut = 0;
 
-    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 1))
+    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, itemCount))
         return false;
-    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_ID))
-        return false;
-    if (!vm_net_mock_seq_put_item_common_extra(out, outCap, &pos, VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_COUNT))
-        return false;
-
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        const vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+        if (!vm_net_mock_seq_put_u32(out, outCap, &pos, item->itemId))
+            return false;
+        if (!vm_net_mock_seq_put_item_common_extra(out, outCap, &pos,
+                                                  vm_net_mock_backpack_stack_byte(item)))
+        {
+            return false;
+        }
+    }
     *blobLenOut = pos;
+    if (rowCountOut)
+        *rowCountOut = itemCount;
     return true;
 }
 
@@ -2909,22 +2981,32 @@ static bool vm_net_mock_build_shop17_iteminfo_blob(u8 *out, u32 outCap,
     return true;
 }
 
-static bool vm_net_mock_build_backpack_grid_iteminfo_blob(u8 *out, u32 outCap, u32 *blobLenOut)
+static bool vm_net_mock_build_backpack_grid_iteminfo_blob(u8 *out, u32 outCap,
+                                                         const vm_net_mock_role_state *role,
+                                                         u32 *blobLenOut, u32 *gridCountOut)
 {
     u32 pos = 0;
+    u8 itemCount = vm_net_mock_role_backpack_count(role);
     if (out == NULL || blobLenOut == NULL)
         return false;
+    if (gridCountOut)
+        *gridCountOut = 0;
 
-    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_ID))
-        return false;
-    if (!vm_net_mock_seq_put_i16(out, outCap, &pos, VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_SEQ))
-        return false;
-    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_COUNT))
-        return false;
-    if (!vm_net_mock_seq_put_item_common_extra(out, outCap, &pos, 0))
-        return false;
-
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        const vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+        if (!vm_net_mock_seq_put_u32(out, outCap, &pos, item->itemId))
+            return false;
+        if (!vm_net_mock_seq_put_i16(out, outCap, &pos, item->seq))
+            return false;
+        if (!vm_net_mock_seq_put_u32(out, outCap, &pos, item->count))
+            return false;
+        if (!vm_net_mock_seq_put_item_common_extra(out, outCap, &pos, 0))
+            return false;
+    }
     *blobLenOut = pos;
+    if (gridCountOut)
+        *gridCountOut = itemCount;
     return true;
 }
 
@@ -3157,29 +3239,33 @@ static bool vm_net_mock_is_backpack_items_books_combo_request(const u8 *request,
 static bool vm_net_mock_append_backpack_items_object(u8 *out, u32 outCap, u32 *pos)
 {
     u32 objectStart = 0;
-    u8 itemInfo[128];
+    u8 itemInfo[1024];
     u32 itemInfoLen = 0;
+    u32 rowCount = 0;
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u16 capacity = role ? role->backpackCapacity : VM_NET_MOCK_BACKPACK_CAPACITY;
 
     if (out == NULL || pos == NULL)
         return false;
     memset(itemInfo, 0, sizeof(itemInfo));
-    if (!vm_net_mock_build_backpack_iteminfo_blob(itemInfo, sizeof(itemInfo), &itemInfoLen))
+    if (!vm_net_mock_build_backpack_iteminfo_blob(itemInfo, sizeof(itemInfo), role,
+                                                 &itemInfoLen, &rowCount))
         return false;
     if (itemInfoLen == 0 || itemInfoLen > 0xffff)
         return false;
 
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 17, 1, &objectStart))
         return false;
-    if (!vm_net_mock_put_object_u16(out, outCap, pos, "maxnum", VM_NET_MOCK_BACKPACK_CAPACITY))
+    if (!vm_net_mock_put_object_u16(out, outCap, pos, "maxnum", capacity))
         return false;
     if (!vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo", itemInfo, (u16)itemInfoLen))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
 
-    vm_autotest_note("mock_backpack_items capacity=%u item=%u count=%u iteminfo_len=%u evidence=mmGame:0x418C\n",
-                     VM_NET_MOCK_BACKPACK_CAPACITY,
-                     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_ID,
-                     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_COUNT,
+    vm_autotest_note("mock_backpack_items role=%u capacity=%u rows=%u iteminfo_len=%u evidence=mmGame:0x418C\n",
+                     role ? role->roleId : 0,
+                     capacity,
+                     rowCount,
                      itemInfoLen);
     return true;
 }
@@ -3220,45 +3306,50 @@ static bool vm_net_mock_append_shop17_items_object(u8 *out, u32 outCap, u32 *pos
 static bool vm_net_mock_append_backpack_grid_object(u8 *out, u32 outCap, u32 *pos)
 {
     u32 objectStart = 0;
-    u8 itemInfo[128];
+    u8 itemInfo[1024];
     u32 itemInfoLen = 0;
+    u32 gridCount = 0;
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
 
     if (out == NULL || pos == NULL)
         return false;
     memset(itemInfo, 0, sizeof(itemInfo));
-    if (!vm_net_mock_build_backpack_grid_iteminfo_blob(itemInfo, sizeof(itemInfo), &itemInfoLen))
+    if (!vm_net_mock_build_backpack_grid_iteminfo_blob(itemInfo, sizeof(itemInfo), role,
+                                                      &itemInfoLen, &gridCount))
         return false;
-    if (itemInfoLen == 0 || itemInfoLen > 0xffff)
+    if (gridCount == 0 || itemInfoLen > 0xffff)
         return false;
 
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 30, 21, &objectStart))
         return false;
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", 1))
         return false;
-    if (!vm_net_mock_put_object_u8(out, outCap, pos, "gridnum", 1))
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "gridnum", (u8)gridCount))
         return false;
     if (!vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo", itemInfo, (u16)itemInfoLen))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
 
-    vm_autotest_note("mock_backpack_grid kind=30 subtype=21 gridnum=1 item=%u seq=%u count=%u iteminfo_len=%u evidence=JianghuOL:0x1039952\n",
-                     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_ID,
-                     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_SEQ,
-                     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_COUNT,
+    vm_autotest_note("mock_backpack_grid role=%u kind=30 subtype=21 gridnum=%u iteminfo_len=%u evidence=JianghuOL:0x1039952\n",
+                     role ? role->roleId : 0,
+                     gridCount,
                      itemInfoLen);
     return true;
 }
 
-static bool vm_net_mock_append_backpack_default_item_main_objects(u8 *out, u32 outCap, u32 *pos, u8 *objectCount)
+static bool vm_net_mock_append_backpack_role_grid_main_objects(u8 *out, u32 outCap, u32 *pos, u8 *objectCount)
 {
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
     if (out == NULL || pos == NULL || objectCount == NULL)
         return false;
-    if (!g_netMockBackpackGridDelivered)
+    if (role == NULL || vm_net_mock_role_backpack_count(role) == 0)
+        return true;
+    if (g_netMockBackpackGridSeededRoleId != role->roleId)
     {
         if (!vm_net_mock_append_backpack_grid_object(out, outCap, pos))
             return false;
         *objectCount = (u8)(*objectCount + 1);
-        g_netMockBackpackGridDelivered = 1;
+        g_netMockBackpackGridSeededRoleId = role->roleId;
     }
     return true;
 }
@@ -3420,14 +3511,6 @@ static u32 vm_net_mock_build_shop_items_books_response(u8 *out, u32 outCap)
     return pos;
 }
 
-typedef struct
-{
-    char magic[4];
-    char scene[64];
-    u16 x;
-    u16 y;
-} vm_net_mock_player_pos_state;
-
 static const char *vm_net_mock_default_scene_name(void);
 static bool vm_net_mock_scene_is_penglai01(const char *scene);
 static bool vm_net_mock_scene_is_penglai02(const char *scene);
@@ -3437,8 +3520,6 @@ static bool vm_net_mock_scene_is_penglai_transfer_scene(const char *scene);
 static bool vm_net_mock_scene_is_c00_penglai03(const char *scene);
 static bool vm_net_mock_scene_is_taohuadao01(const char *scene);
 
-static vm_net_mock_player_pos_state g_vm_net_mock_player_pos;
-static bool g_vm_net_mock_player_pos_valid = false;
 static vm_net_mock_role_db_file g_vm_net_mock_role_db;
 static bool g_vm_net_mock_role_db_loaded = false;
 static bool g_vm_net_mock_role_db_valid = false;
@@ -3679,11 +3760,6 @@ static void vm_net_mock_adjust_safe_player_pos_for_scene(const char *scene, u16 
     (void)vm_net_mock_adjust_safe_player_pos_from_sce(scene, x, y);
 }
 
-static void vm_net_mock_player_pos_path(char *path, size_t pathSize)
-{
-    snprintf(path, pathSize, "nvram/jhol_mock_player_pos.bin");
-}
-
 static void vm_net_mock_role_db_path(char *path, size_t pathSize)
 {
     snprintf(path, pathSize, "nvram/jhol_mock_roles.bin");
@@ -3712,6 +3788,19 @@ static const char *vm_net_mock_default_role_name(void)
 static const char *vm_net_mock_role_initial_scene_name(void)
 {
     return vm_net_mock_default_scene_name();
+}
+
+static void vm_net_mock_role_init_default_backpack(vm_net_mock_role_state *role)
+{
+    if (role == NULL)
+        return;
+    memset(role->backpackItems, 0, sizeof(role->backpackItems));
+    role->backpackCapacity = VM_NET_MOCK_BACKPACK_CAPACITY;
+    role->backpackItemCount = 1;
+    role->nextBackpackSeq = VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_SEQ + 1;
+    role->backpackItems[0].itemId = VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_ID;
+    role->backpackItems[0].seq = VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_SEQ;
+    role->backpackItems[0].count = VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_COUNT;
 }
 
 static bool vm_net_mock_role_has_default_name(const vm_net_mock_role_state *role)
@@ -3749,30 +3838,73 @@ static void vm_net_mock_role_init_default(vm_net_mock_role_state *role)
     snprintf(role->scene, sizeof(role->scene), "%s", vm_net_mock_role_initial_scene_name());
     role->x = VM_NET_MOCK_ROLE_INITIAL_X;
     role->y = VM_NET_MOCK_ROLE_INITIAL_Y;
+    vm_net_mock_role_init_default_backpack(role);
 }
 
-static bool vm_net_mock_cache_player_pos_from_role(const vm_net_mock_role_state *role)
+static void vm_net_mock_role_copy_from_v1(vm_net_mock_role_state *dst,
+                                          const vm_net_mock_role_state_v1 *src)
 {
-    if (role == NULL ||
-        role->x == 0 ||
-        role->y == 0 ||
-        !vm_net_mock_scene_name_is_safe(role->scene))
+    if (dst == NULL || src == NULL)
+        return;
+    memset(dst, 0, sizeof(*dst));
+    dst->roleId = src->roleId;
+    memcpy(dst->name, src->name, sizeof(dst->name));
+    dst->job = src->job;
+    dst->sex = src->sex;
+    dst->backpackCapacity = src->backpackCapacity;
+    dst->level = src->level;
+    dst->exp = src->exp;
+    dst->hp = src->hp;
+    dst->hpMax = src->hpMax;
+    dst->mp = src->mp;
+    dst->mpMax = src->mpMax;
+    dst->money = src->money;
+    memcpy(dst->scene, src->scene, sizeof(dst->scene));
+    dst->x = src->x;
+    dst->y = src->y;
+    vm_net_mock_role_init_default_backpack(dst);
+}
+
+static void vm_net_mock_role_normalize_backpack(vm_net_mock_role_state *role)
+{
+    vm_net_mock_backpack_item_state compact[VM_NET_MOCK_BACKPACK_MAX_ITEMS];
+    u32 compactCount = 0;
+    u16 maxSeq = 0;
+
+    if (role == NULL)
+        return;
+    memset(compact, 0, sizeof(compact));
+    if (role->backpackCapacity == 0 || role->backpackCapacity > VM_NET_MOCK_BACKPACK_CAPACITY)
+        role->backpackCapacity = VM_NET_MOCK_BACKPACK_CAPACITY;
+    if (role->backpackItemCount > VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+        role->backpackItemCount = VM_NET_MOCK_BACKPACK_MAX_ITEMS;
+    if (role->backpackItemCount > role->backpackCapacity)
+        role->backpackItemCount = role->backpackCapacity;
+
+    for (u32 i = 0; i < role->backpackItemCount; ++i)
     {
-        return false;
+        vm_net_mock_backpack_item_state item = role->backpackItems[i];
+        if (item.itemId == 0 || item.count == 0)
+            continue;
+        if (item.seq == 0)
+            item.seq = (u16)(maxSeq + 1);
+        if (item.seq > maxSeq)
+            maxSeq = item.seq;
+        compact[compactCount++] = item;
+        if (compactCount >= role->backpackCapacity ||
+            compactCount >= VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+        {
+            break;
+        }
     }
-    memset(&g_vm_net_mock_player_pos, 0, sizeof(g_vm_net_mock_player_pos));
-    memcpy(g_vm_net_mock_player_pos.magic, "JHP1", 4);
-    snprintf(g_vm_net_mock_player_pos.scene, sizeof(g_vm_net_mock_player_pos.scene), "%s", role->scene);
-    g_vm_net_mock_player_pos.x = role->x;
-    g_vm_net_mock_player_pos.y = role->y;
-    g_vm_net_mock_player_pos_valid = true;
-    return true;
-}
-
-static void vm_net_mock_clear_player_pos_cache(void)
-{
-    memset(&g_vm_net_mock_player_pos, 0, sizeof(g_vm_net_mock_player_pos));
-    g_vm_net_mock_player_pos_valid = false;
+    memset(role->backpackItems, 0, sizeof(role->backpackItems));
+    if (compactCount > 0)
+        memcpy(role->backpackItems, compact, sizeof(compact[0]) * compactCount);
+    role->backpackItemCount = (u8)compactCount;
+    if (role->nextBackpackSeq == 0 || role->nextBackpackSeq <= maxSeq)
+        role->nextBackpackSeq = (u16)(maxSeq + 1);
+    if (role->nextBackpackSeq == 0)
+        role->nextBackpackSeq = 1;
 }
 
 static void vm_net_mock_role_normalize(vm_net_mock_role_state *role)
@@ -3809,6 +3941,7 @@ static void vm_net_mock_role_normalize(vm_net_mock_role_state *role)
         role->y = VM_NET_MOCK_ROLE_INITIAL_Y;
     }
     vm_net_mock_adjust_safe_player_pos_for_scene(role->scene, &role->x, &role->y);
+    vm_net_mock_role_normalize_backpack(role);
     role->level = vm_net_mock_role_level_from_exp(role->exp);
 }
 
@@ -3865,7 +3998,9 @@ static void vm_net_mock_role_db_save(const char *reason)
 static void vm_net_mock_role_db_load(void)
 {
     char path[128];
+    u8 fileBuf[sizeof(vm_net_mock_role_db_file)];
     vm_net_mock_role_db_file loaded;
+    vm_net_mock_role_db_file_v1 legacy;
     bool loadedFromFile = false;
     bool needsSave = false;
 
@@ -3883,8 +4018,10 @@ static void vm_net_mock_role_db_load(void)
     FILE *fp = fopen(path, "rb");
     if (fp)
     {
-        size_t readLen = fread(&loaded, 1, sizeof(loaded), fp);
+        size_t readLen = fread(fileBuf, 1, sizeof(fileBuf), fp);
         fclose(fp);
+        if (readLen == sizeof(loaded))
+            memcpy(&loaded, fileBuf, sizeof(loaded));
         if (readLen == sizeof(loaded) &&
             memcmp(loaded.magic, "JHR1", 4) == 0 &&
             loaded.version == VM_NET_MOCK_ROLE_DB_VERSION &&
@@ -3892,6 +4029,28 @@ static void vm_net_mock_role_db_load(void)
         {
             g_vm_net_mock_role_db = loaded;
             loadedFromFile = true;
+        }
+        else if (readLen == sizeof(legacy))
+        {
+            memcpy(&legacy, fileBuf, sizeof(legacy));
+            if (memcmp(legacy.magic, "JHR1", 4) == 0 &&
+                legacy.version == VM_NET_MOCK_ROLE_DB_LEGACY_VERSION &&
+                legacy.roleCount <= VM_NET_MOCK_ROLE_DB_MAX_ROLES)
+            {
+                memset(&g_vm_net_mock_role_db, 0, sizeof(g_vm_net_mock_role_db));
+                memcpy(g_vm_net_mock_role_db.magic, "JHR1", 4);
+                g_vm_net_mock_role_db.version = VM_NET_MOCK_ROLE_DB_VERSION;
+                g_vm_net_mock_role_db.activeRoleId = legacy.activeRoleId;
+                g_vm_net_mock_role_db.roleCount = legacy.roleCount;
+                for (u32 i = 0; i < legacy.roleCount; ++i)
+                    vm_net_mock_role_copy_from_v1(&g_vm_net_mock_role_db.roles[i],
+                                                  &legacy.roles[i]);
+                loadedFromFile = true;
+                needsSave = true;
+                vm_autotest_note("mock_role_db_migrate version=1->2 roles=%u active=%u\n",
+                                 g_vm_net_mock_role_db.roleCount,
+                                 g_vm_net_mock_role_db.activeRoleId);
+            }
         }
     }
 
@@ -3969,7 +4128,6 @@ static bool vm_net_mock_select_active_role(u32 roleId)
                 g_vm_net_mock_role_db.activeRoleId = roleId;
                 vm_net_mock_role_db_save("role-select");
             }
-            vm_net_mock_write_legacy_player_pos_state(&g_vm_net_mock_role_db.roles[i]);
             return true;
         }
     }
@@ -4104,7 +4262,6 @@ static bool vm_net_mock_role_db_create_from_title(const vm_net_mock_title_role_c
     g_vm_net_mock_role_db.roleCount += 1;
     g_vm_net_mock_role_db.activeRoleId = actorId;
     vm_net_mock_role_db_save("role-create");
-    vm_net_mock_write_legacy_player_pos_state(role);
 
     result = 0;
     if (actorIdOut)
@@ -4166,35 +4323,12 @@ static bool vm_net_mock_role_db_delete_by_id(u32 actorId, u8 *resultOut, u32 *ro
     }
 
     vm_net_mock_role_db_save("role-delete");
-    if (g_vm_net_mock_role_db.roleCount > 0)
-        vm_net_mock_write_legacy_player_pos_state(vm_net_mock_active_role());
-    else
-        vm_net_mock_clear_player_pos_cache();
     result = 0;
     if (resultOut)
         *resultOut = result;
     if (roleCountOut)
         *roleCountOut = g_vm_net_mock_role_db.roleCount;
     return true;
-}
-
-static void vm_net_mock_write_legacy_player_pos_state(const vm_net_mock_role_state *role)
-{
-    char path[128];
-    if (!vm_net_mock_cache_player_pos_from_role(role))
-        return;
-#ifdef _WIN32
-    _mkdir("nvram");
-#else
-    mkdir("nvram", 0777);
-#endif
-    vm_net_mock_player_pos_path(path, sizeof(path));
-    FILE *fp = fopen(path, "wb");
-    if (fp)
-    {
-        fwrite(&g_vm_net_mock_player_pos, 1, sizeof(g_vm_net_mock_player_pos), fp);
-        fclose(fp);
-    }
 }
 
 static void vm_net_mock_role_set_position(const char *scene, u16 x, u16 y, const char *reason)
@@ -4207,7 +4341,56 @@ static void vm_net_mock_role_set_position(const char *scene, u16 x, u16 y, const
     role->y = y;
     vm_net_mock_role_normalize(role);
     vm_net_mock_role_db_save(reason ? reason : "position");
-    vm_net_mock_write_legacy_player_pos_state(role);
+}
+
+static bool vm_net_mock_role_add_backpack_item(u32 itemId, u32 count, u16 *seqOut)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u8 itemCount = 0;
+
+    if (seqOut)
+        *seqOut = 0;
+    if (role == NULL || itemId == 0 || count == 0)
+        return false;
+
+    vm_net_mock_role_normalize_backpack(role);
+    itemCount = vm_net_mock_role_backpack_count(role);
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+        if (item->itemId == itemId)
+        {
+            if (0xffffffffu - item->count < count)
+                item->count = 0xffffffffu;
+            else
+                item->count += count;
+            if (seqOut)
+                *seqOut = item->seq;
+            vm_net_mock_role_normalize_backpack(role);
+            vm_net_mock_role_db_save("backpack-add-stack");
+            return true;
+        }
+    }
+
+    if (itemCount >= role->backpackCapacity || itemCount >= VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+        return false;
+
+    vm_net_mock_backpack_item_state *item = &role->backpackItems[itemCount];
+    memset(item, 0, sizeof(*item));
+    item->itemId = itemId;
+    item->seq = role->nextBackpackSeq;
+    if (item->seq == 0)
+        item->seq = 1;
+    item->count = count;
+    role->backpackItemCount = (u8)(itemCount + 1);
+    role->nextBackpackSeq = (u16)(item->seq + 1);
+    if (role->nextBackpackSeq == 0)
+        role->nextBackpackSeq = 1;
+    if (seqOut)
+        *seqOut = item->seq;
+    vm_net_mock_role_normalize_backpack(role);
+    vm_net_mock_role_db_save("backpack-add-item");
+    return true;
 }
 
 static void vm_net_mock_role_apply_battle_settlement(u32 hp, u32 mp,
@@ -4255,28 +4438,19 @@ static u32 vm_net_mock_role_current_hp_for_battle(void)
     return role ? role->hp : VM_NET_MOCK_ROLE_DEFAULT_HP;
 }
 
-static void vm_net_mock_load_player_pos_state(void)
-{
-    vm_net_mock_role_state *role = vm_net_mock_active_role();
-
-    vm_net_mock_clear_player_pos_cache();
-    if (vm_net_mock_cache_player_pos_from_role(role))
-        return;
-}
-
 static void vm_net_mock_save_player_pos_state(const char *scene, u16 x, u16 y, const char *reason)
 {
     char runtimeScene[64];
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
     if (x == 0 || y == 0)
         return;
 
-    vm_net_mock_load_player_pos_state();
     if (!vm_net_mock_scene_name_is_safe(scene))
     {
         if (vm_net_mock_read_runtime_scene_name(runtimeScene, sizeof(runtimeScene)))
             scene = runtimeScene;
-        else if (g_vm_net_mock_player_pos_valid && vm_net_mock_scene_name_is_safe(g_vm_net_mock_player_pos.scene))
-            scene = g_vm_net_mock_player_pos.scene;
+        else if (role != NULL && vm_net_mock_scene_name_is_safe(role->scene))
+            scene = role->scene;
         else
             scene = vm_net_mock_default_scene_name();
     }
@@ -4305,30 +4479,30 @@ static const char *vm_net_mock_current_scene_name(void)
         return vm_net_mock_normalize_scene_name_for_enter(runtimeScene);
     if (overrideName != NULL && overrideName[0] != 0)
         return overrideName;
-    vm_net_mock_load_player_pos_state();
-    if (g_vm_net_mock_player_pos_valid && vm_net_mock_scene_name_is_safe(g_vm_net_mock_player_pos.scene))
-        return vm_net_mock_normalize_scene_name_for_enter(g_vm_net_mock_player_pos.scene);
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    if (role != NULL && vm_net_mock_scene_name_is_safe(role->scene))
+        return vm_net_mock_normalize_scene_name_for_enter(role->scene);
     return vm_net_mock_default_scene_name();
 }
 
 static u16 vm_net_mock_scene_spawn_x(void)
 {
     if (getenv("CBE_SCENE_POS_X") != NULL)
-        return (u16)vm_net_mock_env_u32("CBE_SCENE_POS_X", 223);
-    vm_net_mock_load_player_pos_state();
-    if (g_vm_net_mock_player_pos_valid)
-        return g_vm_net_mock_player_pos.x;
-    return 223;
+        return (u16)vm_net_mock_env_u32("CBE_SCENE_POS_X", VM_NET_MOCK_ROLE_INITIAL_X);
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    if (role != NULL && role->x != 0)
+        return role->x;
+    return VM_NET_MOCK_ROLE_INITIAL_X;
 }
 
 static u16 vm_net_mock_scene_spawn_y(void)
 {
     if (getenv("CBE_SCENE_POS_Y") != NULL)
-        return (u16)vm_net_mock_env_u32("CBE_SCENE_POS_Y", 382);
-    vm_net_mock_load_player_pos_state();
-    if (g_vm_net_mock_player_pos_valid)
-        return g_vm_net_mock_player_pos.y;
-    return 382;
+        return (u16)vm_net_mock_env_u32("CBE_SCENE_POS_Y", VM_NET_MOCK_ROLE_INITIAL_Y);
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    if (role != NULL && role->y != 0)
+        return role->y;
+    return VM_NET_MOCK_ROLE_INITIAL_Y;
 }
 
 static const char *vm_net_mock_default_scene_name(void)
@@ -6258,7 +6432,7 @@ static u32 vm_net_mock_build_group_type1_response(const u8 *request, u32 request
         return 0;
     if (hasType1)
         objectCount += 1;
-    if (hasType1 && !vm_net_mock_append_backpack_default_item_main_objects(out, outCap, &pos, &objectCount))
+    if (hasType1 && !vm_net_mock_append_backpack_role_grid_main_objects(out, outCap, &pos, &objectCount))
         return 0;
     if (hasType1 && enableMiscSync8 && !vm_net_mock_append_misc_player_sync8_object(out, outCap, &pos))
         return 0;
@@ -6328,13 +6502,9 @@ static bool vm_net_mock_append_login_tail_skill_objects(u8 *out, u32 outCap, u32
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
     *addedCount = (u8)(*addedCount + 1);
 
-    if (!g_netMockBackpackFullItemsDelivered)
-    {
-        if (!vm_net_mock_append_backpack_items_object(out, outCap, pos))
-            return false;
-        *addedCount = (u8)(*addedCount + 1);
-        g_netMockBackpackFullItemsDelivered = 1;
-    }
+    if (!vm_net_mock_append_backpack_items_object(out, outCap, pos))
+        return false;
+    *addedCount = (u8)(*addedCount + 1);
     return true;
 }
 
@@ -10441,11 +10611,14 @@ static u32 vm_net_mock_build_shop_buy17_response(const u8 *request, u32 requestL
     u32 objectStart = 0;
     u32 shopId = 0;
     u8 count = 1;
+    u16 seq = 0;
+    u8 result = 0;
 
     if (outCap < pos || out == NULL)
         return 0;
     if (!vm_net_mock_is_shop_buy17_request(request, requestLen, &shopId, &count))
         return 0;
+    result = vm_net_mock_role_add_backpack_item(shopId, count, &seq) ? 1 : 0;
 
     /*
      * The buy button sends WT 17/2 with shopId, but mmShopMstarWqvga.cbm:sub_9DE
@@ -10455,15 +10628,15 @@ static u32 vm_net_mock_build_shop_buy17_response(const u8 *request, u32 requestL
      */
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 14, 3, &objectStart))
         return 0;
-    if (!vm_net_mock_put_object_u16(out, outCap, &pos, "seq", VM_NET_MOCK_SHOP_PURCHASE_ITEM_SEQ))
+    if (!vm_net_mock_put_object_u16(out, outCap, &pos, "seq", seq))
         return 0;
-    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", result))
         return 0;
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);
 
-    vm_autotest_note("mock_shop_buy17 shopId=%u count=%u resp=14/3 seq=%u evidence=mmShop:0x9DE(seq/result)\n",
-                     shopId, count, VM_NET_MOCK_SHOP_PURCHASE_ITEM_SEQ);
+    vm_autotest_note("mock_shop_buy17 shopId=%u count=%u resp=14/3 seq=%u result=%u evidence=mmShop:0x9DE(seq/result)\n",
+                     shopId, count, seq, result);
     return pos;
 }
 

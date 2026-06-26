@@ -10,10 +10,11 @@ Current contract:
 - store a role list locally, max 5 roles for the title role-list parser
 - allow 0 persisted roles after deleting the last role; the title client then
   displays only its create-role sentinel row
-- persist HP, MP, money, scene, position, level, and total EXP
+- persist HP, MP, money, scene, position, level, total EXP, and backpack items
 - derive level as `exp / 100 + 1`
 - grant 10 EXP once per victorious monster battle settlement
-- keep the existing legacy position file as a compatibility mirror
+- keep position and backpack state in the selected role row; do not use legacy
+  mock-wide position or backpack state as a source of truth
 
 ## IDA Evidence
 
@@ -59,8 +60,16 @@ motion/grid words
 
 `Jianghu OL.CBE:0x010396D6` and `0x01039890` parse scene-enter/change results
 with a scene string plus `posinfo`. Existing safe-position adjustment remains in
-place; the final safe scene/x/y now writes the active role record first, then
-mirrors to the legacy `jhol_mock_player_pos.bin`.
+place; the final safe scene/x/y now writes only the active role record.
+
+### Backpack
+
+`Jianghu OL.CBE:0x01039952` parses `1/30/21` by reading `gridnum`, then raw
+`iteminfo` rows of `itemId`, `seq`, `count`, and the common item-extra block.
+
+`mmGameMstarWqvga.cbm:0x418C` parses `1/17/1` full-list `iteminfo` as a counted
+row list of `itemId` plus the same common item-extra block. Both response paths
+now source rows from the active role's backpack array.
 
 ### Battle Settlement
 
@@ -88,7 +97,7 @@ Header:
 
 ```text
 magic      "JHR1"
-version    1
+version    2
 activeRoleId
 roleCount
 roles[5]
@@ -110,6 +119,14 @@ u32 mp, mpMax
 u32 money
 char scene[64]
 u16 x, y
+u8 backpackItemCount
+u8 reserved
+u16 nextBackpackSeq
+backpackItems[40]:
+  u32 itemId
+  u16 seq
+  u16 reserved
+  u32 count
 ```
 
 Default role:
@@ -124,18 +141,13 @@ money = 1000
 backpackCapacity = 40
 scene = default local Penglai scene
 position = 223,382
+backpack = item 800 seq 1 count 5
+nextBackpackSeq = 2
 ```
 
-Compatibility file:
-
-```text
-nvram/jhol_mock_player_pos.bin
-```
-
-This file is now a compatibility mirror only. Role DB initialization, title role
-selection, and scene/login actorinfo read position from the active role row
-instead of importing the legacy file. Role selection, role creation, role
-deletion fallback, and new position saves update the mirror.
+Version 1 role DB files are upgraded in-place to version 2 by copying existing
+role fields and seeding each role with the default backpack. The old
+`nvram/jhol_mock_player_pos.bin` mirror is no longer read or written.
 
 ## Server Behavior
 
@@ -160,12 +172,12 @@ Title role list:
   `sex = role->sex + 1`. This matches `mmTitle:0x3544` and the create-success
   row layout at `mmTitle:0x5324`.
 - role select handles request `1/1/6`, parses `actorID`, and updates
-  `activeRoleId` before scene/login actorinfo is built. The selected role's
-  `scene/x/y` also refresh the legacy mirror/cache so later scene helpers do not
-  reuse a previous global position.
+  `activeRoleId` before scene/login actorinfo is built. Scene helpers read
+  `scene/x/y` from that active role row.
 - title role create handles request `1/1/7`, appends a persisted role when
-  capacity allows it, starts the new role at the default Penglai position, and
-  returns `actorid/result` to the title parser.
+  capacity allows it, starts the new role at the default Penglai position with
+  the default teleport-stone stack, and returns `actorid/result` to the title
+  parser.
 - role DB load repairs duplicate legacy rows that were previously persisted
   with the default name after a create-payload decode miss. The first default
   role keeps the GBK default name; later duplicate default rows become stable
@@ -177,6 +189,14 @@ Money sync:
 
 - shop `coolmoney`, group/type `money`, and generic game-type `money` read the
   active role money.
+
+Backpack:
+
+- scene bootstrap `30/21` emits the active role's backpack rows and uses each
+  row's persisted `seq/count`.
+- backpack UI `17/1` emits the active role's backpack rows and capacity.
+- NPC/shop buy `17/2` adds or stacks the purchased item into the active role
+  before returning `14/3 { seq, result }`.
 
 Battle:
 

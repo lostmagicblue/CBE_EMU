@@ -41,11 +41,10 @@ serving the old cached scene/coordinate until a later save happened.
 - New/default roles now initialize to the fixed Penglai starting scene returned
   by `vm_net_mock_default_scene_name()` with `VM_NET_MOCK_ROLE_INITIAL_X/Y`
   `(223,382)`.
-- The role DB no longer imports the legacy player-position file during first
-  initialization. The legacy file is only written as a mirror after role
-  selection, role creation, role deletion fallback, and position saves.
-- The process player-position cache is rebuilt from `vm_net_mock_active_role()`
-  each time it is requested instead of trusting an old loaded flag.
+- The role DB no longer imports the legacy player-position file during
+  initialization, and the mock no longer writes that file as a mirror.
+- The process player-position cache and loaded flag were removed. Scene helpers
+  read `scene/x/y` directly from `vm_net_mock_active_role()`.
 - `sceneKey`, generic `scene/posinfo`, and no-target `30/1` scene-enter helpers
   now default to the active role's scene/position. `CBE_SCENE_KEY` and
   `CBE_SCENE_POS_X/Y` remain explicit test overrides.

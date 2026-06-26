@@ -4,6 +4,8 @@
 
 - Player backpack capacity: 40 slots.
 - Initial item: item `800` (`传送石`) at seq `1`, stack count `5`.
+- Backpack rows belong to the active local role, not a mock-wide global
+  inventory.
 
 ## IDA Evidence
 
@@ -19,7 +21,7 @@ For the scene-side `a2 == 0` path:
 
 Runtime negative evidence: when this actorinfo byte was `0`, item insertion returned before scanning empty slots. Setting it to `40` allowed normal client-side insertion.
 
-### Default Item Insert
+### Role Item Insert
 
 `江湖OL.CBE:HandleItemGridResponse(0x01039952)` handles WT object `1/30/21`.
 
@@ -55,18 +57,21 @@ actorinfo backpackCapacity = 40
 
 This value is configurable for experiments through `CBE_ACTOR_BACKPACK_CAPACITY`, defaulting to `40`.
 
-### Initial Grid Item
+### Initial Role Grid Items
 
-The mock server appends one `1/30/21` object once after the first type-1 group response:
+The mock server appends `1/30/21` after the first type-1 group response for the
+current role in the current login session. The item data comes from the active
+role DB row:
 
 ```text
 result = 1
-gridnum = 1
+gridnum = activeRole.backpackItemCount
 iteminfo =
-  u32 itemId = 800
-  i16 seq = 1
-  u32 count = 5
-  common item-extra block
+  repeat gridnum:
+    u32 itemId
+    i16 seq
+    u32 count
+    common item-extra block
 ```
 
 Runtime validation showed the main item manager reached:
@@ -80,12 +85,27 @@ item_count=1 item0=800 seq0=1 stack242=5
 The `1/17/1` full list response exposes:
 
 ```text
-maxnum = 40
+maxnum = activeRole.backpackCapacity
 iteminfo =
-  u8 item_count = 1
-  u32 itemId = 800
-  common item-extra block with stack byte = 5
+  u8 item_count = activeRole.backpackItemCount
+  repeat item_count:
+    u32 itemId
+    common item-extra block with stack byte = min(count, 255)
 ```
+
+### Persistence
+
+The role DB file is now version 2. Each role stores:
+
+```text
+backpackItemCount
+nextBackpackSeq
+backpackItems[40] = itemId, seq, count
+```
+
+New roles and migrated version-1 roles start with `传送石 x5`. NPC/shop buy
+responses add or stack the purchased item into the active role before returning
+the parser-facing `14/3 { seq, result }`.
 
 ## Removed Failed Paths
 
@@ -100,7 +120,7 @@ Do not reintroduce these as initial-backpack setup:
 Implemented and validated for the main client item manager:
 
 - capacity field is packet-driven through `actorinfo`;
-- default teleport stone is inserted through `30/21`;
-- stack remains `5` after removing duplicate update packets.
+- role backpack rows are inserted through `30/21`;
+- `17/1` full-list rows are generated from the same active role backpack.
 
 The mmGame backpack UI full-list path (`17/1`) is implemented as a server response, but visual inventory-screen confirmation should be handled in a follow-up once the exact UI open automation/parser window is isolated.
