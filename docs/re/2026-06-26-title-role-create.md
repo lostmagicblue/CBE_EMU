@@ -27,14 +27,21 @@ subtype = 7
 It serializes three values in order:
 
 ```text
-selected sex
-selected job
+selected job index (0..2)
+selected sex (1..2)
 entered role name
 ```
 
 The caller at `mmTitleMstarWqvga.cbm:0x4016` passes the title screen's current
-selection and name buffer. The job argument is submitted as the selected index
-plus one.
+selection and name buffer:
+
+```text
+role_manage_submit_selected_role(
+  *(R9+11120),       // selected job index, 0..2
+  *(R9+11112) + 1,   // selected sex, 1..2
+  name_buffer
+)
+```
 
 `mmTitleMstarWqvga.cbm:0x5324`
 (`role_manage_screen_handle_create_role_result`) handles the response:
@@ -50,6 +57,7 @@ result  = object["result"]
 - inserts a new role row before the create-role sentinel row
 - writes `actorid` into the new row
 - copies the current title UI sex/job/name values from local screen state
+- writes the compact row as `row+325 = jobIndex`, `row+324 = sex`
 - writes level/status `1`
 - returns to the role-list view
 
@@ -77,7 +85,7 @@ Successful creation persists a new row in `nvram/jhol_mock_roles.bin`:
 ```text
 roleId = next local role id
 name   = submitted name bytes
-job    = submitted title job, clamped to 1..3
+job    = submitted title job index + 1, clamped to 1..3
 sex    = submitted title sex converted from 1..2 to local 0..1
 level  = 1
 exp    = 0
@@ -104,15 +112,29 @@ The detector is intentionally narrow:
   `actorid/result`; local DB creation uses decoded sex/job/name when available,
   otherwise falls back to default job/sex/name.
 
-The request parser supports three observed or plausible serializer shapes:
+The request parser supports the title serializer shapes seen around
+`mmTitle:0x3E66`:
 
 - named object fields such as `sex/job/name`
 - named positional fields with typed values
 - the raw `v10, v10, v9` stream produced by `mmTitle:0x3E66`, i.e. two numeric
-  values followed by a string blob
+  values (`jobIndex, sex`) followed by a string blob
+- numeric values encoded either as `03 00 01 value`, direct `01 value`, or the
+  same numeric value with one leading zero byte
+- strings encoded either as direct `u16 len + bytes`, wrapped
+  `u16 len + u16 blobLen + bytes`, or the same string with one leading zero byte
+- a final bounded scanner over the small `1/1/7` payload, which extracts the
+  first two plausible title numeric values and the longest plausible role-name
+  string when the serializer emitted an unnamed sequential stream
+
+If an old decoder failure already persisted several rows with the same default
+role name, the role DB loader repairs only the duplicate default-name rows to
+stable fallback names such as `Role10002`. The original typed name cannot be
+recovered from the corrupted DB; newly created roles should persist the decoded
+name/job/sex instead.
 
 Autotest log line:
 
 ```text
-mock_title_role_create result=... actorid=... raw_sex=... raw_job=... roles=... response=1/1/7 evidence=mmTitle:0x3E66/0x5324 runtime=wt1/7-len34
+mock_title_role_create result=... actorid=... decoded=... raw_sex=... raw_job=... job_index=... roles=... response=1/1/7 evidence=mmTitle:0x3E66/0x5324 runtime=wt1/7-len34
 ```

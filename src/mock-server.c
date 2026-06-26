@@ -84,6 +84,12 @@ static bool vm_net_mock_get_object_u8_field(const u8 *request, u32 requestLen, c
                 *value = request[p + 3];
             return true;
         }
+        if (p + 2 <= requestLen && request[p] == 1)
+        {
+            if (value)
+                *value = request[p + 1];
+            return true;
+        }
     }
     return false;
 }
@@ -110,6 +116,13 @@ static bool vm_net_mock_get_object_u32_field(const u8 *request, u32 requestLen, 
                          ((u32)request[p + 5] << 8) | (u32)request[p + 6];
             return true;
         }
+        if (p + 5 <= requestLen && request[p] == 4)
+        {
+            if (value)
+                *value = ((u32)request[p + 1] << 24) | ((u32)request[p + 2] << 16) |
+                         ((u32)request[p + 3] << 8) | (u32)request[p + 4];
+            return true;
+        }
     }
     return false;
 }
@@ -132,21 +145,28 @@ static bool vm_net_mock_get_object_blob_field(const u8 *request, u32 requestLen,
         if (memcmp(request + i + 1, field, fieldLen) != 0)
             continue;
         u32 p = i + 1 + fieldLen;
-        if (p + 2 > requestLen)
-            return false;
-        u16 wrappedLen = (u16)(((u16)request[p] << 8) | request[p + 1]);
-        p += 2;
-        if (p + wrappedLen > requestLen || wrappedLen < 2)
-            return false;
-        u16 blobLen = (u16)(((u16)request[p] << 8) | request[p + 1]);
-        p += 2;
-        if ((u32)blobLen + 2 != wrappedLen || p + blobLen > requestLen)
-            return false;
-        if (value)
-            *value = request + p;
-        if (valueLen)
-            *valueLen = blobLen;
-        return true;
+        for (u32 variant = 0; variant < 2; ++variant)
+        {
+            u32 q = p + variant;
+            if (variant != 0 && request[p] != 0)
+                break;
+            if (q + 2 > requestLen)
+                continue;
+            u16 wrappedLen = (u16)(((u16)request[q] << 8) | request[q + 1]);
+            q += 2;
+            if (q + wrappedLen > requestLen || wrappedLen < 2)
+                continue;
+            u16 blobLen = (u16)(((u16)request[q] << 8) | request[q + 1]);
+            q += 2;
+            if ((u32)blobLen + 2 != wrappedLen || q + blobLen > requestLen)
+                continue;
+            if (value)
+                *value = request + q;
+            if (valueLen)
+                *valueLen = blobLen;
+            return true;
+        }
+        return false;
     }
     return false;
 }
@@ -166,21 +186,39 @@ static bool vm_net_mock_get_object_string_field(const u8 *request, u32 requestLe
         if (memcmp(request + i + 1, field, fieldLen) != 0)
             continue;
         u32 p = i + 1 + fieldLen;
-        if (p + 2 > requestLen)
-            return false;
-        u16 valueLen = (u16)(((u16)request[p] << 8) | request[p + 1]);
-        p += 2;
-        if (p + valueLen > requestLen || valueLen < 2)
-            return false;
-        u16 blobLen = (u16)(((u16)request[p] << 8) | request[p + 1]);
-        p += 2;
-        if ((u32)blobLen + 2 != valueLen || p + blobLen > requestLen)
-            return false;
+        for (u32 variant = 0; variant < 2; ++variant)
+        {
+            u32 q = p + variant;
+            if (variant != 0 && request[p] != 0)
+                break;
+            if (q + 2 > requestLen)
+                continue;
+            u16 valueLen = (u16)(((u16)request[q] << 8) | request[q + 1]);
+            q += 2;
+            if (valueLen == 0 || q + valueLen > requestLen)
+                continue;
+            if (valueLen >= 2)
+            {
+                u16 blobLen = (u16)(((u16)request[q] << 8) | request[q + 1]);
+                if ((u32)blobLen + 2 == valueLen && q + 2 + blobLen <= requestLen)
+                {
+                    u32 copyLen = SDL_min((u32)blobLen, valueCap - 1);
+                    while (copyLen > 0 && request[q + 2 + copyLen - 1] == 0)
+                        --copyLen;
+                    memcpy(value, request + q + 2, copyLen);
+                    value[copyLen] = 0;
+                    return true;
+                }
+            }
 
-        u32 copyLen = SDL_min((u32)blobLen, valueCap - 1);
-        memcpy(value, request + p, copyLen);
-        value[copyLen] = 0;
-        return true;
+            u32 copyLen = SDL_min((u32)valueLen, valueCap - 1);
+            while (copyLen > 0 && request[q + copyLen - 1] == 0)
+                --copyLen;
+            memcpy(value, request + q, copyLen);
+            value[copyLen] = 0;
+            return true;
+        }
+        return false;
     }
     return false;
 }
@@ -274,6 +312,9 @@ static u32 vm_net_mock_min_u32(u32 a, u32 b)
 }
 
 static u8 vm_net_mock_env_u8(const char *name, u8 fallback);
+static bool vm_net_mock_role_db_has_role_id(u32 roleId);
+static u8 vm_net_mock_active_role_job_or(u8 fallback);
+static u8 vm_net_mock_active_role_sex_or(u8 fallback);
 
 static bool vm_net_mock_battle_player_on_right(void)
 {
@@ -357,22 +398,89 @@ static bool vm_net_mock_is_title_rolelist_stage_request(const u8 *request, u32 r
            !vm_net_mock_is_title_server_select_request(request, requestLen);
 }
 
-static bool vm_net_mock_is_title_role_select_request(const u8 *request, u32 requestLen)
+static bool vm_net_mock_parse_title_role_select_actor_id_scan(const u8 *payload,
+                                                              u32 payloadLen,
+                                                              u32 *actorIdOut);
+
+static bool vm_net_mock_parse_title_role_select_request(const u8 *request,
+                                                        u32 requestLen,
+                                                        u32 *actorIdOut)
 {
     u8 kind = 0;
     u8 subtype = 0;
-    if (!vm_net_mock_get_wt_header_kind_subtype(request, requestLen, &kind, &subtype))
+    u32 offset = 4;
+    u32 objectCount = 0;
+    bool matched = false;
+    u32 actorId = 0;
+    vm_net_mock_request_object object;
+
+    if (actorIdOut)
+        *actorIdOut = 0;
+    if (!vm_net_mock_get_wt_header_kind_subtype(request, requestLen, &kind, &subtype) ||
+        kind != 1 ||
+        subtype != 6)
+    {
         return false;
-    return kind == 1 &&
-           subtype == 6 &&
-           vm_net_mock_request_contains_object(request, requestLen, 1, 1, 6) &&
-           vm_net_mock_request_contains(request, requestLen, "actorID");
+    }
+
+    while (vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+    {
+        ++objectCount;
+        if (object.major != 1 || object.kind != 1 || object.subtype != 6)
+            continue;
+        if (matched || object.payloadLen == 0 || object.payloadLen > 64)
+            return false;
+        matched = vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "actorID", &actorId) ||
+                  vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "actorid", &actorId) ||
+                  vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "actorId", &actorId) ||
+                  vm_net_mock_parse_title_role_select_actor_id_scan(object.payload, object.payloadLen, &actorId);
+        if (!matched)
+            return false;
+    }
+    if (!matched || objectCount != 1 || offset != requestLen || actorId == 0)
+        return false;
+    if (actorIdOut)
+        *actorIdOut = actorId;
+    return true;
+}
+
+static bool vm_net_mock_parse_title_role_select_actor_id_scan(const u8 *payload,
+                                                              u32 payloadLen,
+                                                              u32 *actorIdOut)
+{
+    if (actorIdOut)
+        *actorIdOut = 0;
+    if (payload == NULL || payloadLen < 4)
+        return false;
+
+    for (u32 i = 0; i + 4 <= payloadLen; ++i)
+    {
+        u32 candidate = ((u32)payload[i] << 24) |
+                        ((u32)payload[i + 1] << 16) |
+                        ((u32)payload[i + 2] << 8) |
+                        (u32)payload[i + 3];
+        if (candidate != 0 && vm_net_mock_role_db_has_role_id(candidate))
+        {
+            if (actorIdOut)
+                *actorIdOut = candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool vm_net_mock_is_title_role_select_request(const u8 *request, u32 requestLen)
+{
+    u32 actorId = 0;
+    return vm_net_mock_parse_title_role_select_request(request, requestLen, &actorId);
 }
 
 typedef struct
 {
     u8 rawSex;
     u8 rawJob;
+    bool rawJobIsIndex;
+    bool decoded;
     char name[32];
 } vm_net_mock_title_role_create_request;
 
@@ -390,6 +498,105 @@ static void vm_net_mock_copy_request_text(char *out, u32 outCap, const u8 *value
     if (copyLen > 0)
         memcpy(out, value, copyLen);
     out[copyLen] = 0;
+}
+
+static bool vm_net_mock_parse_request_text_at(const u8 *payload,
+                                              u32 payloadLen,
+                                              u32 offset,
+                                              char *out,
+                                              u32 outCap,
+                                              u32 *nextOffset)
+{
+    if (out == NULL || outCap == 0)
+        return false;
+    out[0] = 0;
+    if (payload == NULL || offset >= payloadLen)
+        return false;
+
+    for (u32 variant = 0; variant < 2; ++variant)
+    {
+        u32 q = offset + variant;
+        if (variant != 0 && payload[offset] != 0)
+            break;
+        if (q + 2 > payloadLen)
+            continue;
+
+        u16 valueLen = (u16)(((u16)payload[q] << 8) | payload[q + 1]);
+        u32 valueStart = q + 2;
+        if (valueLen == 0 || valueStart + valueLen > payloadLen)
+            continue;
+
+        if (valueLen >= 2)
+        {
+            u16 blobLen = (u16)(((u16)payload[valueStart] << 8) | payload[valueStart + 1]);
+            if ((u32)blobLen + 2 == valueLen && valueStart + 2 + blobLen <= payloadLen)
+            {
+                vm_net_mock_copy_request_text(out, outCap, payload + valueStart + 2, blobLen);
+                if (out[0] != 0)
+                {
+                    if (nextOffset)
+                        *nextOffset = valueStart + valueLen;
+                    return true;
+                }
+            }
+        }
+
+        vm_net_mock_copy_request_text(out, outCap, payload + valueStart, valueLen);
+        if (out[0] != 0)
+        {
+            if (nextOffset)
+                *nextOffset = valueStart + valueLen;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool vm_net_mock_parse_title_role_create_numeric_at(const u8 *payload,
+                                                           u32 payloadLen,
+                                                           u32 offset,
+                                                           u8 *value,
+                                                           u32 *nextOffset)
+{
+    if (payload == NULL || offset >= payloadLen)
+        return false;
+
+    for (u32 variant = 0; variant < 2; ++variant)
+    {
+        u32 q = offset + variant;
+        if (variant != 0 && payload[offset] != 0)
+            break;
+        if (q + 4 <= payloadLen &&
+            payload[q] == 0x03 &&
+            payload[q + 1] == 0 &&
+            payload[q + 2] == 1)
+        {
+            if (value)
+                *value = payload[q + 3];
+            if (nextOffset)
+                *nextOffset = q + 4;
+            return true;
+        }
+        if (q + 3 <= payloadLen &&
+            payload[q] == 0 &&
+            payload[q + 1] == 1)
+        {
+            if (value)
+                *value = payload[q + 2];
+            if (nextOffset)
+                *nextOffset = q + 3;
+            return true;
+        }
+        if (q + 2 <= payloadLen && payload[q] == 1)
+        {
+            if (value)
+                *value = payload[q + 1];
+            if (nextOffset)
+                *nextOffset = q + 2;
+            return true;
+        }
+    }
+    return false;
 }
 
 static bool vm_net_mock_parse_title_role_create_payload_positional(const u8 *payload,
@@ -411,56 +618,26 @@ static bool vm_net_mock_parse_title_role_create_payload_positional(const u8 *pay
             break;
         p += fieldLen;
 
-        if (p < payloadLen && payload[p] == 0 &&
-            p + 5 <= payloadLen &&
-            payload[p + 1] == 0x03 &&
-            payload[p + 2] == 0 &&
-            payload[p + 3] == 1)
+        u8 numericValue = 0;
+        u32 next = p;
+        if (vm_net_mock_parse_title_role_create_numeric_at(payload, payloadLen, p, &numericValue, &next))
         {
             if (numericCount < 2)
-                numericFields[numericCount++] = payload[p + 4];
-            p += 5;
+                numericFields[numericCount++] = numericValue;
+            p = next;
             continue;
         }
 
-        if (p + 4 <= payloadLen &&
-            payload[p] == 0x03 &&
-            payload[p + 1] == 0 &&
-            payload[p + 2] == 1)
+        if (vm_net_mock_parse_request_text_at(payload,
+                                              payloadLen,
+                                              p,
+                                              fields->name,
+                                              sizeof(fields->name),
+                                              &next))
         {
-            if (numericCount < 2)
-                numericFields[numericCount++] = payload[p + 3];
-            p += 4;
+            sawNameString = true;
+            p = next;
             continue;
-        }
-
-        if (p + 3 <= payloadLen &&
-            payload[p] == 0 &&
-            payload[p + 1] == 1)
-        {
-            if (numericCount < 2)
-                numericFields[numericCount++] = payload[p + 2];
-            p += 3;
-            continue;
-        }
-
-        if (p + 4 <= payloadLen)
-        {
-            u16 wrappedLen = (u16)(((u16)payload[p] << 8) | payload[p + 1]);
-            if (wrappedLen >= 2 && p + 2 + wrappedLen <= payloadLen)
-            {
-                u16 blobLen = (u16)(((u16)payload[p + 2] << 8) | payload[p + 3]);
-                if ((u32)blobLen + 2 == wrappedLen && p + 4 + blobLen <= payloadLen)
-                {
-                    vm_net_mock_copy_request_text(fields->name,
-                                                  sizeof(fields->name),
-                                                  payload + p + 4,
-                                                  blobLen);
-                    sawNameString = true;
-                    p += 2 + wrappedLen;
-                    continue;
-                }
-            }
         }
 
         p = fieldStart;
@@ -469,8 +646,9 @@ static bool vm_net_mock_parse_title_role_create_payload_positional(const u8 *pay
 
     if (numericCount < 2 || !sawNameString || p == 0)
         return false;
-    fields->rawSex = numericFields[0];
-    fields->rawJob = numericFields[1];
+    fields->rawJob = numericFields[0];
+    fields->rawSex = numericFields[1];
+    fields->rawJobIsIndex = true;
     return true;
 }
 
@@ -481,22 +659,18 @@ static bool vm_net_mock_parse_title_role_create_payload_raw_stream(const u8 *pay
     u8 numericFields[2] = {0};
     u32 numericCount = 0;
     u32 p = 0;
+    u32 next = 0;
 
     if (payload == NULL || fields == NULL)
         return false;
 
-    while (numericCount < 2 && p + 3 <= payloadLen)
+    while (numericCount < 2 && p < payloadLen)
     {
-        if (payload[p] == 0 && payload[p + 1] == 1)
+        u8 numericValue = 0;
+        if (vm_net_mock_parse_title_role_create_numeric_at(payload, payloadLen, p, &numericValue, &next))
         {
-            numericFields[numericCount++] = payload[p + 2];
-            p += 3;
-            continue;
-        }
-        if (p + 4 <= payloadLen && payload[p] == 0x03 && payload[p + 1] == 0 && payload[p + 2] == 1)
-        {
-            numericFields[numericCount++] = payload[p + 3];
-            p += 4;
+            numericFields[numericCount++] = numericValue;
+            p = next;
             continue;
         }
         break;
@@ -505,22 +679,106 @@ static bool vm_net_mock_parse_title_role_create_payload_raw_stream(const u8 *pay
     if (numericCount < 2)
         return false;
 
-    if (p + 2 <= payloadLen)
+    fields->rawJob = numericFields[0];
+    fields->rawSex = numericFields[1];
+    fields->rawJobIsIndex = true;
+    if (!vm_net_mock_parse_request_text_at(payload,
+                                           payloadLen,
+                                           p,
+                                           fields->name,
+                                           sizeof(fields->name),
+                                           &next))
     {
-        u16 stringLen = (u16)(((u16)payload[p] << 8) | payload[p + 1]);
-        if (stringLen > 0 && p + 2 + stringLen <= payloadLen)
-            vm_net_mock_copy_request_text(fields->name, sizeof(fields->name), payload + p + 2, stringLen);
+        return false;
     }
-    if (fields->name[0] == 0 && p + 4 <= payloadLen)
+    return true;
+}
+
+static bool vm_net_mock_request_text_looks_like_role_name(const char *text)
+{
+    bool hasNameByte = false;
+    size_t len = text ? strlen(text) : 0;
+    if (len < 2 || len >= 32)
+        return false;
+    if (strcmp(text, "sex") == 0 ||
+        strcmp(text, "Sex") == 0 ||
+        strcmp(text, "job") == 0 ||
+        strcmp(text, "Job") == 0 ||
+        strcmp(text, "name") == 0 ||
+        strcmp(text, "Name") == 0 ||
+        strcmp(text, "actorID") == 0 ||
+        strcmp(text, "actorid") == 0 ||
+        strcmp(text, "actorName") == 0 ||
+        strcmp(text, "roleName") == 0)
     {
-        u16 wrappedLen = (u16)(((u16)payload[p] << 8) | payload[p + 1]);
-        u16 blobLen = (u16)(((u16)payload[p + 2] << 8) | payload[p + 3]);
-        if (wrappedLen >= 2 && (u32)blobLen + 2 == wrappedLen && p + 4 + blobLen <= payloadLen)
-            vm_net_mock_copy_request_text(fields->name, sizeof(fields->name), payload + p + 4, blobLen);
+        return false;
+    }
+    for (size_t i = 0; i < len; ++i)
+    {
+        u8 ch = (u8)text[i];
+        if (ch < 0x20 || ch == 0x7f)
+            return false;
+        if (ch >= 0x80 ||
+            (ch >= '0' && ch <= '9') ||
+            (ch >= 'A' && ch <= 'Z') ||
+            (ch >= 'a' && ch <= 'z'))
+        {
+            hasNameByte = true;
+        }
+    }
+    return hasNameByte;
+}
+
+static bool vm_net_mock_parse_title_role_create_payload_scanned(const u8 *payload,
+                                                                u32 payloadLen,
+                                                                vm_net_mock_title_role_create_request *fields)
+{
+    u8 numericFields[2] = {0};
+    u32 numericCount = 0;
+    char bestName[32];
+    u32 bestNameLen = 0;
+
+    if (payload == NULL || fields == NULL)
+        return false;
+    bestName[0] = 0;
+
+    for (u32 p = 0; p < payloadLen && numericCount < 2;)
+    {
+        u8 numericValue = 0;
+        u32 next = p;
+        if (vm_net_mock_parse_title_role_create_numeric_at(payload, payloadLen, p, &numericValue, &next) &&
+            numericValue <= 3)
+        {
+            numericFields[numericCount++] = numericValue;
+            p = next;
+            continue;
+        }
+        ++p;
     }
 
-    fields->rawSex = numericFields[0];
-    fields->rawJob = numericFields[1];
+    for (u32 p = 0; p + 2 <= payloadLen; ++p)
+    {
+        char candidate[32];
+        u32 next = p;
+        candidate[0] = 0;
+        if (!vm_net_mock_parse_request_text_at(payload, payloadLen, p, candidate, sizeof(candidate), &next))
+            continue;
+        if (!vm_net_mock_request_text_looks_like_role_name(candidate))
+            continue;
+        u32 candidateLen = (u32)strlen(candidate);
+        if (candidateLen > bestNameLen)
+        {
+            bestNameLen = candidateLen;
+            snprintf(bestName, sizeof(bestName), "%s", candidate);
+        }
+    }
+
+    if (numericCount < 2 || bestName[0] == 0)
+        return false;
+    fields->rawJob = numericFields[0];
+    fields->rawSex = numericFields[1];
+    fields->rawJobIsIndex = true;
+    snprintf(fields->name, sizeof(fields->name), "%s", bestName);
     return true;
 }
 
@@ -551,10 +809,26 @@ static bool vm_net_mock_parse_title_role_create_payload(const u8 *payload,
                vm_net_mock_get_object_string_field(payload, payloadLen, "roleName", fields->name, sizeof(fields->name));
 
     if (haveSex && haveJob && haveName)
+    {
+        fields->decoded = true;
         return true;
+    }
     if (vm_net_mock_parse_title_role_create_payload_positional(payload, payloadLen, fields))
+    {
+        fields->decoded = true;
         return true;
-    return vm_net_mock_parse_title_role_create_payload_raw_stream(payload, payloadLen, fields);
+    }
+    if (vm_net_mock_parse_title_role_create_payload_raw_stream(payload, payloadLen, fields))
+    {
+        fields->decoded = true;
+        return true;
+    }
+    if (vm_net_mock_parse_title_role_create_payload_scanned(payload, payloadLen, fields))
+    {
+        fields->decoded = true;
+        return true;
+    }
+    return false;
 }
 
 static bool vm_net_mock_parse_title_role_create_request(const u8 *request,
@@ -574,6 +848,8 @@ static bool vm_net_mock_parse_title_role_create_request(const u8 *request,
         memset(fields, 0, sizeof(*fields));
         fields->rawSex = 0;
         fields->rawJob = 1;
+        fields->rawJobIsIndex = false;
+        fields->decoded = false;
     }
 
     if (!vm_net_mock_get_wt_header_kind_subtype(request, requestLen, &kind, &subtype) ||
@@ -595,7 +871,8 @@ static bool vm_net_mock_parse_title_role_create_request(const u8 *request,
                                                                   object.payloadLen,
                                                                   fields);
     }
-    (void)parsedFields;
+    if (fields && !parsedFields)
+        fields->decoded = false;
     return matched && objectCount == 1 && offset == requestLen;
 }
 
@@ -992,8 +1269,8 @@ static u32 vm_net_mock_build_minimal_actor_motion_resource(u8 *out, u32 outCap)
      * then three optional table counts.  Keep one real image entry so scene
      * rendering owns a valid image object while the unknown tables stay empty.
      */
-    u8 actorJob = vm_net_mock_env_u8("CBE_ACTOR_JOB", 1);
-    u8 actorSex = vm_net_mock_env_u8("CBE_ACTOR_SEX", 0);
+    u8 actorJob = vm_net_mock_env_u8("CBE_ACTOR_JOB", vm_net_mock_active_role_job_or(1));
+    u8 actorSex = vm_net_mock_env_u8("CBE_ACTOR_SEX", vm_net_mock_active_role_sex_or(0));
     const char *innerActor = vm_net_mock_env_str("CBE_ACTOR_MOTION_IMAGE_RESOURCE",
                                                  vm_net_mock_actor_ui_motion_name(actorJob, actorSex));
     u32 innerLen = (u32)strlen(innerActor);
@@ -3430,6 +3707,21 @@ static const char *vm_net_mock_default_role_name(void)
     return "\xcf\xc0\xbd\xa3\xbd\xad\xba\xfe"; /* GBK: xia jian jiang hu */
 }
 
+static bool vm_net_mock_role_has_default_name(const vm_net_mock_role_state *role)
+{
+    return role != NULL && strcmp(role->name, vm_net_mock_default_role_name()) == 0;
+}
+
+static void vm_net_mock_role_assign_fallback_name(vm_net_mock_role_state *role)
+{
+    u32 roleId = VM_NET_MOCK_ROLE_DEFAULT_ID;
+    if (role == NULL)
+        return;
+    if (role->roleId != 0)
+        roleId = role->roleId;
+    snprintf(role->name, sizeof(role->name), "Role%u", roleId);
+}
+
 static void vm_net_mock_role_init_default(vm_net_mock_role_state *role)
 {
     if (role == NULL)
@@ -3520,6 +3812,27 @@ static void vm_net_mock_role_normalize(vm_net_mock_role_state *role)
     role->level = vm_net_mock_role_level_from_exp(role->exp);
 }
 
+static u32 vm_net_mock_role_db_repair_duplicate_default_names(void)
+{
+    bool seenDefaultName = false;
+    u32 repairCount = 0;
+    for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+    {
+        vm_net_mock_role_state *role = &g_vm_net_mock_role_db.roles[i];
+        role->name[sizeof(role->name) - 1] = 0;
+        if (!vm_net_mock_role_has_default_name(role))
+            continue;
+        if (!seenDefaultName)
+        {
+            seenDefaultName = true;
+            continue;
+        }
+        vm_net_mock_role_assign_fallback_name(role);
+        ++repairCount;
+    }
+    return repairCount;
+}
+
 static void vm_net_mock_role_db_save(const char *reason)
 {
     char path[128];
@@ -3603,6 +3916,15 @@ static void vm_net_mock_role_db_load(void)
     }
     for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
         vm_net_mock_role_normalize(&g_vm_net_mock_role_db.roles[i]);
+    u32 repairedDefaultNames = vm_net_mock_role_db_repair_duplicate_default_names();
+    if (repairedDefaultNames > 0)
+    {
+        needsSave = true;
+        vm_autotest_note("mock_role_db_repair_duplicate_default_names count=%u roles=%u active=%u\n",
+                         repairedDefaultNames,
+                         g_vm_net_mock_role_db.roleCount,
+                         g_vm_net_mock_role_db.activeRoleId);
+    }
 
     bool activeFound = false;
     for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
@@ -3642,11 +3964,11 @@ static vm_net_mock_role_state *vm_net_mock_active_role(void)
     return &g_vm_net_mock_role_db.roles[0];
 }
 
-static void vm_net_mock_select_active_role(u32 roleId)
+static bool vm_net_mock_select_active_role(u32 roleId)
 {
     vm_net_mock_role_db_load();
     if (!g_vm_net_mock_role_db_valid || roleId == 0)
-        return;
+        return false;
     for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
     {
         if (g_vm_net_mock_role_db.roles[i].roleId == roleId)
@@ -3656,9 +3978,39 @@ static void vm_net_mock_select_active_role(u32 roleId)
                 g_vm_net_mock_role_db.activeRoleId = roleId;
                 vm_net_mock_role_db_save("role-select");
             }
-            return;
+            return true;
         }
     }
+    return false;
+}
+
+static bool vm_net_mock_role_db_has_role_id(u32 roleId)
+{
+    vm_net_mock_role_db_load();
+    if (!g_vm_net_mock_role_db_valid || roleId == 0)
+        return false;
+    for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+    {
+        if (g_vm_net_mock_role_db.roles[i].roleId == roleId)
+            return true;
+    }
+    return false;
+}
+
+static u8 vm_net_mock_active_role_job_or(u8 fallback)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    if (role == NULL || role->job == 0 || role->job > 3)
+        return fallback;
+    return role->job;
+}
+
+static u8 vm_net_mock_active_role_sex_or(u8 fallback)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    if (role == NULL || role->sex > 1)
+        return fallback;
+    return role->sex;
 }
 
 static u8 vm_net_mock_role_db_sex_from_title_value(u8 rawSex)
@@ -3670,8 +4022,14 @@ static u8 vm_net_mock_role_db_sex_from_title_value(u8 rawSex)
     return 0;
 }
 
-static u8 vm_net_mock_role_db_job_from_title_value(u8 rawJob)
+static u8 vm_net_mock_role_db_job_from_title_value(u8 rawJob, bool rawJobIsIndex)
 {
+    if (rawJobIsIndex)
+    {
+        if (rawJob <= 2)
+            return (u8)(rawJob + 1);
+        return 1;
+    }
     if (rawJob >= 1 && rawJob <= 3)
         return rawJob;
     if (rawJob == 0)
@@ -3743,8 +4101,11 @@ static bool vm_net_mock_role_db_create_from_title(const vm_net_mock_title_role_c
     role = &g_vm_net_mock_role_db.roles[g_vm_net_mock_role_db.roleCount];
     vm_net_mock_role_init_default(role);
     role->roleId = actorId;
-    vm_net_mock_copy_role_name(role->name, sizeof(role->name), request->name);
-    role->job = vm_net_mock_role_db_job_from_title_value(request->rawJob);
+    if (request->name[0] != 0)
+        vm_net_mock_copy_role_name(role->name, sizeof(role->name), request->name);
+    else
+        vm_net_mock_role_assign_fallback_name(role);
+    role->job = vm_net_mock_role_db_job_from_title_value(request->rawJob, request->rawJobIsIndex);
     role->sex = vm_net_mock_role_db_sex_from_title_value(request->rawSex);
     vm_net_mock_role_normalize(role);
 
@@ -10214,10 +10575,9 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
 {
     u32 pos = 0;
     vm_net_mock_role_state *role = vm_net_mock_active_role();
-    char roleIdText[16];
     u32 roleId = role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID;
     const char *roleName = role ? role->name : vm_net_mock_default_role_name();
-    const char *displayName = "JHOnline";
+    const char *displayName = vm_net_mock_env_str("CBE_ACTOR_DISPLAY_NAME", roleName);
     u32 roleLevel = vm_net_mock_env_u32("CBE_ROLE_LEVEL", role ? role->level : 1);
     u32 actorJob = vm_net_mock_env_u8("CBE_ACTOR_JOB", role ? role->job : 1);
     u32 actorSex = vm_net_mock_env_u8("CBE_ACTOR_SEX", role ? role->sex : 0);
@@ -10259,8 +10619,7 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
     u32 actorGap0CC4 = vm_net_mock_env_u32("CBE_ACTOR_GAP0CC4", 0);
     u32 actorGap0CC8 = vm_net_mock_env_u32("CBE_ACTOR_GAP0CC8", 0);
 
-    snprintf(roleIdText, sizeof(roleIdText), "%u", roleId);
-    shortLabel = vm_net_mock_env_str("CBE_ACTOR_SHORT_LABEL", roleIdText);
+    shortLabel = vm_net_mock_env_str("CBE_ACTOR_SHORT_LABEL", roleName);
     if (roleLevel == 0)
         roleLevel = 1;
     if (actorJob == 0 || actorJob > 3)
@@ -10448,10 +10807,10 @@ static u32 vm_net_mock_build_title_role_list_actorinfo(u8 *out, u32 outCap)
         roleCount = VM_NET_MOCK_ROLE_DB_MAX_ROLES;
 
     /*
-     * title target50_render() derives a role portrait table index from the
-     * compact role-list record as `job * 2 + (sex - 1)`, so the title-side
-     * role-list contract expects `sex` to be 1-based here. A zero value wraps
-     * into 0xFF and drives the render path into an invalid callback slot.
+     * mmTitleMstarWqvga.cbm sub_3544() reads compact role-list bytes as:
+     *   id, jobIndex(0..2), sex(1..2), name, level.
+     * The create-success path at 0x5324 writes the same layout into the local
+     * title row: row+325 = selected job index, row+324 = selected sex + 1.
      *
      * mmTitleMstarWqvga.cbm sub_3544() parses its actorinfo field as:
      *   count, then repeated (tagged u32, tagged u8, tagged u8, len16+cstr, tagged i16).
@@ -10463,18 +10822,18 @@ static u32 vm_net_mock_build_title_role_list_actorinfo(u8 *out, u32 outCap)
     for (u32 i = 0; i < roleCount; ++i)
     {
         vm_net_mock_role_state *role = &g_vm_net_mock_role_db.roles[i];
-        u8 actorJob = role->job;
+        u8 actorJobIndex = role->job > 0 ? (u8)(role->job - 1) : 0;
         u8 actorSex = (u8)(role->sex + 1);
         u16 roleLevel = (u16)role->level;
-        if (actorJob == 0 || actorJob > 3)
-            actorJob = 1;
+        if (actorJobIndex > 2)
+            actorJobIndex = 0;
         if (actorSex < 1 || actorSex > 2)
             actorSex = 1;
         if (roleLevel == 0)
             roleLevel = 1;
         if (!vm_net_mock_seq_put_u32(out, outCap, &pos, role->roleId))
             return 0;
-        if (!vm_net_mock_seq_put_u8(out, outCap, &pos, actorJob))
+        if (!vm_net_mock_seq_put_u8(out, outCap, &pos, actorJobIndex))
             return 0;
         if (!vm_net_mock_seq_put_u8(out, outCap, &pos, actorSex))
             return 0;
@@ -10925,11 +11284,13 @@ static u32 vm_net_mock_build_title_role_create_response(const u8 *request,
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);
 
-    vm_autotest_note("mock_title_role_create result=%u actorid=%u raw_sex=%u raw_job=%u roles=%u name_len=%u response=1/1/7 evidence=mmTitle:0x3E66/0x5324 runtime=wt1/7-len34\n",
+    vm_autotest_note("mock_title_role_create result=%u actorid=%u decoded=%u raw_sex=%u raw_job=%u job_index=%u roles=%u name_len=%u response=1/1/7 evidence=mmTitle:0x3E66/0x5324 runtime=wt1/7-len34\n",
                      result,
                      actorId,
+                     fields.decoded ? 1 : 0,
                      fields.rawSex,
                      fields.rawJob,
+                     fields.rawJobIsIndex ? 1 : 0,
                      roleCount,
                      (u32)strlen(fields.name));
     return pos;
@@ -10971,15 +11332,20 @@ static u32 vm_net_mock_build_title_role_delete_response(const u8 *request,
 static u32 vm_net_mock_build_title_role_select_response(const u8 *request, u32 requestLen, u8 *out, u32 outCap)
 {
     u32 pos = 5;
-    vm_net_mock_role_state *role = vm_net_mock_active_role();
-    u32 actorId = role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID;
+    vm_net_mock_role_state *role = NULL;
+    u32 actorId = 0;
+    u32 activeActorId = 0;
     u32 actorInfoLen = 0;
+    bool selected = false;
 
     if (outCap < pos)
         return 0;
 
-    (void)vm_net_mock_get_object_u32_field(request, requestLen, "actorID", &actorId);
-    vm_net_mock_select_active_role(actorId);
+    if (!vm_net_mock_parse_title_role_select_request(request, requestLen, &actorId))
+        return 0;
+    selected = vm_net_mock_select_active_role(actorId);
+    role = vm_net_mock_active_role();
+    activeActorId = role ? role->roleId : 0;
 
     /* A minimal {result, actorID} subtype-6 ack is accepted by
      * role_manage_screen_handle_network(case 6), but as soon as subtype-15
@@ -10997,6 +11363,12 @@ static u32 vm_net_mock_build_title_role_select_response(const u8 *request, u32 r
         return 0;
 
     vm_net_mock_finish_wt_packet(out, pos, 2);
+    vm_autotest_note("mock_title_role_select requested=%u selected=%u active=%u name_len=%u actorinfo_len=%u response=1/1/6+1/1/15 evidence=mmTitle:0x39FC/0x1B9C/0x53EC\n",
+                     actorId,
+                     selected ? 1 : 0,
+                     activeActorId,
+                     role ? (u32)strlen(role->name) : 0,
+                     actorInfoLen);
     return pos;
 }
 

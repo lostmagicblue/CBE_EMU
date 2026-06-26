@@ -141,6 +141,12 @@ Login and scene enter:
 
 - `vm_net_mock_build_actor_info()` reads active role ID/name/job/sex/level,
   HP/MP, EXP, money, backpack capacity, scene, and position.
+- scene/login actorinfo uses the active role name for its role name, display
+  name, and short label defaults so map-side role information matches title
+  selection.
+- actor motion-resource generation uses the active role job/sex as its default,
+  so the map sprite resource follows the selected role unless a `CBE_ACTOR_*`
+  environment override is explicitly set.
 - `vm_net_mock_append_login_success_object()` sends `lastexp` as the current
   level start, `curexp` as total EXP, and `persentexp` as EXP within the level.
 
@@ -148,9 +154,17 @@ Title role list:
 
 - `vm_net_mock_build_title_role_list_actorinfo()` emits all stored roles up to
   the client limit of 5.
-- role select updates `activeRoleId` when the requested role exists.
+- title role-list compact actorinfo emits `jobIndex = role->job - 1` and
+  `sex = role->sex + 1`. This matches `mmTitle:0x3544` and the create-success
+  row layout at `mmTitle:0x5324`.
+- role select handles request `1/1/6`, parses `actorID`, and updates
+  `activeRoleId` before scene/login actorinfo is built.
 - title role create handles request `1/1/7`, appends a persisted role when
   capacity allows it, and returns `actorid/result` to the title parser.
+- role DB load repairs duplicate legacy rows that were previously persisted
+  with the default name after a create-payload decode miss. The first default
+  role keeps the GBK default name; later duplicate default rows become stable
+  fallback names such as `Role10002`.
 - title role delete handles request `1/1/8`, removes the matching persisted
   role by `actorID`, and returns `result=0` only on success.
 
