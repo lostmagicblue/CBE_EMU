@@ -1923,6 +1923,33 @@ static void vm_autotest_note(const char *fmt, ...)
     fflush(g_autotestStateFile);
 }
 
+static void vm_autotest_format_mem_hex(u32 addr, u32 len, char *out, size_t outCap)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    u8 bytes[16];
+    u32 count = len;
+    size_t pos = 0;
+
+    if (out == NULL || outCap == 0)
+        return;
+    out[0] = 0;
+    if (count > sizeof(bytes))
+        count = sizeof(bytes);
+    if (addr == 0 || uc_mem_read(MTK, addr, bytes, count) != UC_ERR_OK)
+    {
+        snprintf(out, outCap, "?");
+        return;
+    }
+    for (u32 i = 0; i < count && pos + 3 < outCap; ++i)
+    {
+        if (i != 0)
+            out[pos++] = '-';
+        out[pos++] = hex[bytes[i] >> 4];
+        out[pos++] = hex[bytes[i] & 0x0F];
+    }
+    out[pos] = 0;
+}
+
 static void vm_autotest_note_startup_pc(u32 pc)
 {
     static u32 seenEntry = 0;
@@ -2094,6 +2121,8 @@ static void vm_autotest_note_backpack_parser_pc(u32 pc)
     static u32 seenFullBackpackInit = 0;
     static u32 seenFullBackpackRender = 0;
     static u32 seenCbmRegister = 0;
+    static u32 seenItemLookup = 0;
+    static u32 seenEquipLookup = 0;
     u32 r9 = 0;
 
     if (!g_autotestEnabled)
@@ -2107,6 +2136,7 @@ static void vm_autotest_note_backpack_parser_pc(u32 pc)
         pc != 0x0518164A && pc != 0x0518169C &&
         pc != 0x05182434 && pc != 0x0518248E && pc != 0x051824A4 &&
         pc != 0x0518418C && pc != 0x05184538 &&
+        pc != 0x05184498 && pc != 0x051844DA &&
         pc != 0x051811CE &&
         pc != 0x05180D04 && pc != 0x05181094 &&
         pc != 0x05185B58 && pc != 0x05185BC6 &&
@@ -2426,16 +2456,46 @@ static void vm_autotest_note_backpack_parser_pc(u32 pc)
         vm_autotest_note("backpack_parser entry pc=%08x object=%08x kind=%u subtype=%u r9=%08x count=%u\n",
                          pc, object, kind, subtype, r9, seenEntry);
     }
+    else if ((pc == 0x05184498 || pc == 0x051844DA) &&
+             (pc == 0x05184498 ? seenItemLookup < 16 : seenEquipLookup < 16))
+    {
+        u32 result = 0;
+        u32 rowIndex = 0;
+        u32 rowOffset = 0;
+        u32 state = 0;
+        u32 itemBase = 0;
+        u32 itemId = 0;
+        u32 seen = 0;
+        if (pc == 0x05184498)
+            seen = ++seenItemLookup;
+        else
+            seen = ++seenEquipLookup;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &result);
+        uc_reg_read(MTK, UC_ARM_REG_R4, &rowIndex);
+        uc_reg_read(MTK, UC_ARM_REG_R5, &rowOffset);
+        uc_reg_read(MTK, UC_ARM_REG_R6, &state);
+        if (state != 0)
+            uc_mem_read(MTK, state + 0x40, &itemBase, sizeof(itemBase));
+        if (itemBase != 0)
+            uc_mem_read(MTK, itemBase + rowOffset, &itemId, sizeof(itemId));
+        vm_autotest_note("backpack_parser dsh_lookup pc=%08x table=%s result=%u row=%u item_base=%08x item_id=%u count=%u\n",
+                         pc, pc == 0x05184498 ? "item" : "equip",
+                         result, rowIndex, itemBase, itemId, seen);
+    }
     else if (pc == 0x05184538 && seenCommit < 8)
     {
         u32 itemCount = 0;
         u32 itemBase = 0;
         u32 itemId = 0;
+        u32 price = 0;
         u16 stack242 = 0;
+        u8 rowFlag278 = 0;
         u8 extra286 = 0;
         u8 extra287 = 0;
         u16 attr290 = 0;
+        char nameHex[64];
         ++seenCommit;
+        nameHex[0] = 0;
         if (r9 != 0)
         {
             uc_mem_read(MTK, r9 + 10708, &itemCount, sizeof(itemCount));
@@ -2443,15 +2503,19 @@ static void vm_autotest_note_backpack_parser_pc(u32 pc)
             if (itemBase != 0 && itemCount > 0)
             {
                 uc_mem_read(MTK, itemBase, &itemId, sizeof(itemId));
+                vm_autotest_format_mem_hex(itemBase + 4, 12, nameHex, sizeof(nameHex));
+                uc_mem_read(MTK, itemBase + 20, &price, sizeof(price));
                 uc_mem_read(MTK, itemBase + 242, &stack242, sizeof(stack242));
+                uc_mem_read(MTK, itemBase + 278, &rowFlag278, sizeof(rowFlag278));
                 uc_mem_read(MTK, itemBase + 286, &extra286, sizeof(extra286));
                 uc_mem_read(MTK, itemBase + 287, &extra287, sizeof(extra287));
                 uc_mem_read(MTK, itemBase + 290, &attr290, sizeof(attr290));
             }
         }
-        vm_autotest_note("backpack_parser commit pc=%08x r9=%08x item_count=%u item_base=%08x item0=%u stack242=%u extra286=%u extra287=%u attr290=%u count=%u\n",
-                         pc, r9, itemCount, itemBase, itemId, stack242,
-                         extra286, extra287, attr290, seenCommit);
+        vm_autotest_note("backpack_parser commit pc=%08x r9=%08x item_count=%u item_base=%08x item0=%u name_hex=%s price=%u stack242=%u flag278=%u extra286=%u extra287=%u attr290=%u count=%u\n",
+                         pc, r9, itemCount, itemBase, itemId, nameHex, price,
+                         stack242, rowFlag278, extra286, extra287, attr290,
+                         seenCommit);
     }
     else if (pc == 0x01039952 && seenGridEntry < 8)
     {
@@ -2673,6 +2737,141 @@ static void vm_autotest_note_backpack_parser_pc(u32 pc)
     }
 
 #undef READ_MAIN_BACKPACK_STATE
+}
+
+static void vm_autotest_note_shop_parser_pc(u32 pc)
+{
+    static u32 seenEntry = 0;
+    static u32 seenRows = 0;
+    static u32 seenItemId = 0;
+    static u32 seenName = 0;
+    static u32 seenDone = 0;
+    u32 base = g_currentScreenModuleBase;
+    u32 off = 0;
+    u32 r9 = 0;
+
+    if (!g_autotestEnabled || base == 0 || pc < base)
+        return;
+    off = pc - base;
+    if (off != 0x7BC && off != 0x898 && off != 0x8D0 &&
+        off != 0x8F8 && off != 0x9D6)
+    {
+        return;
+    }
+
+    uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+    if (r9 == 0)
+        r9 = base;
+
+    if (off == 0x7BC && seenEntry < 8)
+    {
+        u32 object = 0;
+        u32 arg1 = 0;
+        u32 page = 0;
+        u16 total = 0;
+        u16 start = 0;
+        u16 loaded = 0;
+        u16 last = 0;
+        ++seenEntry;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &object);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &arg1);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &page);
+        if (page != 0)
+        {
+            uc_mem_read(MTK, page + 4, &total, sizeof(total));
+            uc_mem_read(MTK, page + 6, &start, sizeof(start));
+            uc_mem_read(MTK, page + 8, &loaded, sizeof(loaded));
+            uc_mem_read(MTK, page + 0xA, &last, sizeof(last));
+        }
+        vm_autotest_note("shop_parser entry pc=%08x base=%08x r9=%08x object=%08x arg1=%08x page=%08x total=%u start=%u loaded=%u last=%u count=%u\n",
+                         pc, base, r9, object, arg1, page, total, start,
+                         loaded, last, seenEntry);
+    }
+    else if (off == 0x898 && seenRows < 16)
+    {
+        u32 rowCount = 0;
+        u32 page = 0;
+        u32 listBase = 0;
+        u16 total = 0;
+        u16 start = 0;
+        ++seenRows;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &rowCount);
+        uc_reg_read(MTK, UC_ARM_REG_R6, &page);
+        uc_reg_read(MTK, UC_ARM_REG_R7, &listBase);
+        if (page != 0)
+        {
+            uc_mem_read(MTK, page + 4, &total, sizeof(total));
+            uc_mem_read(MTK, page + 6, &start, sizeof(start));
+        }
+        vm_autotest_note("shop_parser rows pc=%08x base=%08x page=%08x total=%u start=%u row_count=%u list_base=%08x count=%u\n",
+                         pc, base, page, total, start, rowCount, listBase,
+                         seenRows);
+    }
+    else if (off == 0x8D0 && seenItemId < 24)
+    {
+        u32 itemId = 0;
+        u32 rowIndex = 0;
+        u32 rowOffset = 0;
+        u32 listBase = 0;
+        u32 rowPtr = 0;
+        ++seenItemId;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &itemId);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &rowOffset);
+        uc_reg_read(MTK, UC_ARM_REG_R6, &rowIndex);
+        uc_reg_read(MTK, UC_ARM_REG_R7, &listBase);
+        rowPtr = listBase + rowOffset;
+        vm_autotest_note("shop_parser item pc=%08x base=%08x row=%u row_ptr=%08x item_id=%u count=%u\n",
+                         pc, base, rowIndex, rowPtr, itemId, seenItemId);
+    }
+    else if (off == 0x8F8 && seenName < 24)
+    {
+        u32 rowPtr = 0;
+        u32 itemId = 0;
+        u32 sp = 0;
+        u32 nameLen = 0;
+        char nameHex[64];
+        ++seenName;
+        nameHex[0] = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R4, &rowPtr);
+        uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+        if (sp != 0)
+            uc_mem_read(MTK, sp + 0x14, &nameLen, sizeof(nameLen));
+        if (rowPtr != 0)
+        {
+            uc_mem_read(MTK, rowPtr, &itemId, sizeof(itemId));
+            vm_autotest_format_mem_hex(rowPtr + 4, 12, nameHex, sizeof(nameHex));
+        }
+        vm_autotest_note("shop_parser name pc=%08x base=%08x row_ptr=%08x item_id=%u name_len=%u name_hex=%s count=%u\n",
+                         pc, base, rowPtr, itemId, nameLen, nameHex, seenName);
+    }
+    else if (off == 0x9D6 && seenDone < 12)
+    {
+        u32 manager = r9 + 0x2838;
+        u32 buyBase = 0;
+        u32 sellBase = 0;
+        u32 buyItem0 = 0;
+        u32 sellItem0 = 0;
+        char buyNameHex[64];
+        char sellNameHex[64];
+        ++seenDone;
+        buyNameHex[0] = 0;
+        sellNameHex[0] = 0;
+        uc_mem_read(MTK, manager + 0x18, &buyBase, sizeof(buyBase));
+        uc_mem_read(MTK, manager + 0x1C, &sellBase, sizeof(sellBase));
+        if (buyBase != 0)
+        {
+            uc_mem_read(MTK, buyBase, &buyItem0, sizeof(buyItem0));
+            vm_autotest_format_mem_hex(buyBase + 4, 12, buyNameHex, sizeof(buyNameHex));
+        }
+        if (sellBase != 0)
+        {
+            uc_mem_read(MTK, sellBase, &sellItem0, sizeof(sellItem0));
+            vm_autotest_format_mem_hex(sellBase + 4, 12, sellNameHex, sizeof(sellNameHex));
+        }
+        vm_autotest_note("shop_parser done pc=%08x base=%08x r9=%08x buy_base=%08x buy0=%u buy_name=%s sell_base=%08x sell0=%u sell_name=%s count=%u\n",
+                         pc, base, r9, buyBase, buyItem0, buyNameHex,
+                         sellBase, sellItem0, sellNameHex, seenDone);
+    }
 }
 
 static void vm_autotest_dump_scene_tables(u32 elapsedMs)
@@ -9183,6 +9382,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     vm_autotest_note_startup_pc((u32)address & ~1u);
     vm_autotest_note_scene_actor_parser_pc((u32)address & ~1u);
     vm_autotest_note_backpack_parser_pc((u32)address & ~1u);
+    vm_autotest_note_shop_parser_pc((u32)address & ~1u);
 
     if (vm_is_manager_func_stub_address((u32)address))
         return;

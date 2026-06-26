@@ -347,6 +347,33 @@ static int vm_file_has_extension(const char *path)
     return dot != NULL && (slash == NULL || dot > slash);
 }
 
+static int vm_path_has_separator(const char *path)
+{
+    return path != NULL && (strchr(path, '/') != NULL || strchr(path, '\\') != NULL);
+}
+
+static const char *vm_path_basename(const char *path)
+{
+    const char *slash;
+    const char *backslash;
+    if (path == NULL)
+        return "";
+    slash = strrchr(path, '/');
+    backslash = strrchr(path, '\\');
+    if (backslash != NULL && (slash == NULL || backslash > slash))
+        slash = backslash;
+    return slash ? slash + 1 : path;
+}
+
+static int vm_file_is_bare_dsh_resource(const char *path)
+{
+    const char *ext;
+    if (path == NULL || path[0] == 0 || vm_path_has_separator(path))
+        return 0;
+    ext = strrchr(path, '.');
+    return ext != NULL && _stricmp(ext, ".dsh") == 0;
+}
+
 static int vm_path_has_high_byte(const char *path)
 {
     if (path == NULL)
@@ -425,6 +452,22 @@ static int vm_file_try_resolve_map_path(const char *normalizedName, const char *
         }
     }
     if (snprintf(resolvedName, resolvedSize, "%s.map", normalizedName) >= (int)resolvedSize)
+        return 0;
+    fp = fopen(resolvedName, "rb");
+    if (fp == NULL)
+        return 0;
+    fclose(fp);
+    return 1;
+}
+
+static int vm_file_try_resolve_jhonline_dsh_path(const char *normalizedName, const char *mode, char *resolvedName, size_t resolvedSize)
+{
+    FILE *fp;
+    if (normalizedName == NULL || resolvedName == NULL || resolvedSize == 0)
+        return 0;
+    if (!vm_file_is_read_only_mode(mode) || !vm_file_is_bare_dsh_resource(normalizedName))
+        return 0;
+    if (snprintf(resolvedName, resolvedSize, "JHOnlineData/%s", normalizedName) >= (int)resolvedSize)
         return 0;
     fp = fopen(resolvedName, "rb");
     if (fp == NULL)
@@ -559,6 +602,12 @@ int vm_get_file_handle(char *nameBuf, const char *mode)
                 return i;
             }
             FILE *f = fopen(normalizedName, openMode);
+            if (f == NULL && vm_file_try_resolve_jhonline_dsh_path(normalizedName, openMode, resolvedName, sizeof(resolvedName)))
+            {
+                f = fopen(resolvedName, openMode);
+                if (f != NULL)
+                    snprintf(normalizedName, sizeof(normalizedName), "%s", resolvedName);
+            }
             if (f == NULL && vm_file_mode_is_writeable(openMode))
             {
                 vm_file_ensure_parent_dirs(normalizedName);
@@ -724,6 +773,12 @@ int vm_cbfs_vm_file_exists(int disk, int namePtr)
     if (vm_is_pseudo_dir_path(normalizedName))
         return vm_set_call_result(1);
     FILE *f = fopen(normalizedName, "rb");
+    if (f == NULL)
+    {
+        char resolvedName[256];
+        if (vm_file_try_resolve_jhonline_dsh_path(normalizedName, "rb", resolvedName, sizeof(resolvedName)))
+            f = fopen(resolvedName, "rb");
+    }
     u32 r = 0;
     if (f != NULL)
     {
@@ -1113,6 +1168,27 @@ bool vm_DF_String_Equal(int a1, int a2)
     c2 = vm_get_var_byte(a2 + i);
     return vm_set_call_result(c2 == 0);
 }
+
+static int vm_DF_String_Dsh_Basename_Equal(int resourceNamePtr, int requestNamePtr)
+{
+    char resourceName[128];
+    char requestName[128];
+    char normalizedResource[128];
+    char normalizedRequest[128];
+
+    if (resourceNamePtr == 0 || requestNamePtr == 0)
+        return 0;
+
+    vm_read_path_string(resourceNamePtr, resourceName, sizeof(resourceName));
+    vm_read_path_string(requestNamePtr, requestName, sizeof(requestName));
+    vm_file_normalize_host_path(resourceName, normalizedResource, sizeof(normalizedResource));
+    vm_file_normalize_host_path(requestName, normalizedRequest, sizeof(normalizedRequest));
+    if (!vm_file_is_bare_dsh_resource(normalizedRequest))
+        return 0;
+
+    return _stricmp(vm_path_basename(normalizedResource), normalizedRequest) == 0;
+}
+
 // ptr,ptr
 int vm_DF_DataPackage_LocateDataPackage(int a1, int namePtr)
 {
@@ -2030,6 +2106,18 @@ u32 vm_DF_DataPackage_GetFileID(u32 a1, u32 namePtr)
         if (vm_DF_String_Equal(str_ptr, namePtr))
         {
             u32 file_id = 0; // 第一次应该返回0x1c
+            uc_mem_read(uc, id_base + 2 * i, &file_id, 2);
+            uc_reg_write(uc, UC_ARM_REG_R0, &file_id);
+            return file_id;
+        }
+    }
+
+    for (i = 0; i < count1; i++)
+    {
+        uc_mem_read(uc, base_ptr + 4 * i, &str_ptr, 4);
+        if (vm_DF_String_Dsh_Basename_Equal(str_ptr, namePtr))
+        {
+            u32 file_id = 0;
             uc_mem_read(uc, id_base + 2 * i, &file_id, 2);
             uc_reg_write(uc, UC_ARM_REG_R0, &file_id);
             return file_id;
