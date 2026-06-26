@@ -1642,6 +1642,14 @@ static u32 vm_net_mock_env_u32(const char *name, u32 fallback)
     return (u32)parsed;
 }
 
+static u32 vm_net_mock_env_u32_if_set(const char *name, u32 fallback)
+{
+    const char *spec = getenv(name);
+    if (spec == NULL || spec[0] == 0)
+        return fallback;
+    return vm_net_mock_env_u32(name, fallback);
+}
+
 static const char *vm_net_mock_env_str(const char *name, const char *fallback)
 {
     const char *spec = getenv(name);
@@ -1830,8 +1838,50 @@ enum
     VM_NET_MOCK_SHOP_NAME_BYTES = 12,
     VM_NET_MOCK_SHOP_PURCHASE_ITEM_SEQ = 2,
     VM_NET_MOCK_TELEPORT_STONE_DEFAULT_EXIT_ID = 1,
-    VM_NET_MOCK_SCENE_LANDING_SAFE_GAP = 32
+    VM_NET_MOCK_SCENE_LANDING_SAFE_GAP = 32,
+    VM_NET_MOCK_ROLE_DB_MAX_ROLES = 5,
+    VM_NET_MOCK_ROLE_DB_VERSION = 1,
+    VM_NET_MOCK_ROLE_EXP_PER_LEVEL = 100,
+    VM_NET_MOCK_ROLE_MONSTER_EXP = 10,
+    VM_NET_MOCK_ROLE_DEFAULT_ID = 10001,
+    VM_NET_MOCK_ROLE_DEFAULT_HP = 120,
+    VM_NET_MOCK_ROLE_DEFAULT_MP = 100,
+    VM_NET_MOCK_ROLE_DEFAULT_MONEY = 1000
 };
+
+typedef struct
+{
+    u32 roleId;
+    char name[32];
+    u8 job;
+    u8 sex;
+    u8 backpackCapacity;
+    u8 reserved0;
+    u32 level;
+    u32 exp;
+    u32 hp;
+    u32 hpMax;
+    u32 mp;
+    u32 mpMax;
+    u32 money;
+    char scene[64];
+    u16 x;
+    u16 y;
+} vm_net_mock_role_state;
+
+typedef struct
+{
+    char magic[4];
+    u32 version;
+    u32 activeRoleId;
+    u32 roleCount;
+    vm_net_mock_role_state roles[VM_NET_MOCK_ROLE_DB_MAX_ROLES];
+} vm_net_mock_role_db_file;
+
+static vm_net_mock_role_state *vm_net_mock_active_role(void);
+static u32 vm_net_mock_role_level_from_exp(u32 exp);
+static u32 vm_net_mock_role_exp_percent(u32 exp);
+static u32 vm_net_mock_role_last_level_exp(u32 exp);
 
 typedef struct
 {
@@ -2423,9 +2473,11 @@ static bool vm_net_mock_append_shop_open_status14_object(u8 *out, u32 outCap, u3
 static bool vm_net_mock_append_shop_money4_object(u8 *out, u32 outCap, u32 *pos)
 {
     u32 objectStart = 0;
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 money = role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY;
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 14, 4, &objectStart))
         return false;
-    if (!vm_net_mock_put_object_u32(out, outCap, pos, "coolmoney", 999999))
+    if (!vm_net_mock_put_object_u32(out, outCap, pos, "coolmoney", money))
         return false;
     if (!vm_net_mock_put_object_u32(out, outCap, pos, "ticket", 0))
         return false;
@@ -2826,6 +2878,10 @@ static bool vm_net_mock_scene_is_taohuadao01(const char *scene);
 static vm_net_mock_player_pos_state g_vm_net_mock_player_pos;
 static bool g_vm_net_mock_player_pos_loaded = false;
 static bool g_vm_net_mock_player_pos_valid = false;
+static vm_net_mock_role_db_file g_vm_net_mock_role_db;
+static bool g_vm_net_mock_role_db_loaded = false;
+static bool g_vm_net_mock_role_db_valid = false;
+static u32 g_vm_net_mock_battle_rewarded_serial = 0;
 static char g_vm_net_mock_scene_moveinfo_npc_pending_scene[64];
 static bool g_vm_net_mock_scene_moveinfo_npc_pending = false;
 static char g_vm_net_mock_scene_moveinfo_npc_seeded_scene[64];
@@ -3067,29 +3123,368 @@ static void vm_net_mock_player_pos_path(char *path, size_t pathSize)
     snprintf(path, pathSize, "nvram/jhol_mock_player_pos.bin");
 }
 
-static void vm_net_mock_load_player_pos_state(void)
+static void vm_net_mock_role_db_path(char *path, size_t pathSize)
+{
+    snprintf(path, pathSize, "nvram/jhol_mock_roles.bin");
+}
+
+static u32 vm_net_mock_role_level_from_exp(u32 exp)
+{
+    return exp / VM_NET_MOCK_ROLE_EXP_PER_LEVEL + 1;
+}
+
+static u32 vm_net_mock_role_last_level_exp(u32 exp)
+{
+    return (exp / VM_NET_MOCK_ROLE_EXP_PER_LEVEL) * VM_NET_MOCK_ROLE_EXP_PER_LEVEL;
+}
+
+static u32 vm_net_mock_role_exp_percent(u32 exp)
+{
+    return exp % VM_NET_MOCK_ROLE_EXP_PER_LEVEL;
+}
+
+static const char *vm_net_mock_default_role_name(void)
+{
+    return "\xcf\xc0\xbd\xa3\xbd\xad\xba\xfe"; /* GBK: xia jian jiang hu */
+}
+
+static void vm_net_mock_role_init_default(vm_net_mock_role_state *role)
+{
+    if (role == NULL)
+        return;
+    memset(role, 0, sizeof(*role));
+    role->roleId = VM_NET_MOCK_ROLE_DEFAULT_ID;
+    snprintf(role->name, sizeof(role->name), "%s", vm_net_mock_default_role_name());
+    role->job = 1;
+    role->sex = 0;
+    role->backpackCapacity = VM_NET_MOCK_BACKPACK_CAPACITY;
+    role->level = 1;
+    role->exp = 0;
+    role->hp = VM_NET_MOCK_ROLE_DEFAULT_HP;
+    role->hpMax = VM_NET_MOCK_ROLE_DEFAULT_HP;
+    role->mp = VM_NET_MOCK_ROLE_DEFAULT_MP;
+    role->mpMax = VM_NET_MOCK_ROLE_DEFAULT_MP;
+    role->money = VM_NET_MOCK_ROLE_DEFAULT_MONEY;
+    snprintf(role->scene, sizeof(role->scene), "%s", vm_net_mock_default_scene_name());
+    role->x = 223;
+    role->y = 382;
+}
+
+static bool vm_net_mock_load_legacy_player_pos_state(vm_net_mock_player_pos_state *stateOut)
 {
     char path[128];
     vm_net_mock_player_pos_state state;
+    FILE *fp = NULL;
+    size_t readLen = 0;
+
+    if (stateOut == NULL)
+        return false;
+    memset(stateOut, 0, sizeof(*stateOut));
+    vm_net_mock_player_pos_path(path, sizeof(path));
+    fp = fopen(path, "rb");
+    if (fp == NULL)
+        return false;
+    readLen = fread(&state, 1, sizeof(state), fp);
+    fclose(fp);
+
+    if (readLen != sizeof(state) ||
+        memcmp(state.magic, "JHP1", 4) != 0 ||
+        state.x == 0 ||
+        state.y == 0)
+    {
+        return false;
+    }
+    state.scene[sizeof(state.scene) - 1] = 0;
+    if (!vm_net_mock_scene_name_is_safe(state.scene))
+        snprintf(state.scene, sizeof(state.scene), "%s", vm_net_mock_default_scene_name());
+    *stateOut = state;
+    return true;
+}
+
+static void vm_net_mock_role_normalize(vm_net_mock_role_state *role)
+{
+    if (role == NULL)
+        return;
+    if (role->roleId == 0)
+        role->roleId = VM_NET_MOCK_ROLE_DEFAULT_ID;
+    role->name[sizeof(role->name) - 1] = 0;
+    if (role->name[0] == 0)
+        snprintf(role->name, sizeof(role->name), "%s", vm_net_mock_default_role_name());
+    if (role->job == 0 || role->job > 3)
+        role->job = 1;
+    if (role->sex > 1)
+        role->sex = 0;
+    if (role->backpackCapacity == 0 || role->backpackCapacity > VM_NET_MOCK_BACKPACK_CAPACITY)
+        role->backpackCapacity = VM_NET_MOCK_BACKPACK_CAPACITY;
+    if (role->hpMax == 0)
+        role->hpMax = VM_NET_MOCK_ROLE_DEFAULT_HP;
+    if (role->mpMax == 0)
+        role->mpMax = VM_NET_MOCK_ROLE_DEFAULT_MP;
+    if (role->hp == 0 || role->hp > role->hpMax)
+        role->hp = role->hpMax;
+    if (role->mp > role->mpMax)
+        role->mp = role->mpMax;
+    if (role->mp == 0)
+        role->mp = role->mpMax;
+    role->scene[sizeof(role->scene) - 1] = 0;
+    if (!vm_net_mock_scene_name_is_safe(role->scene))
+        snprintf(role->scene, sizeof(role->scene), "%s", vm_net_mock_default_scene_name());
+    if (role->x == 0 || role->y == 0)
+    {
+        role->x = 223;
+        role->y = 382;
+    }
+    vm_net_mock_adjust_safe_player_pos_for_scene(role->scene, &role->x, &role->y);
+    role->level = vm_net_mock_role_level_from_exp(role->exp);
+}
+
+static void vm_net_mock_role_db_save(const char *reason)
+{
+    char path[128];
+    if (!g_vm_net_mock_role_db_valid)
+        return;
+    memcpy(g_vm_net_mock_role_db.magic, "JHR1", 4);
+    g_vm_net_mock_role_db.version = VM_NET_MOCK_ROLE_DB_VERSION;
+    if (g_vm_net_mock_role_db.roleCount == 0 ||
+        g_vm_net_mock_role_db.roleCount > VM_NET_MOCK_ROLE_DB_MAX_ROLES)
+    {
+        g_vm_net_mock_role_db.roleCount = 1;
+    }
+#ifdef _WIN32
+    _mkdir("nvram");
+#else
+    mkdir("nvram", 0777);
+#endif
+    vm_net_mock_role_db_path(path, sizeof(path));
+    FILE *fp = fopen(path, "wb");
+    if (fp)
+    {
+        fwrite(&g_vm_net_mock_role_db, 1, sizeof(g_vm_net_mock_role_db), fp);
+        fclose(fp);
+        vm_autotest_note("mock_role_db_save reason=%s roles=%u active=%u\n",
+                         reason ? reason : "state",
+                         g_vm_net_mock_role_db.roleCount,
+                         g_vm_net_mock_role_db.activeRoleId);
+    }
+}
+
+static void vm_net_mock_role_db_load(void)
+{
+    char path[128];
+    vm_net_mock_role_db_file loaded;
+    vm_net_mock_player_pos_state legacyPos;
+    bool loadedFromFile = false;
+    bool needsSave = false;
+
+    if (g_vm_net_mock_role_db_loaded)
+        return;
+    g_vm_net_mock_role_db_loaded = true;
+    memset(&g_vm_net_mock_role_db, 0, sizeof(g_vm_net_mock_role_db));
+    memcpy(g_vm_net_mock_role_db.magic, "JHR1", 4);
+    g_vm_net_mock_role_db.version = VM_NET_MOCK_ROLE_DB_VERSION;
+    g_vm_net_mock_role_db.activeRoleId = VM_NET_MOCK_ROLE_DEFAULT_ID;
+    g_vm_net_mock_role_db.roleCount = 1;
+    vm_net_mock_role_init_default(&g_vm_net_mock_role_db.roles[0]);
+
+    vm_net_mock_role_db_path(path, sizeof(path));
+    FILE *fp = fopen(path, "rb");
+    if (fp)
+    {
+        size_t readLen = fread(&loaded, 1, sizeof(loaded), fp);
+        fclose(fp);
+        if (readLen == sizeof(loaded) &&
+            memcmp(loaded.magic, "JHR1", 4) == 0 &&
+            loaded.version == VM_NET_MOCK_ROLE_DB_VERSION &&
+            loaded.roleCount > 0 &&
+            loaded.roleCount <= VM_NET_MOCK_ROLE_DB_MAX_ROLES)
+        {
+            g_vm_net_mock_role_db = loaded;
+            loadedFromFile = true;
+        }
+    }
+
+    if (!loadedFromFile)
+    {
+        needsSave = true;
+        if (vm_net_mock_load_legacy_player_pos_state(&legacyPos))
+        {
+            snprintf(g_vm_net_mock_role_db.roles[0].scene,
+                     sizeof(g_vm_net_mock_role_db.roles[0].scene),
+                     "%s", legacyPos.scene);
+            g_vm_net_mock_role_db.roles[0].x = legacyPos.x;
+            g_vm_net_mock_role_db.roles[0].y = legacyPos.y;
+        }
+    }
+
+    if (g_vm_net_mock_role_db.roleCount == 0 ||
+        g_vm_net_mock_role_db.roleCount > VM_NET_MOCK_ROLE_DB_MAX_ROLES)
+    {
+        g_vm_net_mock_role_db.roleCount = 1;
+        needsSave = true;
+    }
+    for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+        vm_net_mock_role_normalize(&g_vm_net_mock_role_db.roles[i]);
+
+    bool activeFound = false;
+    for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+    {
+        if (g_vm_net_mock_role_db.roles[i].roleId == g_vm_net_mock_role_db.activeRoleId)
+        {
+            activeFound = true;
+            break;
+        }
+    }
+    if (!activeFound)
+    {
+        g_vm_net_mock_role_db.activeRoleId = g_vm_net_mock_role_db.roles[0].roleId;
+        needsSave = true;
+    }
+    g_vm_net_mock_role_db_valid = true;
+    if (needsSave)
+        vm_net_mock_role_db_save(loadedFromFile ? "normalize" : "init");
+}
+
+static vm_net_mock_role_state *vm_net_mock_active_role(void)
+{
+    vm_net_mock_role_db_load();
+    if (!g_vm_net_mock_role_db_valid || g_vm_net_mock_role_db.roleCount == 0)
+        return NULL;
+    for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+    {
+        if (g_vm_net_mock_role_db.roles[i].roleId == g_vm_net_mock_role_db.activeRoleId)
+            return &g_vm_net_mock_role_db.roles[i];
+    }
+    g_vm_net_mock_role_db.activeRoleId = g_vm_net_mock_role_db.roles[0].roleId;
+    return &g_vm_net_mock_role_db.roles[0];
+}
+
+static void vm_net_mock_select_active_role(u32 roleId)
+{
+    vm_net_mock_role_db_load();
+    if (!g_vm_net_mock_role_db_valid || roleId == 0)
+        return;
+    for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+    {
+        if (g_vm_net_mock_role_db.roles[i].roleId == roleId)
+        {
+            if (g_vm_net_mock_role_db.activeRoleId != roleId)
+            {
+                g_vm_net_mock_role_db.activeRoleId = roleId;
+                vm_net_mock_role_db_save("role-select");
+            }
+            return;
+        }
+    }
+}
+
+static void vm_net_mock_write_legacy_player_pos_state(const vm_net_mock_role_state *role)
+{
+    char path[128];
+    if (role == NULL || role->x == 0 || role->y == 0)
+        return;
+    memset(&g_vm_net_mock_player_pos, 0, sizeof(g_vm_net_mock_player_pos));
+    memcpy(g_vm_net_mock_player_pos.magic, "JHP1", 4);
+    snprintf(g_vm_net_mock_player_pos.scene, sizeof(g_vm_net_mock_player_pos.scene), "%s", role->scene);
+    g_vm_net_mock_player_pos.x = role->x;
+    g_vm_net_mock_player_pos.y = role->y;
+    g_vm_net_mock_player_pos_loaded = true;
+    g_vm_net_mock_player_pos_valid = true;
+#ifdef _WIN32
+    _mkdir("nvram");
+#else
+    mkdir("nvram", 0777);
+#endif
+    vm_net_mock_player_pos_path(path, sizeof(path));
+    FILE *fp = fopen(path, "wb");
+    if (fp)
+    {
+        fwrite(&g_vm_net_mock_player_pos, 1, sizeof(g_vm_net_mock_player_pos), fp);
+        fclose(fp);
+    }
+}
+
+static void vm_net_mock_role_set_position(const char *scene, u16 x, u16 y, const char *reason)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    if (role == NULL || scene == NULL || scene[0] == 0 || x == 0 || y == 0)
+        return;
+    snprintf(role->scene, sizeof(role->scene), "%s", scene);
+    role->x = x;
+    role->y = y;
+    vm_net_mock_role_normalize(role);
+    vm_net_mock_role_db_save(reason ? reason : "position");
+    vm_net_mock_write_legacy_player_pos_state(role);
+}
+
+static void vm_net_mock_role_apply_battle_settlement(u32 hp, u32 mp,
+                                                     u32 rewardExp, u32 rewardGold,
+                                                     u32 *lastExpOut, u32 *curExpOut,
+                                                     u16 *percentExpOut, u32 *levelOut,
+                                                     u32 *goldOut, u32 *hpOut, u32 *mpOut)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 lastExp = 0;
+
+    if (role == NULL)
+        return;
+    lastExp = role->exp;
+    if (hp > role->hpMax)
+        hp = role->hpMax;
+    if (mp > role->mpMax)
+        mp = role->mpMax;
+    role->hp = hp;
+    role->mp = mp;
+    role->exp += rewardExp;
+    role->money += rewardGold;
+    vm_net_mock_role_normalize(role);
+    vm_net_mock_role_db_save("battle-settle");
+
+    if (lastExpOut)
+        *lastExpOut = lastExp;
+    if (curExpOut)
+        *curExpOut = role->exp;
+    if (percentExpOut)
+        *percentExpOut = (u16)vm_net_mock_role_exp_percent(role->exp);
+    if (levelOut)
+        *levelOut = role->level;
+    if (goldOut)
+        *goldOut = role->money;
+    if (hpOut)
+        *hpOut = role->hp;
+    if (mpOut)
+        *mpOut = role->mp;
+}
+
+static u32 vm_net_mock_role_current_hp_for_battle(void)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    return role ? role->hp : VM_NET_MOCK_ROLE_DEFAULT_HP;
+}
+
+static void vm_net_mock_load_player_pos_state(void)
+{
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_player_pos_state legacyPos;
 
     if (g_vm_net_mock_player_pos_loaded)
         return;
     g_vm_net_mock_player_pos_loaded = true;
     memset(&g_vm_net_mock_player_pos, 0, sizeof(g_vm_net_mock_player_pos));
 
-    vm_net_mock_player_pos_path(path, sizeof(path));
-    FILE *fp = fopen(path, "rb");
-    if (fp == NULL)
-        return;
-    size_t readLen = fread(&state, 1, sizeof(state), fp);
-    fclose(fp);
-
-    if (readLen == sizeof(state) &&
-        memcmp(state.magic, "JHP1", 4) == 0 &&
-        state.x > 0 &&
-        state.y > 0)
+    role = vm_net_mock_active_role();
+    if (role != NULL && role->x > 0 && role->y > 0 && vm_net_mock_scene_name_is_safe(role->scene))
     {
-        g_vm_net_mock_player_pos = state;
+        memcpy(g_vm_net_mock_player_pos.magic, "JHP1", 4);
+        snprintf(g_vm_net_mock_player_pos.scene, sizeof(g_vm_net_mock_player_pos.scene), "%s", role->scene);
+        g_vm_net_mock_player_pos.x = role->x;
+        g_vm_net_mock_player_pos.y = role->y;
+        g_vm_net_mock_player_pos_valid = true;
+        return;
+    }
+
+    if (vm_net_mock_load_legacy_player_pos_state(&legacyPos))
+    {
+        g_vm_net_mock_player_pos = legacyPos;
         g_vm_net_mock_player_pos.scene[sizeof(g_vm_net_mock_player_pos.scene) - 1] = 0;
         if (!vm_net_mock_scene_name_is_safe(g_vm_net_mock_player_pos.scene))
         {
@@ -3102,7 +3497,6 @@ static void vm_net_mock_load_player_pos_state(void)
 
 static void vm_net_mock_save_player_pos_state(const char *scene, u16 x, u16 y, const char *reason)
 {
-    char path[128];
     char runtimeScene[64];
     if (x == 0 || y == 0)
         return;
@@ -3118,25 +3512,7 @@ static void vm_net_mock_save_player_pos_state(const char *scene, u16 x, u16 y, c
             scene = vm_net_mock_default_scene_name();
     }
     vm_net_mock_adjust_safe_player_pos_for_scene(scene, &x, &y);
-    memcpy(g_vm_net_mock_player_pos.magic, "JHP1", 4);
-    memset(g_vm_net_mock_player_pos.scene, 0, sizeof(g_vm_net_mock_player_pos.scene));
-    snprintf(g_vm_net_mock_player_pos.scene, sizeof(g_vm_net_mock_player_pos.scene), "%s", scene);
-    g_vm_net_mock_player_pos.x = x;
-    g_vm_net_mock_player_pos.y = y;
-    g_vm_net_mock_player_pos_valid = true;
-
-#ifdef _WIN32
-    _mkdir("nvram");
-#else
-    mkdir("nvram", 0777);
-#endif
-    vm_net_mock_player_pos_path(path, sizeof(path));
-    FILE *fp = fopen(path, "wb");
-    if (fp)
-    {
-        fwrite(&g_vm_net_mock_player_pos, 1, sizeof(g_vm_net_mock_player_pos), fp);
-        fclose(fp);
-    }
+    vm_net_mock_role_set_position(scene, x, y, reason);
 }
 
 static void vm_net_mock_mark_pending_scene_pos_save(const char *scene, u16 x, u16 y, const char *reason)
@@ -4749,6 +5125,8 @@ static bool vm_net_mock_append_battle_enemy_template_prefill_object(u8 *out, u32
 static bool vm_net_mock_append_type1_object(u8 *out, u32 outCap, u32 *pos, u8 npcNum)
 {
     u32 objectStart = 0;
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 money = role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY;
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 0x0a, 0x1a, &objectStart))
         return false;
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", 1))
@@ -4759,7 +5137,7 @@ static bool vm_net_mock_append_type1_object(u8 *out, u32 outCap, u32 *pos, u8 np
         return false;
     if (!vm_net_mock_put_object_string(out, outCap, pos, "name", "Codex"))
         return false;
-    if (!vm_net_mock_put_object_u32(out, outCap, pos, "money", 0))
+    if (!vm_net_mock_put_object_u32(out, outCap, pos, "money", money))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
     return true;
@@ -4999,16 +5377,26 @@ static bool vm_net_mock_append_scene_room_roles_object(u8 *out, u32 outCap, u32 
     u32 objectStart = 0;
     u8 rolesInfo[128];
     u8 colNames[64];
+    char levelText[16];
     u32 rolesInfoLen = 0;
     u32 colNamesLen = 0;
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    const char *roleName = role ? role->name : vm_net_mock_default_role_name();
+    const char *jobName = "Warrior";
+    u32 level = role ? role->level : 1;
     static const char *const roleColumns[] = {"name", "job", "level", "state"};
+    if (role && role->job == 2)
+        jobName = "Assassin";
+    else if (role && role->job == 3)
+        jobName = "Mage";
+    snprintf(levelText, sizeof(levelText), "Lv%u", level);
     if (!vm_net_mock_seq_put_string_list(colNames, sizeof(colNames), &colNamesLen, roleColumns, 4))
         return false;
-    if (!vm_net_mock_seq_put_string(rolesInfo, sizeof(rolesInfo), &rolesInfoLen, "Codex"))
+    if (!vm_net_mock_seq_put_string(rolesInfo, sizeof(rolesInfo), &rolesInfoLen, roleName))
         return false;
-    if (!vm_net_mock_seq_put_string(rolesInfo, sizeof(rolesInfo), &rolesInfoLen, "Warrior"))
+    if (!vm_net_mock_seq_put_string(rolesInfo, sizeof(rolesInfo), &rolesInfoLen, jobName))
         return false;
-    if (!vm_net_mock_seq_put_string(rolesInfo, sizeof(rolesInfo), &rolesInfoLen, "Lv1"))
+    if (!vm_net_mock_seq_put_string(rolesInfo, sizeof(rolesInfo), &rolesInfoLen, levelText))
         return false;
     if (!vm_net_mock_seq_put_string(rolesInfo, sizeof(rolesInfo), &rolesInfoLen, "Ready"))
         return false;
@@ -5041,7 +5429,8 @@ static u32 vm_net_mock_build_group_type1_response(const u8 *request, u32 request
     if (request == NULL || requestLen < 9 || outCap < 5)
         return 0;
 
-    u32 leadId = 10001;
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 leadId = role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID;
     bool hasGroup10 = false;
     bool hasType1 = false;
     bool enableMiscSync8 = vm_net_mock_env_u8("CBE_GROUP_TYPE1_MISC_SYNC8", 0) != 0;
@@ -7058,11 +7447,17 @@ static u32 vm_net_mock_build_battle_start_info_blob(u8 *out, u32 outCap,
                                                     bool playerOnRight)
 {
     u32 pos = 0;
-    const char roleName[] = "\xcf\xc0\xbd\xa3\xbd\xad\xba\xfe"; /* GBK: xia jian jiang hu */
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    const char *roleName = role ? role->name : vm_net_mock_default_role_name();
     const char *leftName = vm_net_mock_env_str("CBE_BATTLE_LEFT_NAME", "Monster");
-    u32 roleHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP", 120);
+    u32 roleIdDefault = role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID;
+    u32 roleHpDefault = role ? role->hp : VM_NET_MOCK_ROLE_DEFAULT_HP;
+    u32 roleMaxHpDefault = role ? role->hpMax : VM_NET_MOCK_ROLE_DEFAULT_HP;
+    u32 roleMpDefault = role ? role->mp : VM_NET_MOCK_ROLE_DEFAULT_MP;
+    u32 roleMaxMpDefault = role ? role->mpMax : VM_NET_MOCK_ROLE_DEFAULT_MP;
+    u32 roleHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP", roleHpDefault);
     u32 roleMaxHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_HP", roleHp);
-    u32 roleMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MP", 40);
+    u32 roleMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MP", roleMpDefault);
     u32 roleMaxMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_MP", roleMp);
     u32 enemyHp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", 20);
     u32 enemyMaxHp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MAX_HP", enemyHp);
@@ -7082,7 +7477,15 @@ static u32 vm_net_mock_build_battle_start_info_blob(u8 *out, u32 outCap,
     u8 leftVisual1 = vm_net_mock_env_u8("CBE_BATTLE_LEFT_VISUAL_BYTE1", 1);
 
     if (roleId == 0)
-        roleId = 10001;
+        roleId = roleIdDefault;
+    if (roleMaxHp < roleMaxHpDefault)
+        roleMaxHp = roleMaxHpDefault;
+    if (roleMaxMp < roleMaxMpDefault)
+        roleMaxMp = roleMaxMpDefault;
+    if (roleHp > roleMaxHp)
+        roleHp = roleMaxHp;
+    if (roleMp > roleMaxMp)
+        roleMp = roleMaxMp;
     if (enemyId == 0)
         enemyId = 105;
     leftId = playerOnRight ? enemyId : roleId;
@@ -7146,13 +7549,27 @@ static u32 vm_net_mock_build_battle_scene_start_info_blob(u8 *out, u32 outCap,
                                                           u32 roleId)
 {
     u32 pos = 0;
-    u32 roleHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP", 120);
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 roleIdDefault = role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID;
+    u32 roleHpDefault = role ? role->hp : VM_NET_MOCK_ROLE_DEFAULT_HP;
+    u32 roleMaxHpDefault = role ? role->hpMax : VM_NET_MOCK_ROLE_DEFAULT_HP;
+    u32 roleMpDefault = role ? role->mp : VM_NET_MOCK_ROLE_DEFAULT_MP;
+    u32 roleMaxMpDefault = role ? role->mpMax : VM_NET_MOCK_ROLE_DEFAULT_MP;
+    u32 roleHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP", roleHpDefault);
     u32 roleMaxHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_HP", roleHp);
-    u32 roleMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MP", 40);
+    u32 roleMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MP", roleMpDefault);
     u32 roleMaxMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_MP", roleMp);
 
     if (roleId == 0)
-        roleId = 10001;
+        roleId = roleIdDefault;
+    if (roleMaxHp < roleMaxHpDefault)
+        roleMaxHp = roleMaxHpDefault;
+    if (roleMaxMp < roleMaxMpDefault)
+        roleMaxMp = roleMaxMpDefault;
+    if (roleHp > roleMaxHp)
+        roleHp = roleMaxHp;
+    if (roleMp > roleMaxMp)
+        roleMp = roleMaxMp;
 
     /*
      * Battle.cbm HandleBattleStartMsg(0x66CC), subtype 5, is the native
@@ -7549,7 +7966,8 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
     if (!terminalFollowup && g_mockBattleEnemyHpCurrent == 0)
         g_mockBattleEnemyHpCurrent = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", 20);
     if (!terminalFollowup && g_mockBattleRoleHpCurrent == 0)
-        g_mockBattleRoleHpCurrent = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP", 120);
+        g_mockBattleRoleHpCurrent = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP",
+                                                        vm_net_mock_role_current_hp_for_battle());
     if (!terminalFollowup && g_mockBattlePendingEnemyTurn != 0 &&
         g_mockBattleEnemyHpCurrent > 0 && g_mockBattleRoleHpCurrent > 0)
     {
@@ -7829,7 +8247,8 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
     if (!terminalFollowup && g_mockBattleEnemyHpCurrent == 0)
         g_mockBattleEnemyHpCurrent = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", 20);
     if (!terminalFollowup && g_mockBattleRoleHpCurrent == 0)
-        g_mockBattleRoleHpCurrent = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP", 120);
+        g_mockBattleRoleHpCurrent = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP",
+                                                        vm_net_mock_role_current_hp_for_battle());
     if (!terminalFollowup && g_mockBattlePendingEnemyTurn != 0 &&
         g_mockBattleEnemyHpCurrent > 0 && g_mockBattleRoleHpCurrent > 0)
     {
@@ -8026,14 +8445,40 @@ static u32 vm_net_mock_build_battle_operate_response_raw82(const u8 *request, u3
 static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *pos)
 {
     u32 objectStart = 0;
-    u32 roleHp = g_mockBattleRoleHpMax != 0 ? g_mockBattleRoleHpCurrent : vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP", 120);
-    u32 roleMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MP", 40);
-    u32 statusExp = vm_net_mock_env_u32("CBE_BATTLE_REWARD_EXP", 25);
-    u32 statusLastExp = vm_net_mock_env_u32("CBE_BATTLE_REWARD_LAST_EXP", 0);
-    u32 statusCurExp = vm_net_mock_env_u32("CBE_BATTLE_REWARD_CUR_EXP", statusLastExp + statusExp);
-    u16 statusPercentExp = (u16)vm_net_mock_env_u32("CBE_BATTLE_REWARD_PERCENT_EXP", 10);
-    u32 statusGold = vm_net_mock_env_u32("CBE_BATTLE_REWARD_GOLD", 5);
-    u32 statusLevel = vm_net_mock_env_u32("CBE_BATTLE_REWARD_LEVEL", 1);
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 roleHp = g_mockBattleRoleHpMax != 0 ? g_mockBattleRoleHpCurrent :
+                 (role ? role->hp : VM_NET_MOCK_ROLE_DEFAULT_HP);
+    u32 roleMp = role ? role->mp : VM_NET_MOCK_ROLE_DEFAULT_MP;
+    u32 statusExp = 0;
+    u32 statusLastExp = role ? role->exp : 0;
+    u32 statusCurExp = statusLastExp;
+    u16 statusPercentExp = (u16)vm_net_mock_role_exp_percent(statusCurExp);
+    u32 statusGold = role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY;
+    u32 statusLevel = role ? role->level : 1;
+    bool victory = g_mockBattleEnemyHpCurrent == 0 && roleHp > 0;
+    bool rewardThisSettle = victory &&
+                            g_mockBattleOperateSessionSerial != 0 &&
+                            g_vm_net_mock_battle_rewarded_serial != g_mockBattleOperateSessionSerial;
+
+    if (rewardThisSettle)
+    {
+        statusExp = vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_EXP",
+                                               VM_NET_MOCK_ROLE_MONSTER_EXP);
+        g_vm_net_mock_battle_rewarded_serial = g_mockBattleOperateSessionSerial;
+    }
+    if (role != NULL)
+    {
+        u32 rewardGold = rewardThisSettle ? vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_GOLD", 0) : 0;
+        vm_net_mock_role_apply_battle_settlement(roleHp, roleMp, statusExp, rewardGold,
+                                                 &statusLastExp, &statusCurExp,
+                                                 &statusPercentExp, &statusLevel,
+                                                 &statusGold, &roleHp, &roleMp);
+    }
+    statusLastExp = vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_LAST_EXP", statusLastExp);
+    statusCurExp = vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_CUR_EXP", statusCurExp);
+    statusPercentExp = (u16)vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_PERCENT_EXP",
+                                                       statusPercentExp);
+    statusLevel = vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_LEVEL", statusLevel);
 
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 4, 7, &objectStart))
         return false;
@@ -8177,10 +8622,11 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
     u32 sceneMonsterIndex = 0;
     u32 sceneMonsterPosX = 0;
     u32 sceneMonsterPosY = 0;
-    u32 roleId = vm_net_mock_env_u32("CBE_BATTLE_ROLE_ID", 10001);
-    u32 roleHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP", 120);
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 roleId = vm_net_mock_env_u32("CBE_BATTLE_ROLE_ID", role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID);
+    u32 roleHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP", role ? role->hp : VM_NET_MOCK_ROLE_DEFAULT_HP);
     u32 roleMaxHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_HP", roleHp);
-    u32 roleMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MP", 40);
+    u32 roleMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MP", role ? role->mp : VM_NET_MOCK_ROLE_DEFAULT_MP);
     u32 roleMaxMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_MP", roleMp);
     bool playerOnRight = vm_net_mock_battle_player_on_right();
     u8 battleSide = (u8)vm_net_mock_env_u32("CBE_BATTLE_SIDE",
@@ -8193,10 +8639,18 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
     bool prefillEnemyTemplate = false;
     bool prefillPlayerTemplate = false;
     u32 responseObjectCount = 1;
-    const char roleName[] = "\xcf\xc0\xbd\xa3\xbd\xad\xba\xfe"; /* GBK: xia jian jiang hu */
+    const char *roleName = role ? role->name : vm_net_mock_default_role_name();
 
     if (outCap < pos || !vm_net_mock_is_challenge_interaction_request(request, requestLen))
         return 0;
+    if (role && roleMaxHp < role->hpMax)
+        roleMaxHp = role->hpMax;
+    if (role && roleMaxMp < role->mpMax)
+        roleMaxMp = role->mpMax;
+    if (roleHp > roleMaxHp)
+        roleHp = roleMaxHp;
+    if (roleMp > roleMaxMp)
+        roleMp = roleMaxMp;
     hasMoveinfo = vm_net_mock_get_object_blob_field(request, requestLen, "moveinfo", &moveInfo, &moveInfoLen);
     if (hasMoveinfo)
         (void)vm_net_mock_snapshot_current_player_pos("moveinfo-upload-combo");
@@ -8309,8 +8763,8 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
     g_mockBattleSceneMonsterStartActive = useSceneMonsterStart ? 1 : 0;
     g_mockBattleOperateTurnCounter = 0;
     ++g_mockBattleOperateSessionSerial;
-    g_mockBattleRoleHpCurrent = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP", 120);
-    g_mockBattleRoleHpMax = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_HP", g_mockBattleRoleHpCurrent);
+    g_mockBattleRoleHpCurrent = roleHp;
+    g_mockBattleRoleHpMax = roleMaxHp;
     if (g_mockBattleRoleHpMax < g_mockBattleRoleHpCurrent)
         g_mockBattleRoleHpMax = g_mockBattleRoleHpCurrent;
     g_mockBattleEnemyHpCurrent = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", 20);
@@ -9316,30 +9770,39 @@ static const char *vm_net_mock_actor_preview_image_name(u8 actorJob, u8 actorSex
 static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
 {
     u32 pos = 0;
-    const char roleName[] = "\xcf\xc0\xbd\xa3\xbd\xad\xba\xfe"; /* GBK: xia jian jiang hu */
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    char roleIdText[16];
+    u32 roleId = role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID;
+    const char *roleName = role ? role->name : vm_net_mock_default_role_name();
     const char *displayName = "JHOnline";
-    u32 roleLevel = vm_net_mock_env_u8("CBE_ROLE_LEVEL", 1);
-    u32 actorJob = vm_net_mock_env_u8("CBE_ACTOR_JOB", 1);
-    u32 actorSex = vm_net_mock_env_u8("CBE_ACTOR_SEX", 0);
+    u32 roleLevel = vm_net_mock_env_u32("CBE_ROLE_LEVEL", role ? role->level : 1);
+    u32 actorJob = vm_net_mock_env_u8("CBE_ACTOR_JOB", role ? role->job : 1);
+    u32 actorSex = vm_net_mock_env_u8("CBE_ACTOR_SEX", role ? role->sex : 0);
     u32 visualVariant = 0;
     u32 visualGroup = 0;
     u32 primaryCurrent = vm_net_mock_env_u32("CBE_ACTOR_HP_CURRENT",
-                                             vm_net_mock_env_u32("CBE_ACTOR_HP", 120));
-    u32 primaryBaseMax = vm_net_mock_env_u32("CBE_ACTOR_HP_MAX", 120);
+                                             vm_net_mock_env_u32("CBE_ACTOR_HP",
+                                                                 role ? role->hp : VM_NET_MOCK_ROLE_DEFAULT_HP));
+    u32 primaryBaseMax = vm_net_mock_env_u32("CBE_ACTOR_HP_MAX",
+                                             role ? role->hpMax : VM_NET_MOCK_ROLE_DEFAULT_HP);
     u32 secondaryCurrent = vm_net_mock_env_u32("CBE_ACTOR_MP_CURRENT",
-                                               vm_net_mock_env_u32("CBE_ACTOR_MP", 100));
-    u32 secondaryBaseMax = vm_net_mock_env_u32("CBE_ACTOR_MP_MAX", 100);
-    u32 actorSummaryValue = vm_net_mock_env_u32("CBE_ACTOR_SUMMARY_VALUE", 0);
-    u32 actorGap09C0 = vm_net_mock_env_u32("CBE_ACTOR_GAP09C0", 0);
+                                               vm_net_mock_env_u32("CBE_ACTOR_MP",
+                                                                   role ? role->mp : VM_NET_MOCK_ROLE_DEFAULT_MP));
+    u32 secondaryBaseMax = vm_net_mock_env_u32("CBE_ACTOR_MP_MAX",
+                                               role ? role->mpMax : VM_NET_MOCK_ROLE_DEFAULT_MP);
+    u32 actorSummaryValue = vm_net_mock_env_u32("CBE_ACTOR_SUMMARY_VALUE", role ? role->exp : 0);
+    u32 actorGap09C0 = vm_net_mock_env_u32("CBE_ACTOR_GAP09C0",
+                                           role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY);
     u32 actorSummaryStatus = vm_net_mock_env_u32("CBE_ACTOR_STATUS_WORD", roleLevel);
     u8 actorBackpackCapacity = vm_net_mock_env_u8("CBE_ACTOR_BACKPACK_CAPACITY",
+                                                  role ? role->backpackCapacity :
                                                   VM_NET_MOCK_BACKPACK_CAPACITY);
     u8 actorStateByte1 = vm_net_mock_env_u8("CBE_ACTOR_STATE_BYTE1", 0);
     u8 actorTargetX = 12;
     u8 actorTargetY = 10;
     u8 actorField11E = 0;
     u8 actorField120 = 0;
-    const char *shortLabel = vm_net_mock_env_str("CBE_ACTOR_SHORT_LABEL", "10001");
+    const char *shortLabel = NULL;
     const char *actorResource = NULL;
     const char *sceneKey = NULL;
     u16 actorResourceArg = 0;
@@ -9353,6 +9816,8 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
     u32 actorGap0CC4 = vm_net_mock_env_u32("CBE_ACTOR_GAP0CC4", 0);
     u32 actorGap0CC8 = vm_net_mock_env_u32("CBE_ACTOR_GAP0CC8", 0);
 
+    snprintf(roleIdText, sizeof(roleIdText), "%u", roleId);
+    shortLabel = vm_net_mock_env_str("CBE_ACTOR_SHORT_LABEL", roleIdText);
     if (roleLevel == 0)
         roleLevel = 1;
     if (actorJob == 0 || actorJob > 3)
@@ -9384,8 +9849,8 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
 
     actorTargetX = (u8)vm_net_mock_env_u32("CBE_ACTOR_TARGET_X", 12);
     actorTargetY = (u8)vm_net_mock_env_u32("CBE_ACTOR_TARGET_Y", 10);
-    actorGridX = (u16)vm_net_mock_env_u32("CBE_ACTOR_GRID_X", vm_net_mock_scene_spawn_x());
-    actorGridY = (u16)vm_net_mock_env_u32("CBE_ACTOR_GRID_Y", vm_net_mock_scene_spawn_y());
+    actorGridX = (u16)vm_net_mock_env_u32("CBE_ACTOR_GRID_X", role ? role->x : vm_net_mock_scene_spawn_x());
+    actorGridY = (u16)vm_net_mock_env_u32("CBE_ACTOR_GRID_Y", role ? role->y : vm_net_mock_scene_spawn_y());
     actorField11E = vm_net_mock_env_u8("CBE_ACTOR_BYTE_11E", actorTargetX);
     actorField120 = vm_net_mock_env_u8("CBE_ACTOR_BYTE_120", actorTargetY);
     actorResource = vm_net_mock_actor_resource_name((u8)actorJob, (u8)actorSex);
@@ -9394,7 +9859,7 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
     motionResourceArg0 = (u16)vm_net_mock_env_u32("CBE_ACTOR_MOTION_ARG0", actorGridX);
     motionResourceArg1 = (u16)vm_net_mock_env_u32("CBE_ACTOR_MOTION_ARG1", actorGridY);
 
-    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, 10001))
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, roleId))
         return 0;
     if (!vm_net_mock_seq_put_u8(out, outCap, &pos, (u8)visualVariant))
         return 0;
@@ -9402,7 +9867,7 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
         return 0;
     if (!vm_net_mock_seq_put_string(out, outCap, &pos, roleName))
         return 0;
-    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, 10001))
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, roleId))
         return 0;
     if (!vm_net_mock_seq_put_string(out, outCap, &pos, displayName))
         return 0;
@@ -9513,9 +9978,10 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
 static u32 vm_net_mock_build_role_list_info(u8 *out, u32 outCap)
 {
     u32 pos = 0;
-    const char roleName[] = "\xcf\xc0\xbd\xa3\xbd\xad\xba\xfe"; /* GBK: xia jian jiang hu */
-    u32 roleId = 10001;
-    u32 roleLevel = vm_net_mock_env_u8("CBE_ROLE_LEVEL", 1);
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    const char *roleName = role ? role->name : vm_net_mock_default_role_name();
+    u32 roleId = role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID;
+    u32 roleLevel = vm_net_mock_env_u32("CBE_ROLE_LEVEL", role ? role->level : 1);
 
     if (roleLevel == 0)
         roleLevel = 1;
@@ -9533,43 +9999,47 @@ static u32 vm_net_mock_build_role_list_info(u8 *out, u32 outCap)
 static u32 vm_net_mock_build_title_role_list_actorinfo(u8 *out, u32 outCap)
 {
     u32 pos = 0;
-    const char roleName[] = "\xcf\xc0\xbd\xa3\xbd\xad\xba\xfe"; /* GBK: xia jian jiang hu */
-    u32 roleId = 10001;
-    u16 roleLevel = (u16)vm_net_mock_env_u8("CBE_ROLE_LEVEL", 1);
-    u8 actorJob = vm_net_mock_env_u8("CBE_ACTOR_JOB", 1);
-    u8 actorSex = vm_net_mock_env_u8("CBE_ACTOR_SEX", 0);
+    vm_net_mock_role_db_load();
+    u32 roleCount = g_vm_net_mock_role_db_valid ? g_vm_net_mock_role_db.roleCount : 1;
+    if (roleCount == 0 || roleCount > VM_NET_MOCK_ROLE_DB_MAX_ROLES)
+        roleCount = 1;
 
-    if (roleLevel == 0)
-        roleLevel = 1;
-    if (actorJob == 0 || actorJob > 3)
-        actorJob = 1;
     /*
      * title target50_render() derives a role portrait table index from the
      * compact role-list record as `job * 2 + (sex - 1)`, so the title-side
      * role-list contract expects `sex` to be 1-based here. A zero value wraps
      * into 0xFF and drives the render path into an invalid callback slot.
-     */
-    if (actorSex < 1 || actorSex > 2)
-        actorSex = 1;
-
-    /*
+     *
      * mmTitleMstarWqvga.cbm sub_3544() parses its actorinfo field as:
      *   count, then repeated (tagged u32, tagged u8, tagged u8, len16+cstr, tagged i16).
      * The field name collides with later in-scene actorinfo, but the title-side
      * payload is a compact role-list entry table instead of the large player blob.
      */
-    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 1))
+    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, (u8)roleCount))
         return 0;
-    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, roleId))
-        return 0;
-    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, actorJob))
-        return 0;
-    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, actorSex))
-        return 0;
-    if (!vm_net_mock_seq_put_string(out, outCap, &pos, roleName))
-        return 0;
-    if (!vm_net_mock_seq_put_i16(out, outCap, &pos, roleLevel))
-        return 0;
+    for (u32 i = 0; i < roleCount; ++i)
+    {
+        vm_net_mock_role_state *role = &g_vm_net_mock_role_db.roles[i];
+        u8 actorJob = role->job;
+        u8 actorSex = (u8)(role->sex + 1);
+        u16 roleLevel = (u16)role->level;
+        if (actorJob == 0 || actorJob > 3)
+            actorJob = 1;
+        if (actorSex < 1 || actorSex > 2)
+            actorSex = 1;
+        if (roleLevel == 0)
+            roleLevel = 1;
+        if (!vm_net_mock_seq_put_u32(out, outCap, &pos, role->roleId))
+            return 0;
+        if (!vm_net_mock_seq_put_u8(out, outCap, &pos, actorJob))
+            return 0;
+        if (!vm_net_mock_seq_put_u8(out, outCap, &pos, actorSex))
+            return 0;
+        if (!vm_net_mock_seq_put_string(out, outCap, &pos, role->name))
+            return 0;
+        if (!vm_net_mock_seq_put_i16(out, outCap, &pos, roleLevel))
+            return 0;
+    }
 
     return pos;
 }
@@ -9648,6 +10118,10 @@ static bool vm_net_mock_append_login_success_object(u8 *out,
 {
     u8 actorInfo[512];
     u32 actorInfoLen = 0;
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 curExp = role ? role->exp : 0;
+    u32 lastExp = vm_net_mock_role_last_level_exp(curExp);
+    u32 percentExp = vm_net_mock_role_exp_percent(curExp);
 
     if (includeActorInfo)
     {
@@ -9681,11 +10155,11 @@ static bool vm_net_mock_append_login_success_object(u8 *out,
         if (!vm_net_mock_put_object_string(out, outCap, pos, "practiseinfo", ""))
             return false;
     }
-    if (!vm_net_mock_put_object_u32(out, outCap, pos, "lastexp", 0))
+    if (!vm_net_mock_put_object_u32(out, outCap, pos, "lastexp", lastExp))
         return false;
-    if (!vm_net_mock_put_object_u32(out, outCap, pos, "curexp", 0))
+    if (!vm_net_mock_put_object_u32(out, outCap, pos, "curexp", curExp))
         return false;
-    if (!vm_net_mock_put_object_u32(out, outCap, pos, "persentexp", 0))
+    if (!vm_net_mock_put_object_u32(out, outCap, pos, "persentexp", percentExp))
         return false;
     if (includeActorInfo)
     {
@@ -9980,13 +10454,15 @@ static u32 vm_net_mock_build_title_rolelist_wait_server_select_response(u8 *out,
 static u32 vm_net_mock_build_title_role_select_response(const u8 *request, u32 requestLen, u8 *out, u32 outCap)
 {
     u32 pos = 5;
-    u32 actorId = 10001;
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 actorId = role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID;
     u32 actorInfoLen = 0;
 
     if (outCap < pos)
         return 0;
 
     (void)vm_net_mock_get_object_u32_field(request, requestLen, "actorID", &actorId);
+    vm_net_mock_select_active_role(actorId);
 
     /* A minimal {result, actorID} subtype-6 ack is accepted by
      * role_manage_screen_handle_network(case 6), but as soon as subtype-15
@@ -10308,6 +10784,8 @@ static bool vm_net_mock_append_game_type_response_object(
     u8 requestType, u8 responseType, u8 responseSub)
 {
     u32 objectStart = 0;
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 money = role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY;
 
     if (request == NULL || requestLen < 8 || out == NULL || pos == NULL)
         return false;
@@ -10323,7 +10801,7 @@ static bool vm_net_mock_append_game_type_response_object(
             return false;
         if (!vm_net_mock_put_object_string(out, outCap, pos, "name", "Codex"))
             return false;
-        if (!vm_net_mock_put_object_u32(out, outCap, pos, "money", 0))
+        if (!vm_net_mock_put_object_u32(out, outCap, pos, "money", money))
             return false;
     }
     else if (requestType == 2)

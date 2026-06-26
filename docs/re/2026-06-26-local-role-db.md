@@ -1,0 +1,176 @@
+# 2026-06-26 Local Role DB
+
+## Goal
+
+Move mock-server player state from scattered constants/env defaults into a local
+server-side role database.
+
+Current contract:
+
+- store a role list locally, max 5 roles for the title role-list parser
+- persist HP, MP, money, scene, position, level, and total EXP
+- derive level as `exp / 100 + 1`
+- grant 10 EXP once per victorious monster battle settlement
+- keep the existing legacy position file as a compatibility mirror
+
+## IDA Evidence
+
+### Title Role List
+
+`mmTitleMstarWqvga.cbm:0x3544` parses the title `actorinfo` field as a compact
+role table:
+
+```text
+u8 count
+repeat count:
+  tagged u32 roleId
+  tagged u8 job
+  tagged u8 sex
+  string name
+  tagged i16 level
+```
+
+The parser clamps count to 5. It does not read HP, MP, money, scene, or position
+from this title payload.
+
+### Scene Actor Info
+
+`Jianghu OL.CBE:0x0100FA88` parses the scene/login `actorinfo` player blob.
+The mock keeps the recovered stream shape and now sources these fields from the
+active local role:
+
+```text
+roleId, job/visual, sex/visual, name,
+playerId, account/display,
+level/status word,
+hp, hpMax, mp, mpMax,
+exp summary,
+money/gap09C0,
+backpackCapacity,
+target/grid fields,
+actor resource,
+scene key,
+motion/grid words
+```
+
+### Scene Position
+
+`Jianghu OL.CBE:0x010396D6` and `0x01039890` parse scene-enter/change results
+with a scene string plus `posinfo`. Existing safe-position adjustment remains in
+place; the final safe scene/x/y now writes the active role record first, then
+mirrors to the legacy `jhol_mock_player_pos.bin`.
+
+### Battle Settlement
+
+`mmBattleMstarWqvga.cbm:0x743C` handles battle settlement object `1/4/7` and
+reads, in order:
+
+```text
+exp, lastexp, curexp, persentexp,
+energy, energymax, gold, level, result, bagstatus, hp, mp,
+itemnum, iteminfo, autorevive
+```
+
+Therefore EXP/level/gold/HP/MP must be sent in subtype 7, not guessed from a
+later scene fallback.
+
+## File Format
+
+Primary file:
+
+```text
+nvram/jhol_mock_roles.bin
+```
+
+Header:
+
+```text
+magic      "JHR1"
+version    1
+activeRoleId
+roleCount
+roles[5]
+```
+
+Role row:
+
+```text
+u32 roleId
+char name[32]
+u8 job
+u8 sex             // scene-side 0..1; title list sends sex+1
+u8 backpackCapacity
+u8 reserved
+u32 level          // normalized from exp
+u32 exp            // total EXP
+u32 hp, hpMax
+u32 mp, mpMax
+u32 money
+char scene[64]
+u16 x, y
+```
+
+Default role:
+
+```text
+roleId = 10001
+name = GBK bytes for the existing role name
+job = 1
+sex = 0
+hp/mp = 120/100
+money = 1000
+backpackCapacity = 40
+scene = default local Penglai scene
+position = 223,382 unless migrated from the legacy position file
+```
+
+Compatibility file:
+
+```text
+nvram/jhol_mock_player_pos.bin
+```
+
+When the role DB does not exist yet, the mock migrates this legacy position into
+the default role. New position saves update both files.
+
+## Server Behavior
+
+Login and scene enter:
+
+- `vm_net_mock_build_actor_info()` reads active role ID/name/job/sex/level,
+  HP/MP, EXP, money, backpack capacity, scene, and position.
+- `vm_net_mock_append_login_success_object()` sends `lastexp` as the current
+  level start, `curexp` as total EXP, and `persentexp` as EXP within the level.
+
+Title role list:
+
+- `vm_net_mock_build_title_role_list_actorinfo()` emits all stored roles up to
+  the client limit of 5.
+- role select updates `activeRoleId` when the requested role exists.
+
+Money sync:
+
+- shop `coolmoney`, group/type `money`, and generic game-type `money` read the
+  active role money.
+
+Battle:
+
+- battle start reads active role HP/MP/ID/name.
+- battle settlement applies reward only when the enemy HP is zero, player HP is
+  nonzero, and the current battle serial has not already been rewarded.
+- default monster reward is `10` EXP and `0` gold. `CBE_BATTLE_REWARD_EXP` and
+  `CBE_BATTLE_REWARD_GOLD` remain focused experiment overrides.
+
+## Validation
+
+The normal `make` link to `bin/main.exe` was blocked because the executable was
+in use. Since the Makefile does not track the included `src/mock-server.c`, the
+current source was validated with:
+
+```text
+gcc -g -w -c src/main.c -o obj/main.codex.o
+```
+
+That temporary object compiled successfully. A same-command temporary link to
+`bin/main.codex-build.exe` also succeeded. The temporary object and exe were
+removed afterward.
