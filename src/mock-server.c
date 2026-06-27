@@ -3765,19 +3765,61 @@ static void vm_net_mock_role_db_path(char *path, size_t pathSize)
     snprintf(path, pathSize, "nvram/jhol_mock_roles.bin");
 }
 
+static u32 vm_net_mock_role_level_start_exp(u32 level)
+{
+    unsigned long long a = (unsigned long long)(level - 1);
+    unsigned long long b = (unsigned long long)level;
+    unsigned long long startExp;
+
+    if (level <= 1)
+        return 0;
+    if ((a & 1ull) == 0)
+        a /= 2;
+    else
+        b /= 2;
+    if (a != 0 && b > 0xffffffffull / a)
+        return 0xffffffffu;
+    startExp = a * b;
+    if (startExp > 0xffffffffull / VM_NET_MOCK_ROLE_EXP_PER_LEVEL)
+        return 0xffffffffu;
+    startExp *= VM_NET_MOCK_ROLE_EXP_PER_LEVEL;
+    if (startExp > 0xffffffffull)
+        return 0xffffffffu;
+    return (u32)startExp;
+}
+
 static u32 vm_net_mock_role_level_from_exp(u32 exp)
 {
-    return exp / VM_NET_MOCK_ROLE_EXP_PER_LEVEL + 1;
+    u32 level = 1;
+
+    for (;;)
+    {
+        u32 nextLevel = level + 1;
+        u32 nextLevelStart;
+
+        if (nextLevel == 0)
+            break;
+        nextLevelStart = vm_net_mock_role_level_start_exp(nextLevel);
+        if (nextLevelStart == 0xffffffffu || exp < nextLevelStart)
+            break;
+        level = nextLevel;
+    }
+
+    return level;
 }
 
 static u32 vm_net_mock_role_last_level_exp(u32 exp)
 {
-    return (exp / VM_NET_MOCK_ROLE_EXP_PER_LEVEL) * VM_NET_MOCK_ROLE_EXP_PER_LEVEL;
+    return vm_net_mock_role_level_start_exp(vm_net_mock_role_level_from_exp(exp));
 }
 
 static u32 vm_net_mock_role_exp_percent(u32 exp)
 {
-    return exp % VM_NET_MOCK_ROLE_EXP_PER_LEVEL;
+    u32 levelStart = vm_net_mock_role_last_level_exp(exp);
+
+    if (exp < levelStart)
+        return 0;
+    return exp - levelStart;
 }
 
 static const char *vm_net_mock_default_role_name(void)
@@ -4400,11 +4442,9 @@ static void vm_net_mock_role_apply_battle_settlement(u32 hp, u32 mp,
                                                      u32 *goldOut, u32 *hpOut, u32 *mpOut)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
-    u32 lastExp = 0;
 
     if (role == NULL)
         return;
-    lastExp = role->exp;
     if (hp > role->hpMax)
         hp = role->hpMax;
     if (mp > role->mpMax)
@@ -4417,7 +4457,7 @@ static void vm_net_mock_role_apply_battle_settlement(u32 hp, u32 mp,
     vm_net_mock_role_db_save("battle-settle");
 
     if (lastExpOut)
-        *lastExpOut = lastExp;
+        *lastExpOut = vm_net_mock_role_last_level_exp(role->exp);
     if (curExpOut)
         *curExpOut = role->exp;
     if (percentExpOut)
@@ -9396,8 +9436,8 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
                  (role ? role->hp : VM_NET_MOCK_ROLE_DEFAULT_HP);
     u32 roleMp = role ? role->mp : VM_NET_MOCK_ROLE_DEFAULT_MP;
     u32 statusExp = 0;
-    u32 statusLastExp = role ? role->exp : 0;
-    u32 statusCurExp = statusLastExp;
+    u32 statusCurExp = role ? role->exp : 0;
+    u32 statusLastExp = vm_net_mock_role_last_level_exp(statusCurExp);
     u16 statusPercentExp = (u16)vm_net_mock_role_exp_percent(statusCurExp);
     u32 statusGold = role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY;
     u32 statusLevel = role ? role->level : 1;

@@ -11,7 +11,9 @@ Current contract:
 - allow 0 persisted roles after deleting the last role; the title client then
   displays only its create-role sentinel row
 - persist HP, MP, money, scene, position, level, total EXP, and backpack items
-- derive level as `exp / 100 + 1`
+- derive level from cumulative EXP thresholds: level 2 starts at 100 EXP,
+  level 3 at 300 EXP, level 4 at 600 EXP, and each next level costs 100 more
+  than the previous level
 - grant 10 EXP once per victorious monster battle settlement
 - keep position and backpack state in the selected role row; do not use legacy
   mock-wide position or backpack state as a source of truth
@@ -155,6 +157,9 @@ Login and scene enter:
 
 - `vm_net_mock_build_actor_info()` reads active role ID/name/job/sex/level,
   HP/MP, EXP, money, backpack capacity, scene, and position.
+- role level is normalized from total EXP on load/save paths. The threshold for
+  level `N` is `100 * (N - 1) * N / 2`; the EXP required from level `N` to
+  `N + 1` is `N * 100`.
 - scene/login actorinfo uses the active role name for its role name, display
   name, and short label defaults so map-side role information matches title
   selection.
@@ -203,6 +208,9 @@ Battle:
 - battle start reads active role HP/MP/ID/name.
 - battle settlement applies reward only when the enemy HP is zero, player HP is
   nonzero, and the current battle serial has not already been rewarded.
+- battle settlement sends `lastexp` as the current level threshold after the
+  reward, `curexp` as total EXP after the reward, and `persentexp` as progress
+  within the current level.
 - default monster reward is `10` EXP and `0` gold. `CBE_BATTLE_REWARD_EXP` and
   `CBE_BATTLE_REWARD_GOLD` remain focused experiment overrides.
 

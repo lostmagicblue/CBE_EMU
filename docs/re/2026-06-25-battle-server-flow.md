@@ -270,7 +270,8 @@ Minimum server fix:
 - choose terminal action actor by HP-zero side: enemy slot for victory, player
   slot for defeat
 - send subtype 7 settlement with `exp`, `lastexp`, `curexp`, and visible reward
-  defaults
+  defaults; `lastexp` is the current level start threshold after reward,
+  `curexp` is total EXP after reward, and `persentexp` is current-level progress
 - use negative two's-complement HP deltas in subtype `4/6`; positive values heal
 
 ## unknowns
