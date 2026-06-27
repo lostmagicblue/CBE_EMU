@@ -17,8 +17,10 @@ Status: implemented for shop open, DSH-backed catalog paging, shop-friendly cata
 | binary | function/address | reason | findings |
 | --- | --- | --- | --- |
 | `mmShopMstarWqvga.cbm` | `sub_11F0` / `0x11F0` | shop-open request builder | Builds `WT 1/1/14(actorId)` when the NPC dialog opens the buy branch. |
+| `mmShopMstarWqvga.cbm` | `sub_162C` / `0x162C` | shop actor-query loading path | Sets the shop loading flag at `[r9+10344]+16`, then calls `sub_11F0`. This path does not issue the `14/5` and `14/6` page requests before waiting for the actor-query response. |
 | `mmShopMstarWqvga.cbm` | `sub_1038` / `0x1038` | shop init | Registers `sub_9DE` as the network parser, zeros the two page-state structs at `r9+10792`, then immediately sends `sub_618(0,5)` and `sub_618(1,6)`. |
-| `mmShopMstarWqvga.cbm` | `sub_9DE` / `0x9DE` | shop-open/network parser | Iterates response objects. For kind `14`: subtype `14` reads `result` and `shopinfo`; subtype `4` reads `coolmoney` and `ticket`; subtype `5..13` calls the item-page parser; subtype `3` reads `seq` and `result` for buy completion. For kind `1` subtype `14`, it reads revive/ruffian/type fields, so echoing the request is the wrong contract for opening a shop. |
+| `mmShopMstarWqvga.cbm` | `sub_9DE` / `0x9DE` | shop-open/network parser | Iterates response objects. For kind `14`: subtype `14` reads `result` and `shopinfo`; subtype `4` reads `coolmoney` and `ticket`; subtype `5..13` calls the item-page parser; subtype `3` reads `seq` and `result` for buy completion. For kind `1` subtype `14`, it reads `revivetype` / `ruffianflag` / `type`, calls the shared `actorinfo` parser, clears the shop loading flag, and immediately returns, so this status object must be last when bundled with page objects. |
+| `江湖OL.CBE` | `parse_actorinfo_response` / `0x0100FA88` | actor-state payload parser | The `mmShop:0x9DE` `1/1/14` branch reaches this parser. If the response object has no `actorinfo` blob, the stream reader is initialized with a null buffer and crashes at `stream_read_i32_be_tagged_impl(0x01033A68)`. |
 | `mmShopMstarWqvga.cbm` | `sub_7BC` / `0x7BC` | shop item page parser | Reads `totalnum`, then raw `iteminfo`: row count, item id, item name, small flags, price, stock/count, another flag, and the shared item extra block. |
 | `mmShopMstarWqvga.cbm` | `sub_618` / `0x618` | shop page request builder | Builds `WT 1/14/<subtype>` with an `index` byte. This is the paging path for subtypes `5..13`; subtype `5` is the buy catalog used by this mock. |
 | `mmGameMstarWqvga.cbm` | `sub_418C` / `0x418C` | shop/backpack item-list parser | The `17/1` branch opens `item.dsh` and `equip.dsh`, reads raw `iteminfo` as `row_count` followed by `itemId + common item-extra`, allocates `324 * row_count`, sorts rows by item id, and fills display data from local DSH rows. If the DSH open/lookup fails, the UI still has selectable rows but names/prices remain blank. |
@@ -44,7 +46,13 @@ Status: implemented for shop open, DSH-backed catalog paging, shop-friendly cata
 - WT objects:
   - `1/14/14 { result=1, shopinfo="Codex Shop" }`
   - `1/14/4 { coolmoney=999999, ticket=0 }`
-- Catalog pages are not bundled into the open response. `mmShop:0x1038` clears page state and immediately calls `sub_618(0,5)` / `sub_618(1,6)`, so page rows are answered only through the request-driven `1/14/<subtype>(index)` path.
+  - `1/14/5 { totalnum=<catalog count>, iteminfo=<catalog page 0 rows> }`
+  - `1/14/6 { totalnum=0, iteminfo=<row_count 0> }`
+  - `1/1/14 { revivetype=0, ruffianflag=0, type=0, actorinfo=<current-role actorinfo blob> }`
+- Runtime negative after entering the shop and returning showed `WT 1/1/14(actorId)` followed by only the `builtin-shop-actor-query14` response, with no subsequent `1/14/5` or `1/14/6` page requests. IDA confirms `mmShop:0x162C` only sets the loading flag and calls `sub_11F0`, so the actor-query response now includes the first page inline.
+- The final `1/1/14` object is not an echo of the request. It is an actor-state status object for `mmShop:0x9DE`; placing it before the `14/5` page would stop the parser before item rows are consumed.
+- Negative runtime: sending only `revivetype/ruffianflag/type` in the final `1/1/14` object crashed with `pc=01033A68 lr=0100FAC5`, proving the `actorinfo` blob is mandatory for this branch.
+- The standalone `1/14/<subtype>(index)` page path remains supported for `mmShop:0x1038/sub_618` and later paging.
 - Catalog page size: `10` rows per page response.
 
 ### Shop Catalog Source
@@ -144,9 +152,10 @@ Status: implemented for shop open, DSH-backed catalog paging, shop-friendly cata
 ## 4. Implementation
 
 - Replaced the old `1/1/14(actorId)` echo with `vm_net_mock_build_shop_actor_query14_response()`:
-  - returns only the `14/14 + 14/4` shop-open object family;
-  - leaves catalog rows to the client-driven `1/14/<subtype>(index)` requests emitted by `mmShop:0x1038/sub_618`;
-  - logs `mock_shop_open14 ... pages=request-driven evidence=mmShop:0x11F0/0x1038/0x618/0x9DE`.
+  - returns the `14/14 + 14/4 + 14/5 + 14/6 + 1/1/14` shop-open object family;
+  - appends the `1/1/14` actor-state status with current-role `actorinfo` last, because `mmShop:0x9DE` clears loading and returns from that branch;
+  - keeps standalone catalog rows available through the client-driven `1/14/<subtype>(index)` requests emitted by `mmShop:0x1038/sub_618`;
+  - logs `mock_shop_open14 ... pages=inline actor_state=last evidence=runtime:no-page-followup-after-1/1/14 mmShop:0x162C/0x11F0/0x9DE/0x7BC`.
 - Added a lazy DSH catalog loader for `item.dsh` and `equip.dsh`.
 - Added host-side `.dsh` lookup compatibility in `src/vmFunc.c`:
   - ordinary read-only file open for bare `item.dsh/equip.dsh` tries `JHOnlineData/<name>`;

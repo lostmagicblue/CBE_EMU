@@ -2483,6 +2483,7 @@ static vm_net_mock_role_state *vm_net_mock_active_role(void);
 static u32 vm_net_mock_role_level_from_exp(u32 exp);
 static u32 vm_net_mock_role_exp_percent(u32 exp);
 static u32 vm_net_mock_role_last_level_exp(u32 exp);
+static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap);
 
 static u8 vm_net_mock_role_backpack_count(const vm_net_mock_role_state *role)
 {
@@ -3126,6 +3127,37 @@ static bool vm_net_mock_append_shop_money4_object(u8 *out, u32 outCap, u32 *pos)
     if (!vm_net_mock_put_object_u32(out, outCap, pos, "ticket", 0))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
+static bool vm_net_mock_append_shop_actor_state14_object(u8 *out, u32 outCap, u32 *pos,
+                                                         u32 *actorInfoLenOut)
+{
+    u32 objectStart = 0;
+    u8 actorInfo[512];
+    u32 actorInfoLen = 0;
+
+    if (actorInfoLenOut)
+        *actorInfoLenOut = 0;
+
+    memset(actorInfo, 0, sizeof(actorInfo));
+    actorInfoLen = vm_net_mock_build_actor_info(actorInfo, sizeof(actorInfo));
+    if (actorInfoLen == 0 || actorInfoLen > 0xffff)
+        return false;
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 1, 14, &objectStart))
+        return false;
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "revivetype", 0))
+        return false;
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "ruffianflag", 0))
+        return false;
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "type", 0))
+        return false;
+    if (!vm_net_mock_put_object_entry(out, outCap, pos, "actorinfo", actorInfo, (u16)actorInfoLen))
+        return false;
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    if (actorInfoLenOut)
+        *actorInfoLenOut = actorInfoLen;
     return true;
 }
 
@@ -10984,12 +11016,20 @@ static u32 vm_net_mock_build_shop_actor_query14_response(const u8 *request, u32 
     u32 offset = 4;
     u32 actorId = 0;
     u32 pos = 5;
+    u32 page5Index = 0;
+    u32 totalItems = 0;
+    u32 pageRows = 0;
+    u32 itemInfoLen = 0;
+    u32 actorInfoLen = 0;
+    char page5Ids[160];
     vm_net_mock_request_object object;
 
     /*
      * mmShopMstarWqvga.cbm:sub_11F0 sends WT 1/1/14(actorId) when the NPC
-     * shop "buy" branch opens. sub_9DE consumes the 14/14 status and 14/4
-     * money fields here; sub_1038/sub_618 then requests catalog pages by index.
+     * shop "buy" branch opens. Runtime return-from-shop evidence shows this
+     * request can arrive without the sub_1038/sub_618 14/5+14/6 follow-up page
+     * requests. sub_162C only marks the shop loading flag and calls sub_11F0,
+     * so return the first buy page inline with status/money for that path.
      */
     if (request == NULL || requestLen < 9 || out == NULL || outCap < pos)
         return 0;
@@ -11008,12 +11048,36 @@ static u32 vm_net_mock_build_shop_actor_query14_response(const u8 *request, u32 
         return 0;
     if (!vm_net_mock_append_shop_money4_object(out, outCap, &pos))
         return 0;
+    if (!vm_net_mock_append_shop_catalog_page_object(out, outCap, &pos, 5, page5Index,
+                                                    &totalItems, &pageRows, &itemInfoLen))
+        return 0;
+    if (!vm_net_mock_append_shop_empty_page14_object(out, outCap, &pos, 6))
+        return 0;
+    /*
+     * mmShop:0x9DE returns immediately after the 1/1/14 actor-state branch and
+     * clears the shop loading flag there, so keep this object last.
+     */
+    if (!vm_net_mock_append_shop_actor_state14_object(out, outCap, &pos, &actorInfoLen))
+        return 0;
 
-    vm_net_mock_finish_wt_packet(out, pos, 2);
+    vm_net_mock_finish_wt_packet(out, pos, 5);
     g_netMockShop17ListPending = 1;
-    printf("[info][network] mock_shop_open14 actorId=%u pages=request-driven\n", actorId);
-    vm_autotest_note("mock_shop_open14 actorId=%u pages=request-driven evidence=mmShop:0x11F0/0x1038/0x618/0x9DE\n",
-                     actorId);
+    vm_net_mock_format_shop_page_ids(page5Index, 8, page5Ids, sizeof(page5Ids));
+    printf("[info][network] mock_shop_open14 actorId=%u pages=inline actor_state=last page5=%u page6=0 total=%u rows=%u iteminfo_len=%u actorinfo_len=%u ids=%s\n",
+           actorId,
+           page5Index,
+           totalItems,
+           pageRows,
+           itemInfoLen,
+           actorInfoLen,
+           page5Ids);
+    vm_autotest_note("mock_shop_open14 actorId=%u pages=inline actor_state=last page5=%u items_total=%u page_rows=%u iteminfo_len=%u actorinfo_len=%u evidence=runtime:no-page-followup-after-1/1/14 mmShop:0x162C/0x11F0/0x9DE/0x7BC\n",
+                     actorId,
+                     page5Index,
+                     totalItems,
+                     pageRows,
+                     itemInfoLen,
+                     actorInfoLen);
     return pos;
 }
 
