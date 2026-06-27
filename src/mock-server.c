@@ -4652,11 +4652,19 @@ typedef struct
 
 static vm_net_mock_scene_change_target g_vm_net_mock_last_scene_change_target;
 static bool g_vm_net_mock_last_scene_change_target_valid = false;
+static u32 g_vm_net_mock_last_scene_change_target_serial = 0;
+static bool g_vm_net_mock_teleport_stone_subtype3_ack_sent = false;
+static bool g_vm_net_mock_teleport_stone_direct_enter_pending = false;
+static vm_net_mock_scene_change_target g_vm_net_mock_teleport_stone_confirm_target;
+static bool g_vm_net_mock_teleport_stone_confirm_target_valid = false;
 static bool g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
 static u8 g_vm_net_mock_last_scene_change_fb4_type = 1;
 static vm_net_mock_scene_change_target g_vm_net_mock_last_completed_scene_change_target;
 static bool g_vm_net_mock_last_completed_scene_change_target_valid = false;
 static u32 g_vm_net_mock_last_completed_scene_change_tick = 0;
+static char g_vm_net_mock_last_current_scene_reload_scene[64];
+static bool g_vm_net_mock_last_current_scene_reload_valid = false;
+static u32 g_vm_net_mock_last_current_scene_reload_tick = 0;
 
 static bool vm_net_mock_should_rearm_send_ready(void)
 {
@@ -5369,6 +5377,12 @@ static void vm_net_mock_remember_scene_change_target(const vm_net_mock_scene_cha
         return;
     g_vm_net_mock_last_scene_change_target = *target;
     g_vm_net_mock_last_scene_change_target_valid = true;
+    ++g_vm_net_mock_last_scene_change_target_serial;
+    if (g_vm_net_mock_last_scene_change_target_serial == 0)
+        g_vm_net_mock_last_scene_change_target_serial = 1;
+    printf("[info][network] mock_scene_target_remember serial=%u scene=%s pos=(%u,%u) exit=%u\n",
+           g_vm_net_mock_last_scene_change_target_serial,
+           target->scene, target->x, target->y, target->exitId);
 }
 
 static bool vm_net_mock_scene_change_targets_equal(const vm_net_mock_scene_change_target *a,
@@ -5409,6 +5423,42 @@ static bool vm_net_mock_is_recent_completed_scene_name(const char *scene, u32 wi
         return false;
     }
     return (g_schedulerTick - g_vm_net_mock_last_completed_scene_change_tick) < windowTicks;
+}
+
+static bool vm_net_mock_is_recent_current_scene_reload(const char *scene, u32 windowTicks)
+{
+    if (scene == NULL ||
+        !g_vm_net_mock_last_current_scene_reload_valid ||
+        !vm_net_mock_scene_names_equal_loose(scene, g_vm_net_mock_last_current_scene_reload_scene))
+    {
+        return false;
+    }
+    return (g_schedulerTick - g_vm_net_mock_last_current_scene_reload_tick) < windowTicks;
+}
+
+static void vm_net_mock_mark_current_scene_reload(const char *scene)
+{
+    if (scene == NULL || scene[0] == 0)
+        return;
+    snprintf(g_vm_net_mock_last_current_scene_reload_scene,
+             sizeof(g_vm_net_mock_last_current_scene_reload_scene),
+             "%s", scene);
+    g_vm_net_mock_last_current_scene_reload_valid = true;
+    g_vm_net_mock_last_current_scene_reload_tick = g_schedulerTick;
+}
+
+static bool vm_net_mock_scene_runtime_pending_without_target(void)
+{
+    u32 sceneObj = 0;
+    u8 pending = 0;
+
+    if (!Global_R9 || g_vm_net_mock_last_scene_change_target_valid)
+        return false;
+    if (uc_mem_read(MTK, Global_R9 + 0x54AC, &sceneObj, sizeof(sceneObj)) != UC_ERR_OK || sceneObj == 0)
+        return false;
+    if (uc_mem_read(MTK, Global_R9 + 0x5C6B, &pending, sizeof(pending)) != UC_ERR_OK)
+        return false;
+    return pending != 0;
 }
 
 static bool vm_net_mock_should_use_full_scene_bootstrap(const char *currentScene,
@@ -5850,9 +5900,9 @@ static u32 vm_net_mock_build_teleport_stone_list_response(u8 *out, u32 outCap)
     return pos;
 }
 
-static bool vm_net_mock_put_teleport_stone_scene_fields(u8 *out, u32 outCap, u32 *pos,
-                                                        u8 subtype,
-                                                        const vm_net_mock_scene_change_target *target)
+static bool vm_net_mock_put_teleport_stone_scene_fields_with_result(u8 *out, u32 outCap, u32 *pos,
+                                                                    u8 resultValue,
+                                                                    const vm_net_mock_scene_change_target *target)
 {
     u8 posInfo[8];
     u32 posInfoLen = 0;
@@ -5862,7 +5912,12 @@ static bool vm_net_mock_put_teleport_stone_scene_fields(u8 *out, u32 outCap, u32
     posInfoLen = vm_net_mock_build_pos_info(posInfo, sizeof(posInfo), target->x, target->y);
     if (posInfoLen == 0)
         return false;
-    if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", subtype == 3 ? 2 : 1))
+    /*
+     * mmGame:0x11CE reads result through JianghuOL:0x01033C6C, which returns
+     * value[2]. The field must therefore use the typed-u8 object encoding
+     * 00 01 xx; raw-u32 makes result read back as 0 and stalls 16/3 loading.
+     */
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", resultValue))
         return false;
     if (!vm_net_mock_put_object_string(out, outCap, pos, "scene", target->scene))
         return false;
@@ -5871,30 +5926,285 @@ static bool vm_net_mock_put_teleport_stone_scene_fields(u8 *out, u32 outCap, u32
     return vm_net_mock_put_object_u16(out, outCap, pos, "exitid", (u16)target->exitId);
 }
 
-static u32 vm_net_mock_build_teleport_stone_transfer_response(const u8 *request, u32 requestLen,
-                                                              u8 subtype, u8 *out, u32 outCap)
+static bool vm_net_mock_put_teleport_stone_scene_fields(u8 *out, u32 outCap, u32 *pos,
+                                                        u8 subtype,
+                                                        const vm_net_mock_scene_change_target *target)
+{
+    return vm_net_mock_put_teleport_stone_scene_fields_with_result(out, outCap, pos,
+                                                                   subtype == 3 ? 2 : 1,
+                                                                   target);
+}
+
+static bool vm_net_mock_append_scene_resource_followup_objects(u8 *out, u32 outCap, u32 *pos,
+                                                               u8 *objectCount, bool includeSkillBooks,
+                                                               bool includeTaskLists,
+                                                               bool includeActorOther, bool includeInfoBanner,
+                                                               bool includeFbTargetClear,
+                                                               bool includeFbTargetSeedOnly,
+                                                               bool preferSceneNpcOther);
+static bool vm_net_mock_append_scene_enter_object_for_scene(u8 *out, u32 outCap, u32 *pos,
+                                                            const char *sceneName, u16 spawnX, u16 spawnY);
+
+static bool vm_net_mock_append_mmgame_scene_transfer_object(u8 *out, u32 outCap, u32 *pos,
+                                                            u8 subtype,
+                                                            const vm_net_mock_scene_change_target *target)
+{
+    u32 objectStart = 0;
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 0x10, subtype, &objectStart))
+        return false;
+    if (!vm_net_mock_put_teleport_stone_scene_fields(out, outCap, pos, subtype, target))
+        return false;
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
+static bool vm_net_mock_append_mmgame_scene_transfer_object_with_result(u8 *out, u32 outCap, u32 *pos,
+                                                                        u8 subtype, u8 result,
+                                                                        const vm_net_mock_scene_change_target *target)
+{
+    u32 objectStart = 0;
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 0x10, subtype, &objectStart))
+        return false;
+    if (!vm_net_mock_put_teleport_stone_scene_fields_with_result(out, outCap, pos, result, target))
+        return false;
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
+static bool vm_net_mock_append_mmgame_scene_transfer_empty_object(u8 *out, u32 outCap, u32 *pos,
+                                                                  u8 subtype)
+{
+    u32 objectStart = 0;
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 0x10, subtype, &objectStart))
+        return false;
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
+static bool vm_net_mock_append_settings_unstuck_ack_object(u8 *out, u32 outCap, u32 *pos,
+                                                           u32 id)
+{
+    u32 objectStart = 0;
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 0x0c, 3, &objectStart))
+        return false;
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", 1))
+        return false;
+    if (!vm_net_mock_put_object_u16(out, outCap, pos, "id", (u16)id))
+        return false;
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
+static u32 vm_net_mock_build_mmgame_scene_transfer_start_response(const vm_net_mock_scene_change_target *target,
+                                                                  u8 *out, u32 outCap)
 {
     u32 pos = 5;
-    u32 objectStart = 0;
+
+    if (target == NULL || outCap < pos)
+        return 0;
+    if (!vm_net_mock_append_mmgame_scene_transfer_object(out, outCap, &pos, 3, target))
+        return 0;
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    printf("[info][network] mock_mmgame_scene_transfer_start scene=%s pos=(%u,%u) resp=%u\n",
+           target->scene, target->x, target->y, pos);
+    vm_autotest_note("mock_mmgame_scene_transfer_start scene=%s pos=(%u,%u) response=16/3 evidence=mmGame:0x11CE,0x0BCC\n",
+                     target->scene, target->x, target->y);
+    return pos;
+}
+
+static u32 vm_net_mock_build_scene_channel_enter_combo_for_target(const vm_net_mock_scene_change_target *target,
+                                                                  u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u8 objectCount = 0;
+
+    if (target == NULL || target->scene[0] == 0 || outCap < pos)
+        return 0;
+    if (!vm_net_mock_append_scene_enter_object_for_scene(out, outCap, &pos,
+                                                         target->scene, target->x, target->y))
+        return 0;
+    objectCount += 1;
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    return pos;
+}
+
+static bool vm_net_mock_is_settings_unstuck_request(const u8 *request, u32 requestLen, u32 *idOut)
+{
+    u32 offset = 4;
+    u32 id = 0;
+    vm_net_mock_request_object object;
+    bool matched = false;
+
+    if (idOut)
+        *idOut = 0;
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T')
+        return false;
+    while (vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+    {
+        if ((object.major == 0 || object.major == 1) &&
+            object.kind == 0x0c &&
+            object.subtype == 3 &&
+            (vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "id", &id) ||
+             vm_net_mock_request_contains(object.payload, object.payloadLen, "id")))
+        {
+            matched = true;
+            break;
+        }
+    }
+    if (!matched)
+        return false;
+    if (idOut)
+        *idOut = id;
+    return true;
+}
+
+static void vm_net_mock_get_current_scene_unstuck_target(vm_net_mock_scene_change_target *target)
+{
+    const char *scene = vm_net_mock_current_scene_name();
+
+    memset(target, 0, sizeof(*target));
+    if (!vm_net_mock_scene_name_is_safe(scene))
+        scene = vm_net_mock_default_scene_name();
+    snprintf(target->scene, sizeof(target->scene), "%s", scene);
+    target->x = vm_net_mock_scene_spawn_x();
+    target->y = vm_net_mock_scene_spawn_y();
+    (void)vm_net_mock_read_current_player_grid(NULL, NULL, &target->x, &target->y, NULL, NULL);
+    vm_net_mock_adjust_safe_player_pos_for_scene(target->scene, &target->x, &target->y);
+    target->exitId = 0;
+    target->mapType = 2;
+    target->hasSceEntry = true;
+    target->needsSceneDownload = false;
+}
+
+static u32 vm_net_mock_build_settings_unstuck_response(const u8 *request, u32 requestLen,
+                                                       u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u32 id = 0;
     vm_net_mock_scene_change_target target;
 
-    if (outCap < pos || (subtype != 2 && subtype != 3))
+    if (outCap < pos || !vm_net_mock_is_settings_unstuck_request(request, requestLen, &id))
         return 0;
-    vm_net_mock_get_teleport_stone_target(request, requestLen, &target);
 
-    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x10, subtype, &objectStart))
+    vm_net_mock_get_current_scene_unstuck_target(&target);
+    if (!vm_net_mock_append_settings_unstuck_ack_object(out, outCap, &pos, id))
         return 0;
-    if (!vm_net_mock_put_teleport_stone_scene_fields(out, outCap, &pos, subtype, &target))
+    if (!vm_net_mock_append_mmgame_scene_transfer_object(out, outCap, &pos, 3, &target))
         return 0;
-    vm_net_mock_finish_wt_object(out, objectStart, pos);
-    vm_net_mock_finish_wt_packet(out, pos, 1);
+    vm_net_mock_finish_wt_packet(out, pos, 2);
 
     vm_net_mock_remember_scene_change_target(&target);
     g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
     g_vm_net_mock_last_scene_change_fb4_type = 1;
-    vm_net_mock_save_player_pos_state(target.scene, target.x, target.y, "teleport-stone-target");
-    vm_autotest_note("mock_teleport_stone_transfer subtype=%u exit=%u scene=%s pos=(%u,%u) evidence=mmGame:0x11CE mmBattle:0x1868\n",
-                     subtype, target.exitId, target.scene, target.x, target.y);
+    vm_net_mock_save_player_pos_state(target.scene, target.x, target.y, "settings-unstuck-target");
+    printf("[info][network] mock_settings_unstuck id=%u scene=%s pos=(%u,%u) response=12/3+16/3 resp=%u\n",
+           id, target.scene, target.x, target.y, pos);
+    vm_autotest_note("mock_settings_unstuck id=%u scene=%s pos=(%u,%u) response=12/3+16/3 evidence=mmGame:0x5BCA,0x6512,0x11CE,0x0BCC\n",
+                     id, target.scene, target.x, target.y);
+    return pos;
+}
+
+static u32 vm_net_mock_build_teleport_stone_transfer_response(const u8 *request, u32 requestLen,
+                                                              u8 subtype, u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    vm_net_mock_scene_change_target target;
+    bool targetAlreadyPending = false;
+    bool shouldRearmTarget = false;
+    bool targetFromConfirm = false;
+    const char *responseKind = "16/3-scene";
+
+    if (outCap < pos || (subtype != 2 && subtype != 3))
+        return 0;
+
+    if (subtype == 2)
+    {
+        vm_net_mock_get_teleport_stone_target(request, requestLen, &target);
+        if (!vm_net_mock_append_mmgame_scene_transfer_object_with_result(out, outCap, &pos,
+                                                                         2, 2, &target))
+            return 0;
+        vm_net_mock_finish_wt_packet(out, pos, 1);
+        g_vm_net_mock_teleport_stone_confirm_target = target;
+        g_vm_net_mock_teleport_stone_confirm_target_valid = true;
+        g_vm_net_mock_teleport_stone_subtype3_ack_sent = false;
+        g_vm_net_mock_teleport_stone_direct_enter_pending = false;
+        responseKind = "16/2-confirm-target";
+        printf("[info][network] mock_teleport_stone_transfer subtype=%u exit=%u scene=%s pos=(%u,%u) response=%s pending=0 confirm=1 resp=%u\n",
+               subtype, target.exitId, target.scene, target.x, target.y,
+               responseKind, pos);
+        vm_autotest_note("mock_teleport_stone_transfer subtype=%u exit=%u scene=%s pos=(%u,%u) response=%s pending=0 confirm=1 evidence=mmGame:0x11CE/0x24A8\n",
+                         subtype, target.exitId, target.scene, target.x, target.y,
+                         responseKind);
+        return pos;
+    }
+
+    if (g_vm_net_mock_teleport_stone_confirm_target_valid)
+    {
+        target = g_vm_net_mock_teleport_stone_confirm_target;
+        g_vm_net_mock_teleport_stone_confirm_target_valid = false;
+        targetFromConfirm = true;
+    }
+    else if (g_vm_net_mock_last_scene_change_target_valid)
+    {
+        target = g_vm_net_mock_last_scene_change_target;
+        targetAlreadyPending = true;
+    }
+    else
+    {
+        vm_net_mock_get_teleport_stone_target(request, requestLen, &target);
+    }
+
+    if (targetAlreadyPending)
+    {
+        if (g_vm_net_mock_teleport_stone_subtype3_ack_sent)
+        {
+            if (!vm_net_mock_append_mmgame_scene_transfer_empty_object(out, outCap, &pos, subtype))
+                return 0;
+            vm_net_mock_finish_wt_packet(out, pos, 1);
+            responseKind = "16/3-duplicate-noop";
+        }
+        else
+        {
+            pos = vm_net_mock_build_scene_channel_enter_combo_for_target(&target, out, outCap);
+            if (pos == 0)
+                return 0;
+            g_vm_net_mock_teleport_stone_subtype3_ack_sent = true;
+            g_vm_net_mock_teleport_stone_direct_enter_pending = true;
+            shouldRearmTarget = true;
+            responseKind = "scene-channel-enter-saved-target";
+        }
+    }
+    else
+    {
+        pos = vm_net_mock_build_scene_channel_enter_combo_for_target(&target, out, outCap);
+        if (pos == 0)
+            return 0;
+        g_vm_net_mock_teleport_stone_subtype3_ack_sent = true;
+        g_vm_net_mock_teleport_stone_direct_enter_pending = true;
+        responseKind = targetFromConfirm ? "scene-channel-enter-confirm-target" : "scene-channel-enter";
+    }
+
+    if (!targetAlreadyPending || shouldRearmTarget)
+        vm_net_mock_remember_scene_change_target(&target);
+    g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+    g_vm_net_mock_last_scene_change_fb4_type = 1;
+    if (!targetAlreadyPending)
+        vm_net_mock_save_player_pos_state(target.scene, target.x, target.y, "teleport-stone-target");
+    printf("[info][network] mock_teleport_stone_transfer subtype=%u exit=%u scene=%s pos=(%u,%u) response=%s pending=%u confirm=%u resp=%u\n",
+           subtype, target.exitId, target.scene, target.x, target.y,
+           responseKind,
+           targetAlreadyPending ? 1u : 0u,
+           targetFromConfirm ? 1u : 0u,
+           pos);
+    vm_autotest_note("mock_teleport_stone_transfer subtype=%u exit=%u scene=%s pos=(%u,%u) response=%s pending=%u confirm=%u evidence=JianghuOL:0x01012E4D/0x01039B8A/0x010396D6\n",
+                     subtype, target.exitId, target.scene, target.x, target.y,
+                     responseKind,
+                     targetAlreadyPending ? 1u : 0u,
+                     targetFromConfirm ? 1u : 0u);
     return pos;
 }
 
@@ -5930,30 +6240,15 @@ static u32 vm_net_mock_build_teleport_stone_map_transfer_response(const u8 *requ
 
 static bool vm_net_mock_is_teleport_stone_post_enter_combo_request(const u8 *request, u32 requestLen)
 {
-    u32 offset = 4;
-    vm_net_mock_request_object object;
-
     if (!g_vm_net_mock_last_scene_change_target_valid ||
         request == NULL || requestLen < 19 ||
         request[0] != 'W' || request[1] != 'T')
     {
         return false;
     }
-    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
-        return false;
-    if (object.major != 1 || object.kind != 0x1b || object.subtype != 11 || object.payloadLen != 0)
-        return false;
-    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
-        return false;
-    if (object.major != 1 || object.kind != 0x0c || object.subtype != 1 || object.payloadLen != 0)
-        return false;
-    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
-        return false;
-    if (object.major != 1 || object.kind != 7 || object.subtype != 42 || object.payloadLen != 0)
-        return false;
-    if (vm_net_mock_next_request_object(request, requestLen, &offset, &object))
-        return false;
-    return offset == requestLen;
+    return vm_net_mock_request_contains_object(request, requestLen, 1, 0x1b, 11) &&
+           vm_net_mock_request_contains_object(request, requestLen, 1, 0x0c, 1) &&
+           vm_net_mock_request_contains_object(request, requestLen, 1, 7, 42);
 }
 
 static u32 vm_net_mock_build_teleport_stone_post_enter_combo_response(const u8 *request, u32 requestLen,
@@ -5987,8 +6282,12 @@ static u32 vm_net_mock_build_teleport_stone_post_enter_combo_response(const u8 *
     vm_net_mock_mark_completed_scene_change_target(&target);
     vm_net_mock_save_player_pos_state(target.scene, target.x, target.y, "teleport-stone-post-enter");
     g_vm_net_mock_last_scene_change_target_valid = false;
+    g_vm_net_mock_teleport_stone_subtype3_ack_sent = false;
+    g_vm_net_mock_teleport_stone_direct_enter_pending = false;
     g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
-    vm_autotest_note("mock_teleport_stone_post_enter scene=%s pos=(%u,%u) objects=%u evidence=runtime:27/11+12/1+7/42\n",
+    printf("[info][network] mock_teleport_stone_post_enter scene=%s pos=(%u,%u) objects=%u resp=%u\n",
+           target.scene, target.x, target.y, objectCount, pos);
+    vm_autotest_note("mock_teleport_stone_post_enter scene=%s pos=(%u,%u) objects=%u evidence=runtime:contains-27/11+12/1+7/42\n",
                      target.scene, target.x, target.y, objectCount);
     return pos;
 }
@@ -6131,6 +6430,98 @@ static bool vm_net_mock_append_type1_object(u8 *out, u32 outCap, u32 *pos, u8 np
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
     return true;
+}
+
+static bool vm_net_mock_is_role_action23_request(const u8 *request, u32 requestLen, u32 *idOut)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+    u32 id = 0;
+
+    if (idOut)
+        *idOut = 0;
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T')
+        return false;
+    while (vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+    {
+        if (object.major == 1 && object.kind == 0x0a && object.subtype == 23)
+        {
+            (void)vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "id", &id);
+            if (idOut)
+                *idOut = id;
+            return true;
+        }
+    }
+    return false;
+}
+
+static u32 vm_net_mock_build_role_action23_response(const u8 *request, u32 requestLen,
+                                                    u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u32 id = 0;
+
+    if (outCap < pos || !vm_net_mock_is_role_action23_request(request, requestLen, &id))
+        return 0;
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x0a, 23, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
+        return 0;
+    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "id", id))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    printf("[info][network] mock_role_action23 id=%u resp=%u\n", id, pos);
+    vm_autotest_note("mock_role_action23 id=%u response=10/23 result=1 evidence=xxjh:0x103C830 field=id\n",
+                     id);
+    return pos;
+}
+
+static bool vm_net_mock_is_scene_ctrl_page_request(const u8 *request, u32 requestLen, u32 *pageOut)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+    u32 page = 0;
+
+    if (pageOut)
+        *pageOut = 0;
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T')
+        return false;
+    while (vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+    {
+        if (object.major == 1 && object.kind == 2 && object.subtype == 7)
+        {
+            (void)vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "pgIdx", &page);
+            if (pageOut)
+                *pageOut = page;
+            return true;
+        }
+    }
+    return false;
+}
+
+static u32 vm_net_mock_build_scene_ctrl_page_response(const u8 *request, u32 requestLen,
+                                                      u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u32 page = 0;
+
+    if (outCap < pos || !vm_net_mock_is_scene_ctrl_page_request(request, requestLen, &page))
+        return 0;
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 2, 7, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
+        return 0;
+    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "pgIdx", page))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    printf("[info][network] mock_scene_ctrl_page pgIdx=%u resp=%u\n", page, pos);
+    vm_autotest_note("mock_scene_ctrl_page pgIdx=%u response=2/7 result=1 evidence=xxjh:0x103014C\n",
+                     page);
+    return pos;
 }
 
 static bool vm_net_mock_append_misc_player_sync8_object(u8 *out, u32 outCap, u32 *pos)
@@ -7290,6 +7681,8 @@ static u32 vm_net_mock_build_scene_change_post_enter_followup_response(const u8 
     vm_net_mock_mark_completed_scene_change_target(&target);
     g_vm_net_mock_last_scene_change_target_valid = false;
     g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+    printf("[info][network] mock_scene_change_post_enter_followup scene=%s pos=(%u,%u) objects=%u resp=%u\n",
+           target.scene, target.x, target.y, objectCount, pos);
     return pos;
 }
 
@@ -7314,6 +7707,152 @@ static bool vm_net_mock_is_actor_other_scene_default_combo_request(const u8 *req
     if (vm_net_mock_next_request_object(request, requestLen, &offset, &object))
         return false;
     return offset == requestLen;
+}
+
+static bool vm_net_mock_is_short_scene_default_event_request(const u8 *request, u32 requestLen)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+
+    if (request == NULL || requestLen < 9)
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        return false;
+    if (object.major != 1 || object.kind != 0x19 || object.subtype != 5 || object.payloadLen != 0)
+        return false;
+    if (vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        return false;
+    return offset == requestLen;
+}
+
+static u32 vm_net_mock_build_current_scene_reload_response(const u8 *request, u32 requestLen,
+                                                           u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u8 objectCount = 0;
+    const char *scene = NULL;
+    u16 x = 0;
+    u16 y = 0;
+    bool isReloadTrigger = false;
+
+    if (outCap < pos)
+        return 0;
+    isReloadTrigger = vm_net_mock_is_short_scene_default_event_request(request, requestLen) ||
+                      vm_net_mock_is_actor_other_scene_default_combo_request(request, requestLen);
+    if (!isReloadTrigger || !vm_net_mock_scene_runtime_pending_without_target())
+        return 0;
+
+    scene = vm_net_mock_current_scene_name();
+    if (scene == NULL ||
+        scene[0] == 0 ||
+        vm_net_mock_is_recent_current_scene_reload(scene, 90) ||
+        vm_net_mock_is_recent_completed_scene_name(scene, 90))
+    {
+        return 0;
+    }
+    x = vm_net_mock_scene_spawn_x();
+    y = vm_net_mock_scene_spawn_y();
+    (void)vm_net_mock_read_current_player_grid(NULL, NULL, &x, &y, NULL, NULL);
+    vm_net_mock_adjust_safe_player_pos_for_scene(scene, &x, &y);
+
+    /*
+     * mmGame menu "脱离卡死" re-enters the current scene without a portal
+     * target. In that state the client emits the default scene event family,
+     * but the old empty 25/5 ack leaves the new scene screen on loading.
+     * Reuse the first-scene resource family and finish with 30/1 so
+     * scene_handle_enter_with_scene_pos() can load the current map normally.
+     */
+    if (!vm_net_mock_append_scene_resource_followup_objects(out, outCap, &pos, &objectCount,
+                                                           true, true, true, true,
+                                                           false, false, false))
+        return 0;
+    if (!vm_net_mock_append_scene_enter_object_for_scene(out, outCap, &pos, scene, x, y))
+        return 0;
+    objectCount += 1;
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    vm_net_mock_mark_current_scene_reload(scene);
+    vm_net_mock_save_player_pos_state(scene, x, y, "scene-current-reload");
+    printf("[info][network] mock_scene_current_reload scene=%s pos=(%u,%u) objects=%u resp=%u\n",
+           scene, x, y, objectCount, pos);
+    vm_autotest_note("mock_scene_current_reload scene=%s pos=(%u,%u) trigger=%s objects=%u evidence=mmGame:0x24E6 JianghuOL:0x10396D6\n",
+                     scene,
+                     x,
+                     y,
+                     vm_net_mock_is_actor_other_scene_default_combo_request(request, requestLen) ? "2/10+25/5" : "25/5",
+                     objectCount);
+    return pos;
+}
+
+static bool vm_net_mock_is_mmgame_scene_transfer_followup_request(const u8 *request, u32 requestLen)
+{
+    if (!g_vm_net_mock_last_scene_change_target_valid)
+        return false;
+    if (g_vm_net_mock_teleport_stone_direct_enter_pending)
+        return false;
+    return vm_net_mock_request_contains_object(request, requestLen, 1, 0x19, 5);
+}
+
+static u32 vm_net_mock_build_mmgame_scene_transfer_followup_response(const u8 *request, u32 requestLen,
+                                                                     u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u8 objectCount = 0;
+    vm_net_mock_scene_change_target target;
+
+    if (outCap < pos || !vm_net_mock_is_mmgame_scene_transfer_followup_request(request, requestLen))
+        return 0;
+    target = g_vm_net_mock_last_scene_change_target;
+
+    if (!vm_net_mock_append_scene_resource_followup_objects(out, outCap, &pos, &objectCount,
+                                                           true, true, true, true,
+                                                           false, false, false))
+        return 0;
+    if (!vm_net_mock_append_scene_enter_object_for_scene(out, outCap, &pos,
+                                                         target.scene, target.x, target.y))
+        return 0;
+    objectCount += 1;
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+
+    vm_net_mock_mark_completed_scene_change_target(&target);
+    vm_net_mock_save_player_pos_state(target.scene, target.x, target.y, "mmgame-scene-transfer-followup");
+    g_vm_net_mock_last_scene_change_target_valid = false;
+    g_vm_net_mock_teleport_stone_subtype3_ack_sent = false;
+    g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+    printf("[info][network] mock_mmgame_scene_transfer_followup scene=%s pos=(%u,%u) objects=%u resp=%u\n",
+           target.scene, target.x, target.y, objectCount, pos);
+    vm_autotest_note("mock_mmgame_scene_transfer_followup scene=%s pos=(%u,%u) objects=%u response=resources+30/1 evidence=JianghuOL:0x10396D6 runtime=post-mmGame-16/3\n",
+                     target.scene, target.x, target.y, objectCount);
+    return pos;
+}
+
+static bool vm_net_mock_is_short_wt_control_packet(const u8 *request, u32 requestLen,
+                                                   u8 kind, u8 subtype);
+
+static u32 vm_net_mock_build_teleport_stone_direct_enter_default_ack_response(const u8 *request,
+                                                                              u32 requestLen,
+                                                                              u8 *out,
+                                                                              u32 outCap)
+{
+    u32 len = 0;
+    vm_net_mock_scene_change_target target;
+
+    if (!g_vm_net_mock_teleport_stone_direct_enter_pending ||
+        !g_vm_net_mock_last_scene_change_target_valid ||
+        !vm_net_mock_is_short_wt_control_packet(request, requestLen, 0x19, 5))
+    {
+        return 0;
+    }
+
+    target = g_vm_net_mock_last_scene_change_target;
+    len = vm_net_mock_build_scene_default_event_response(out, outCap);
+    if (len == 0)
+        return 0;
+
+    printf("[info][network] mock_teleport_stone_direct_enter_ack scene=%s pos=(%u,%u) keep_pending=1 resp=%u\n",
+           target.scene, target.x, target.y, len);
+    vm_autotest_note("mock_teleport_stone_direct_enter_ack scene=%s pos=(%u,%u) keep_pending=1 response=25/5 evidence=runtime:post-30/1-short-default\n",
+                     target.scene, target.x, target.y);
+    return len;
 }
 
 static bool vm_net_mock_is_scene_resource_followup_request(const u8 *request, u32 requestLen)
@@ -10332,6 +10871,15 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
         vm_net_mock_mark_completed_scene_change_target(target);
         g_vm_net_mock_last_scene_change_target_valid = false;
         g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+        if (g_vm_net_mock_teleport_stone_direct_enter_pending)
+        {
+            g_vm_net_mock_teleport_stone_subtype3_ack_sent = false;
+            g_vm_net_mock_teleport_stone_direct_enter_pending = false;
+            printf("[info][network] mock_teleport_stone_direct_enter_followup scene=%s pos=(%u,%u) objects=%u resp=%u\n",
+                   target->scene, target->x, target->y, objectCount, pos);
+            vm_autotest_note("mock_teleport_stone_direct_enter_followup scene=%s pos=(%u,%u) objects=%u response=scene-task-subset evidence=runtime:post-30/1-task-subset\n",
+                             target->scene, target->x, target->y, objectCount);
+        }
     }
     if (seedSubsetNpcActorInfo)
     {
@@ -12116,6 +12664,27 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         }
     }
 
+    hookedLen = vm_net_mock_build_settings_unstuck_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-settings-unstuck", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_role_action23_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-role-action23", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_scene_ctrl_page_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-scene-ctrl-page", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
     hookedLen = vm_net_mock_build_response_from_rules(request, requestLen, out, outCap);
     if (hookedLen)
     {
@@ -12168,6 +12737,27 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     if (hookedLen)
     {
         vm_net_log_handled_packet("builtin-scene-change-post-enter-followup", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_mmgame_scene_transfer_followup_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-mmgame-scene-transfer-followup", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_teleport_stone_direct_enter_default_ack_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-teleport-stone-direct-enter-ack", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_current_scene_reload_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-scene-current-reload", request, requestLen, hookedLen);
         return hookedLen;
     }
 
@@ -12544,6 +13134,11 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
     bool closeAfterData = vm_net_mock_request_contains(request, readLen, "version") &&
                           !vm_net_mock_request_contains(request, readLen, "start") &&
                           vm_net_mock_has_installed_update();
+    u8 requestWtKind = 0;
+    u8 requestWtSubtype = 0;
+    bool haveWtHeader = vm_net_mock_get_wt_header_kind_subtype(request, readLen,
+                                                              &requestWtKind,
+                                                              &requestWtSubtype);
     /*
      * Empty 25/5 scene-default sends are emitted from inside the client's wait
      * callback. Dispatching the response reentrantly lets the callback clear
@@ -12554,19 +13149,40 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
     u32 responseEventType = 7;
 
     g_netMockResponseLen = vm_net_mock_build_response(request, readLen, g_netMockResponse, sizeof(g_netMockResponse));
+    /*
+     * Teleport-stone 16/3 now returns a main-business 30/1 scene-enter object.
+     * Keep it on the normal async queue; flushing it from inside the 16/3 send
+     * stack re-enters the scene screen before the caller has unwound, and the
+     * new screen then stalls before emitting its post-enter follow-up request.
+     */
     {
-        u8 wtKind = 0;
-        u8 wtSubtype = 0;
-        if (vm_net_mock_get_wt_header_kind_subtype(request, readLen, &wtKind, &wtSubtype))
+        const char *source = g_netLastHandledValid ? g_netLastHandledSource : "-";
+        if (haveWtHeader)
+        {
             vm_autotest_note("net_send connect=%u wt=%u/%u len=%u source=%s resp=%u\n",
-                             connectId, wtKind, wtSubtype, readLen,
-                             g_netLastHandledValid ? g_netLastHandledSource : "-",
+                             connectId, requestWtKind, requestWtSubtype, readLen,
+                             source,
                              g_netMockResponseLen);
+            if (g_netMockResponseLen ||
+                strstr(source, "settings") != NULL ||
+                strstr(source, "teleport") != NULL ||
+                strstr(source, "scene") != NULL ||
+                strstr(source, "mmgame") != NULL)
+            {
+                printf("[info][network] net_send connect=%u wt=%u/%u len=%u source=%s resp=%u\n",
+                       connectId, requestWtKind, requestWtSubtype, readLen, source, g_netMockResponseLen);
+            }
+        }
         else
+        {
             vm_autotest_note("net_send connect=%u malformed len=%u source=%s resp=%u\n",
                              connectId, readLen,
-                             g_netLastHandledValid ? g_netLastHandledSource : "-",
+                             source,
                              g_netMockResponseLen);
+            if (g_netMockResponseLen)
+                printf("[info][network] net_send connect=%u malformed len=%u source=%s resp=%u\n",
+                       connectId, readLen, source, g_netMockResponseLen);
+        }
     }
     g_netMockResponseOffset = 0;
     g_netUpLinkData += dataLen;
@@ -12581,10 +13197,22 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
     if (channel && channel->callback)
     {
         scheduler_queue_net_event(responseEventType, responsePtr, g_netMockResponseLen, g_netMockResponseLen, channel->callback, channel->context);
+        printf("[info][network] net_queue_data connect=%u event=%u resp=%u cb=%08x ctx=%08x depth=%u\n",
+               connectId, responseEventType, g_netMockResponseLen,
+               channel->callback, channel->context, g_netTaskDispatchDepth);
         if (immediateFlushAfterData && g_netTaskDispatchDepth == 0)
         {
+            g_netDebugReadWindow = 8;
             uc_err flushErr = scheduler_dispatch_net_tasks();
+            printf("[info][network] net_flush_data connect=%u wt=%u/%u resp=%u err=%u\n",
+                   connectId, requestWtKind, requestWtSubtype, g_netMockResponseLen, flushErr);
             (void)flushErr;
+        }
+        else if (immediateFlushAfterData)
+        {
+            printf("[info][network] net_flush_deferred connect=%u wt=%u/%u resp=%u depth=%u\n",
+                   connectId, requestWtKind, requestWtSubtype,
+                   g_netMockResponseLen, g_netTaskDispatchDepth);
         }
         if (closeAfterData)
         {
@@ -12598,12 +13226,31 @@ static u32 vm_net_mock_read_data(u32 dst, u32 dstLen)
     static u32 s_netReadObserveCount = 0;
     if (dst == 0 || dstLen == 0 || g_netMockResponseOffset >= g_netMockResponseLen)
     {
+        if (g_netDebugReadWindow)
+        {
+            printf("[info][network] net_read_empty dst=%08x ask=%u offset=%u total=%u window=%u\n",
+                   dst, dstLen, g_netMockResponseOffset, g_netMockResponseLen,
+                   g_netDebugReadWindow);
+            --g_netDebugReadWindow;
+        }
         return vm_set_call_result(0);
     }
 
     u32 remain = g_netMockResponseLen - g_netMockResponseOffset;
     u32 copyLen = dstLen < remain ? dstLen : remain;
     uc_mem_write(MTK, dst, g_netMockResponse + g_netMockResponseOffset, copyLen);
+    if (g_netDebugReadWindow)
+    {
+        u32 off = g_netMockResponseOffset;
+        printf("[info][network] net_read_data dst=%08x ask=%u copied=%u offset=%u total=%u head=%02x %02x %02x %02x %02x\n",
+               dst, dstLen, copyLen, off, g_netMockResponseLen,
+               off + 0 < g_netMockResponseLen ? g_netMockResponse[off + 0] : 0,
+               off + 1 < g_netMockResponseLen ? g_netMockResponse[off + 1] : 0,
+               off + 2 < g_netMockResponseLen ? g_netMockResponse[off + 2] : 0,
+               off + 3 < g_netMockResponseLen ? g_netMockResponse[off + 3] : 0,
+               off + 4 < g_netMockResponseLen ? g_netMockResponse[off + 4] : 0);
+        --g_netDebugReadWindow;
+    }
     g_netMockResponseOffset += copyLen;
     if (s_netReadObserveCount < 20)
     {

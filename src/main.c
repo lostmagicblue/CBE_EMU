@@ -247,6 +247,7 @@ static u8 g_loginTail42FlushPending = 0;
 static u32 g_netUpLinkData = 0;
 static u32 g_netDownLinkData = 0;
 static u32 g_netCurrentObject = 0;
+static u32 g_netDebugReadWindow = 0;
 static const u32 VM_GAME_NET_BUSINESS_CALLBACK = 0x01012e4d;
 static u8 g_lastStartupScreenState = 0xff;
 static void vm_autotest_note(const char *fmt, ...);
@@ -553,9 +554,28 @@ static int vm_screen_stack_find(u32 screen)
     return -1;
 }
 
+static int vm_screen_stack_find_related(u32 screen)
+{
+    int exact = vm_screen_stack_find(screen);
+    if (exact >= 0)
+        return exact;
+
+    for (u32 i = 0; i < g_screenStackCount; ++i)
+    {
+        u32 table = g_screenStack[i];
+        if (screen != 0 && screen + 0x18 == table)
+            return (int)i;
+        if (screen >= table && screen < table + 0x200)
+            return (int)i;
+        if (screen + 0x80 >= table && screen < table)
+            return (int)i;
+    }
+    return -1;
+}
+
 static u32 vm_screen_stack_lookup_module_base(u32 screen)
 {
-    int existing = vm_screen_stack_find(screen);
+    int existing = vm_screen_stack_find_related(screen);
     if (existing < 0)
         return 0;
     return g_screenStackModuleBase[(u32)existing];
@@ -640,7 +660,7 @@ static void vm_screen_stack_push(u32 screen, u32 moduleBase)
 
 static bool vm_screen_stack_remove(u32 screen, u32 *newTop, u32 *newTopModuleBase)
 {
-    int existing = vm_screen_stack_find(screen);
+    int existing = vm_screen_stack_find_related(screen);
     if (existing < 0)
     {
         if (newTop)
@@ -1208,6 +1228,12 @@ static uc_err scheduler_dispatch_net_tasks(void)
             g_netTaskDispatchDepth++;
             g_netTaskDispatchSlot = (int)i;
             DEBUG_PRINT("[probe_net_fire] event=%u r0=%x r1=%x r2=%x cb=%x ctx=%x tick=%u\n", taskEvent, taskR0, taskR1, taskR2, taskCallback, taskContext, g_schedulerTick);
+            if (g_netDebugReadWindow)
+            {
+                printf("[info][network] net_fire slot=%u event=%u r0=%08x r1=%u r2=%u cb=%08x ctx=%08x depth=%u\n",
+                       i, taskEvent, taskR0, taskR1, taskR2,
+                       taskCallback, taskContext, g_netTaskDispatchDepth);
+            }
             if (taskEvent == 7)
             {
                 if (task->downloadSnapshotValid && task->downloadSnapshotState == 2)
@@ -1217,6 +1243,12 @@ static uc_err scheduler_dispatch_net_tasks(void)
                 }
             }
             uc_err err = vm_call4_preserve_regs_clear_stack_args(taskCallback, taskR0, taskR1, taskR2, taskEvent);
+            if (g_netDebugReadWindow)
+            {
+                printf("[info][network] net_done slot=%u event=%u cb=%08x err=%u remaining_read=%u/%u\n",
+                       i, taskEvent, taskCallback, err,
+                       g_netMockResponseOffset, g_netMockResponseLen);
+            }
             g_netTaskDispatchDepth--;
             g_netTaskDispatchSlot = -1;
             if (err != UC_ERR_OK)
@@ -1268,6 +1300,7 @@ typedef struct
     u16 x;
     u16 y;
     u32 exitId;
+    u32 serial;
     u8 valid;
 } vm_scene_same_reenter_guard;
 
@@ -1290,6 +1323,7 @@ static bool vm_scene_same_reenter_matches_target(const vm_net_mock_scene_change_
 {
     return target != NULL &&
            g_sceneSameReenterGuard.valid &&
+           g_sceneSameReenterGuard.serial == g_vm_net_mock_last_scene_change_target_serial &&
            vm_net_mock_scene_names_equal_loose(g_sceneSameReenterGuard.scene, target->scene);
 }
 
@@ -1303,6 +1337,7 @@ static void vm_scene_same_reenter_remember_target(const vm_net_mock_scene_change
     g_sceneSameReenterGuard.x = target->x;
     g_sceneSameReenterGuard.y = target->y;
     g_sceneSameReenterGuard.exitId = target->exitId;
+    g_sceneSameReenterGuard.serial = g_vm_net_mock_last_scene_change_target_serial;
     g_sceneSameReenterGuard.valid = 1;
 }
 
@@ -1825,11 +1860,11 @@ void keyEvent(int type, int key)
     }
     else if (key == 0x71) // q
     {
-        skey = 15; // 左软
+        skey = 12; // 左软
     }
     else if (key == 0x65) // e
     {
-        skey = 16; // 右软
+        skey = 13; // 右软
     }
     else if (key == 0x7a) // z
     {
@@ -2985,6 +3020,204 @@ static void vm_autotest_note_shop_parser_pc(u32 pc)
                          pc, base, r9, buyBase, buyItem0, buyNameHex,
                          sellBase, sellItem0, sellNameHex, seenDone);
     }
+}
+
+static void vm_note_mmgame_transfer_parser_pc(u32 pc)
+{
+    static u32 seenResult16_3 = 0;
+    static u32 seenResult16_2 = 0;
+    static u32 seenSubBccCall = 0;
+    static u32 seenSubBccEntry = 0;
+    u32 object = 0;
+    u32 kind = 0;
+    u32 subtype = 0;
+    u32 result = 0;
+    u32 index = 0;
+    u32 getterRaw = 0;
+    u32 getterString = 0;
+    u32 getterU16 = 0;
+    u32 getterInt = 0;
+    u32 getterLen = 0;
+    char objectHead[64];
+
+    objectHead[0] = 0;
+
+    if (pc != 0x05181250 && pc != 0x0518138E &&
+        pc != 0x051813FE && pc != 0x05180BCC)
+    {
+        return;
+    }
+
+    if (pc == 0x05181250)
+    {
+        if (seenResult16_3 >= 32)
+            return;
+        ++seenResult16_3;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &result);
+        uc_reg_read(MTK, UC_ARM_REG_R5, &object);
+    }
+    else if (pc == 0x0518138E)
+    {
+        if (seenResult16_2 >= 32)
+            return;
+        ++seenResult16_2;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &result);
+        uc_reg_read(MTK, UC_ARM_REG_R5, &object);
+    }
+    else if (pc == 0x051813FE)
+    {
+        if (seenSubBccCall >= 32)
+            return;
+        ++seenSubBccCall;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &object);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &index);
+    }
+    else
+    {
+        if (seenSubBccEntry >= 32)
+            return;
+        ++seenSubBccEntry;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &object);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &index);
+    }
+
+    if (object != 0)
+    {
+        uc_mem_read(MTK, object + 4, &kind, sizeof(kind));
+        uc_mem_read(MTK, object + 8, &subtype, sizeof(subtype));
+        uc_mem_read(MTK, object + 0x28, &getterRaw, sizeof(getterRaw));
+        uc_mem_read(MTK, object + 0x40, &getterString, sizeof(getterString));
+        uc_mem_read(MTK, object + 0x44, &getterU16, sizeof(getterU16));
+        uc_mem_read(MTK, object + 0x4C, &getterInt, sizeof(getterInt));
+        uc_mem_read(MTK, object + 0x54, &getterLen, sizeof(getterLen));
+        vm_autotest_format_mem_hex(object, 16, objectHead, sizeof(objectHead));
+    }
+
+    if (pc == 0x05181250 || pc == 0x0518138E)
+    {
+        printf("[info][mmgame] transfer_result pc=%08x subtype=%u result=%u object=%08x kind=%u getter_int=%08x head=%s count=%u\n",
+               pc, subtype, result, object, kind, getterInt, objectHead,
+               pc == 0x05181250 ? seenResult16_3 : seenResult16_2);
+        vm_autotest_note("mmgame_transfer_result pc=%08x subtype=%u result=%u object=%08x kind=%u getter_int=%08x head=%s count=%u\n",
+                         pc, subtype, result, object, kind, getterInt, objectHead,
+                         pc == 0x05181250 ? seenResult16_3 : seenResult16_2);
+        return;
+    }
+
+    printf("[info][mmgame] transfer_sub_bcc pc=%08x object=%08x kind=%u subtype=%u index=%u getters raw=%08x str=%08x u16=%08x int=%08x len=%08x head=%s count=%u\n",
+           pc, object, kind, subtype, index, getterRaw, getterString, getterU16,
+           getterInt, getterLen, objectHead,
+           pc == 0x051813FE ? seenSubBccCall : seenSubBccEntry);
+    vm_autotest_note("mmgame_transfer_sub_bcc pc=%08x object=%08x kind=%u subtype=%u index=%u getters raw=%08x str=%08x u16=%08x int=%08x len=%08x head=%s count=%u\n",
+                     pc, object, kind, subtype, index, getterRaw, getterString,
+                     getterU16, getterInt, getterLen, objectHead,
+                     pc == 0x051813FE ? seenSubBccCall : seenSubBccEntry);
+}
+
+static void vm_note_stream_read_i16_pc(u32 pc)
+{
+    static u32 seenNullBlob = 0;
+    u32 blob = 0;
+    u32 reader = 0;
+    u32 cursor = 0;
+    u32 lr = 0;
+    u32 r2 = 0;
+    u32 r3 = 0;
+    char readerHead[64];
+
+    if (pc != 0x01033A42)
+        return;
+
+    uc_reg_read(MTK, UC_ARM_REG_R0, &blob);
+    if (blob != 0)
+        return;
+    if (seenNullBlob >= 16)
+        return;
+    ++seenNullBlob;
+
+    readerHead[0] = 0;
+    uc_reg_read(MTK, UC_ARM_REG_R1, &reader);
+    uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+    uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    if (reader != 0)
+    {
+        uc_mem_read(MTK, reader, &cursor, sizeof(cursor));
+        vm_autotest_format_mem_hex(reader, 32, readerHead, sizeof(readerHead));
+    }
+
+    printf("[info][stream] read_i16_null_blob pc=%08x lr=%08x reader=%08x cursor=%u r2=%08x r3=%08x reader_head=%s count=%u\n",
+           pc, lr, reader, cursor, r2, r3, readerHead, seenNullBlob);
+    vm_autotest_note("stream_read_i16_null_blob pc=%08x lr=%08x reader=%08x cursor=%u r2=%08x r3=%08x reader_head=%s count=%u\n",
+                     pc, lr, reader, cursor, r2, r3, readerHead, seenNullBlob);
+}
+
+static void vm_note_net_wrapper_pc(u32 pc)
+{
+    static u32 seen = 0;
+    u32 r0 = 0;
+    u32 r3 = 0;
+    u32 r7 = 0;
+    u32 wrapperState = 0;
+    u32 wrapperCb = 0;
+    u32 businessObj = 0;
+    u32 businessState = 0;
+    u32 businessCb = 0;
+    u8 sceneReady = 0;
+
+    if (!g_netDebugReadWindow)
+        return;
+    if (pc != 0x010348A8 && pc != 0x010348D8 && pc != 0x010348EC &&
+        pc != 0x01012E64 && pc != 0x01012E84)
+    {
+        return;
+    }
+    if (seen >= 64)
+        return;
+    ++seen;
+
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+    uc_reg_read(MTK, UC_ARM_REG_R7, &r7);
+
+    if (pc == 0x010348A8)
+    {
+        if (r0)
+        {
+            uc_mem_read(MTK, r0 + 0x0c, &wrapperState, sizeof(wrapperState));
+            uc_mem_read(MTK, r0 + 0x44, &wrapperCb, sizeof(wrapperCb));
+        }
+        printf("[info][network] net_wrapper_state pc=%08x event=%u obj=%08x state=%u cb=%08x\n",
+               pc, r3, r0, wrapperState & 0xff, wrapperCb);
+        return;
+    }
+
+    if (Global_R9)
+    {
+        uc_mem_read(MTK, Global_R9 + 0x94a8, &businessObj, sizeof(businessObj));
+        if (businessObj)
+        {
+            uc_mem_read(MTK, businessObj + 0x0c, &businessState, sizeof(businessState));
+            uc_mem_read(MTK, businessObj + 0x14, &businessCb, sizeof(businessCb));
+        }
+        if (pc == 0x01012E64 || pc == 0x01012E84)
+        {
+            u32 sceneObj = 0;
+            uc_mem_read(MTK, Global_R9 + 0x54ac, &sceneObj, sizeof(sceneObj));
+            if (sceneObj)
+                uc_mem_read(MTK, sceneObj + 0x164, &sceneReady, sizeof(sceneReady));
+        }
+    }
+
+    if (pc == 0x010348D8 || pc == 0x010348EC)
+    {
+        printf("[info][network] net_wrapper_business pc=%08x event=%u biz=%08x state=%u cb=%08x r7=%08x\n",
+               pc, r3, businessObj, businessState, businessCb, r7);
+        return;
+    }
+
+    printf("[info][network] net_business_gate pc=%08x event=%u data=%08x biz=%08x state=%u cb=%08x scene_ready=%u r0=%08x\n",
+           pc, r3, r0, businessObj, businessState, businessCb, sceneReady, r0);
 }
 
 static void vm_autotest_dump_scene_tables(u32 elapsedMs)
@@ -7597,6 +7830,13 @@ static bool hook_vm_manager_screen_func(u32 address)
                     if (vm_scene_same_reenter_matches_target(activeTarget))
                     {
                         acceptSameSceneReenter = false;
+                        printf("[info][screen] screen_mgr same-suppressed caller=%08x serial=%u scene=%s pos=(%u,%u) exit=%u\n",
+                               lastAddress,
+                               g_vm_net_mock_last_scene_change_target_serial,
+                               activeTarget ? activeTarget->scene : "",
+                               activeTarget ? activeTarget->x : 0,
+                               activeTarget ? activeTarget->y : 0,
+                               activeTarget ? activeTarget->exitId : 0);
                         vm_autotest_note("screen_mgr idx=2 type=same-suppressed caller=%08x screen=%08x added=%08x scene=%s pos=(%u,%u) exit=%u\n",
                                          lastAddress, tmp1, vmAddedScreen,
                                          activeTarget ? activeTarget->scene : "",
@@ -7611,13 +7851,23 @@ static bool hook_vm_manager_screen_func(u32 address)
                 }
                 if (acceptSameSceneReenter)
                 {
-                vm_autotest_note("screen_mgr idx=2 type=same caller=%08x screen=%08x added=%08x r1=%08x r2=%08x r3=%08x\n",
-                                 lastAddress, tmp1, vmAddedScreen, tmp2, tmp3, tmp4);
-                uc_mem_write(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &tmp1, 4);
-                tmp2 = 0;
-                uc_mem_write(MTK, VM_SCREEN_isInQuit_ADDRESS, &tmp2, 4);
-                screenStructChange = 1;
-                g_screenRemovedWithoutNext = 0;
+                    if (lastAddress == 0x01018150)
+                    {
+                        printf("[info][screen] screen_mgr same caller=%08x screen=%08x serial=%u scene=%s pos=(%u,%u) exit=%u\n",
+                               lastAddress, tmp1,
+                               g_vm_net_mock_last_scene_change_target_serial,
+                               activeTarget ? activeTarget->scene : "",
+                               activeTarget ? activeTarget->x : 0,
+                               activeTarget ? activeTarget->y : 0,
+                               activeTarget ? activeTarget->exitId : 0);
+                    }
+                    vm_autotest_note("screen_mgr idx=2 type=same caller=%08x screen=%08x added=%08x r1=%08x r2=%08x r3=%08x\n",
+                                     lastAddress, tmp1, vmAddedScreen, tmp2, tmp3, tmp4);
+                    uc_mem_write(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &tmp1, 4);
+                    tmp2 = 0;
+                    uc_mem_write(MTK, VM_SCREEN_isInQuit_ADDRESS, &tmp2, 4);
+                    screenStructChange = 1;
+                    g_screenRemovedWithoutNext = 0;
                 }
             }
         }
@@ -7678,10 +7928,14 @@ static bool hook_vm_manager_screen_func(u32 address)
     {
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        int removeIndex = vm_screen_stack_find_related(tmp1);
+        bool removingCurrent = removeIndex >= 0 && g_screenStack[(u32)removeIndex] == vmAddedScreen;
         tmp3 = 0;
         tmp5 = 0;
         tmp4 = vm_screen_stack_remove(tmp1, &tmp3, &tmp5) ? 1 : 0;
-        if (tmp4 && tmp1 == vmAddedScreen && tmp3)
+        printf("[info][screen] screen_mgr remove requested=%08x current=%08x result=%u current_match=%u new_top=%08x module=%08x\n",
+               tmp1, vmAddedScreen, tmp4, removingCurrent ? 1u : 0u, tmp3, tmp5);
+        if (tmp4 && removingCurrent && tmp3)
         {
             g_activeScreenRemovedThisFrame = 1;
             g_screenResumeExisting = 1;
@@ -7694,7 +7948,7 @@ static bool hook_vm_manager_screen_func(u32 address)
             screenStructChange = 1;
             g_screenRemovedWithoutNext = 0;
         }
-        else if (tmp4 && tmp1 == vmAddedScreen)
+        else if (tmp4 && removingCurrent)
         {
             g_activeScreenRemovedThisFrame = 1;
             vmAddedScreen = 0;
@@ -9513,6 +9767,9 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     vm_autotest_note_scene_actor_parser_pc((u32)address & ~1u);
     vm_autotest_note_backpack_parser_pc((u32)address & ~1u);
     vm_autotest_note_shop_parser_pc((u32)address & ~1u);
+    vm_note_mmgame_transfer_parser_pc((u32)address & ~1u);
+    vm_note_stream_read_i16_pc((u32)address & ~1u);
+    vm_note_net_wrapper_pc((u32)address & ~1u);
 
     if (vm_is_manager_func_stub_address((u32)address))
         return;
