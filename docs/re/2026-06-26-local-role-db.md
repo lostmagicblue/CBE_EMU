@@ -49,14 +49,29 @@ roleId, job/visual, sex/visual, name,
 playerId, account/display,
 level/status word,
 hp, hpMax, mp, mpMax,
+derived charm/stat words,
 exp summary,
 money/gap09C0,
 backpackCapacity,
+title/sect/spouse display strings,
 target/grid fields,
 actor resource,
 scene key,
 motion/grid words
 ```
+
+Relevant parser write evidence:
+
+- `0x0100FBA8..0x0100FBE4` reads six tagged integer fields and stores them into
+  the actor property word table around actor offsets `+288..+306`; the mock now
+  fills these with derived strength/agility/wisdom/endurance/charm/reserve
+  instead of zero.
+- `0x0100FC84` copies a fixed 10-byte string into actor `+256`; this is the
+  short display title slot, so the mock now sends the wealth title there instead
+  of the role name.
+- `0x0100FCEA..0x0100FD02` reads the post-resource i16 and mirrors it into the
+  scene status level slot; the mock now sends the normalized role level instead
+  of `0`.
 
 ### Scene Position
 
@@ -161,8 +176,19 @@ Login and scene enter:
   level `N` is `100 * (N - 1) * N / 2`; the EXP required from level `N` to
   `N + 1` is `N * 100`.
 - scene/login actorinfo uses the active role name for its role name, display
-  name, and short label defaults so map-side role information matches title
-  selection.
+  name so map-side role information matches title selection.
+- scene/login actorinfo now derives display-only RPG properties from the active
+  role instead of writing zeros:
+  - title is wealth based: `<5000` `一贫如洗`, `<100000` `小有积蓄`,
+    `<1000000` `富甲一方`, otherwise `富可敌国`;
+  - display/sect defaults to `散人`;
+  - spouse defaults to `无` through the group/type-1 `name` field instead of the
+    old hard-coded `Codex`;
+  - level words default to the normalized role level, so a fresh role displays
+    level `1` in the property panel;
+  - strength/agility/wisdom/endurance/charm are derived from level and job with
+    small RPG-style base/gain tables, so old persisted role files immediately
+    show nonzero attributes without a DB format migration.
 - actor motion-resource generation uses the active role job/sex as its default,
   so the map sprite resource follows the selected role unless a `CBE_ACTOR_*`
   environment override is explicitly set.

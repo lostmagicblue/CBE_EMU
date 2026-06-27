@@ -3859,6 +3859,66 @@ static const char *vm_net_mock_default_role_name(void)
     return "\xcf\xc0\xbd\xa3\xbd\xad\xba\xfe"; /* GBK: xia jian jiang hu */
 }
 
+static const char *vm_net_mock_role_title(const vm_net_mock_role_state *role)
+{
+    u32 money = role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY;
+    if (money >= 1000000)
+        return "\xb8\xbb\xbf\xc9\xb5\xd0\xb9\xfa"; /* GBK: fu ke di guo */
+    if (money >= 100000)
+        return "\xb8\xbb\xbc\xd7\xd2\xbb\xb7\xbd"; /* GBK: fu jia yi fang */
+    if (money >= 5000)
+        return "\xd0\xa1\xd3\xd0\xbb\xfd\xd0\xee"; /* GBK: xiao you ji xu */
+    return "\xd2\xbb\xc6\xb6\xc8\xe7\xcf\xb4";     /* GBK: yi pin ru xi */
+}
+
+static const char *vm_net_mock_role_sect_name(const vm_net_mock_role_state *role)
+{
+    (void)role;
+    return vm_net_mock_env_str("CBE_ACTOR_SECT_NAME",
+                               "\xc9\xa2\xc8\xcb"); /* GBK: san ren */
+}
+
+static const char *vm_net_mock_role_spouse_name(const vm_net_mock_role_state *role)
+{
+    (void)role;
+    return vm_net_mock_env_str("CBE_ACTOR_SPOUSE_NAME",
+                               "\xce\xde"); /* GBK: wu */
+}
+
+static u16 vm_net_mock_role_derived_attr(u32 level, u32 job, u32 attrIndex)
+{
+    static const u16 base[3][5] = {
+        {12, 8, 7, 11, 3},
+        {9, 14, 8, 8, 4},
+        {7, 9, 15, 7, 5},
+    };
+    static const u16 gain[3][5] = {
+        {3, 2, 1, 3, 1},
+        {2, 3, 2, 2, 1},
+        {1, 2, 4, 2, 1},
+    };
+    u32 jobIndex = (job == 0 || job > 3) ? 0 : job - 1;
+    u32 value = 0;
+
+    if (level == 0)
+        level = 1;
+    if (attrIndex >= 5)
+        attrIndex = 0;
+    value = base[jobIndex][attrIndex] + (level - 1) * gain[jobIndex][attrIndex];
+    if (value > 999)
+        value = 999;
+    return (u16)value;
+}
+
+static u16 vm_net_mock_role_charm(const vm_net_mock_role_state *role, u32 level, u32 job)
+{
+    u32 money = role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY;
+    u32 value = vm_net_mock_role_derived_attr(level, job, 4) + money / 100000;
+    if (value > 999)
+        value = 999;
+    return (u16)value;
+}
+
 static const char *vm_net_mock_role_initial_scene_name(void)
 {
     return vm_net_mock_default_scene_name();
@@ -6456,7 +6516,8 @@ static bool vm_net_mock_append_type1_object(u8 *out, u32 outCap, u32 *pos, u8 np
         return false;
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "npcnum", npcNum))
         return false;
-    if (!vm_net_mock_put_object_string(out, outCap, pos, "name", "Codex"))
+    if (!vm_net_mock_put_object_string(out, outCap, pos, "name",
+                                       vm_net_mock_role_spouse_name(role)))
         return false;
     if (!vm_net_mock_put_object_u32(out, outCap, pos, "money", money))
         return false;
@@ -11374,12 +11435,19 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     u32 roleId = role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID;
     const char *roleName = role ? role->name : vm_net_mock_default_role_name();
-    const char *displayName = vm_net_mock_env_str("CBE_ACTOR_DISPLAY_NAME", roleName);
+    const char *displayName = vm_net_mock_env_str("CBE_ACTOR_DISPLAY_NAME",
+                                                  vm_net_mock_role_sect_name(role));
     u32 roleLevel = vm_net_mock_env_u32("CBE_ROLE_LEVEL", role ? role->level : 1);
     u32 actorJob = vm_net_mock_env_u8("CBE_ACTOR_JOB", role ? role->job : 1);
     u32 actorSex = vm_net_mock_env_u8("CBE_ACTOR_SEX", role ? role->sex : 0);
     u32 visualVariant = 0;
     u32 visualGroup = 0;
+    u16 actorStrength = 0;
+    u16 actorAgility = 0;
+    u16 actorWisdom = 0;
+    u16 actorEndurance = 0;
+    u16 actorCharm = 0;
+    u32 actorAttrWords[6];
     u32 primaryCurrent = vm_net_mock_env_u32("CBE_ACTOR_HP_CURRENT",
                                              vm_net_mock_env_u32("CBE_ACTOR_HP",
                                                                  role ? role->hp : VM_NET_MOCK_ROLE_DEFAULT_HP));
@@ -11393,10 +11461,10 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
     u32 actorSummaryValue = vm_net_mock_env_u32("CBE_ACTOR_SUMMARY_VALUE", role ? role->exp : 0);
     u32 actorGap09C0 = vm_net_mock_env_u32("CBE_ACTOR_GAP09C0",
                                            role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY);
-    u32 actorSummaryStatus = vm_net_mock_env_u32("CBE_ACTOR_STATUS_WORD", roleLevel);
+    u32 actorSummaryStatus = 0;
     u8 actorBackpackCapacity = vm_net_mock_env_u8("CBE_ACTOR_BACKPACK_CAPACITY",
-                                                  role ? role->backpackCapacity :
-                                                  VM_NET_MOCK_BACKPACK_CAPACITY);
+                                                   role ? role->backpackCapacity :
+                                                   VM_NET_MOCK_BACKPACK_CAPACITY);
     u8 actorStateByte1 = vm_net_mock_env_u8("CBE_ACTOR_STATE_BYTE1", 0);
     u8 actorTargetX = 12;
     u8 actorTargetY = 10;
@@ -11412,11 +11480,10 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
     u16 motionResourceArg1 = 0;
     u32 primaryDisplayMax = vm_net_mock_env_u32("CBE_ACTOR_HP_DISPLAY_MAX", primaryBaseMax);
     u32 secondaryDisplayMax = vm_net_mock_env_u32("CBE_ACTOR_MP_DISPLAY_MAX", secondaryBaseMax);
-    u32 actorGap0CC0 = vm_net_mock_env_u32("CBE_ACTOR_GAP0CC0", 0);
-    u32 actorGap0CC4 = vm_net_mock_env_u32("CBE_ACTOR_GAP0CC4", 0);
-    u32 actorGap0CC8 = vm_net_mock_env_u32("CBE_ACTOR_GAP0CC8", 0);
+    u32 actorGap0CC0 = 0;
+    u32 actorGap0CC4 = 0;
+    u32 actorGap0CC8 = 0;
 
-    shortLabel = vm_net_mock_env_str("CBE_ACTOR_SHORT_LABEL", roleName);
     if (roleLevel == 0)
         roleLevel = 1;
     if (actorJob == 0 || actorJob > 3)
@@ -11436,6 +11503,24 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
     if (secondaryDisplayMax == 0)
         secondaryDisplayMax = secondaryBaseMax;
 
+    actorStrength = vm_net_mock_role_derived_attr(roleLevel, actorJob, 0);
+    actorAgility = vm_net_mock_role_derived_attr(roleLevel, actorJob, 1);
+    actorWisdom = vm_net_mock_role_derived_attr(roleLevel, actorJob, 2);
+    actorEndurance = vm_net_mock_role_derived_attr(roleLevel, actorJob, 3);
+    actorCharm = vm_net_mock_role_charm(role, roleLevel, actorJob);
+    actorAttrWords[0] = vm_net_mock_env_u32("CBE_ACTOR_ATTR_STRENGTH", actorStrength);
+    actorAttrWords[1] = vm_net_mock_env_u32("CBE_ACTOR_ATTR_AGILITY", actorAgility);
+    actorAttrWords[2] = vm_net_mock_env_u32("CBE_ACTOR_ATTR_WISDOM", actorWisdom);
+    actorAttrWords[3] = vm_net_mock_env_u32("CBE_ACTOR_ATTR_ENDURANCE", actorEndurance);
+    actorAttrWords[4] = vm_net_mock_env_u32("CBE_ACTOR_ATTR_CHARM", actorCharm);
+    actorAttrWords[5] = vm_net_mock_env_u32("CBE_ACTOR_ATTR_RESERVE",
+                                            (actorStrength + actorEndurance) / 2);
+    actorSummaryStatus = vm_net_mock_env_u32("CBE_ACTOR_STATUS_WORD", roleLevel);
+    actorGap0CC0 = vm_net_mock_env_u32("CBE_ACTOR_GAP0CC0", actorStrength);
+    actorGap0CC4 = vm_net_mock_env_u32("CBE_ACTOR_GAP0CC4", actorAgility);
+    actorGap0CC8 = vm_net_mock_env_u32("CBE_ACTOR_GAP0CC8", actorWisdom);
+    shortLabel = vm_net_mock_env_str("CBE_ACTOR_SHORT_LABEL", vm_net_mock_role_title(role));
+
     /*
      * Fresh scene-enter keeps the compact title-facing knobs but the scene-side
      * portrait/widget picker is not fully 0-based. Static `scene_runtime_init_
@@ -11454,7 +11539,7 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
     actorField120 = vm_net_mock_env_u8("CBE_ACTOR_BYTE_120", actorTargetY);
     actorResource = vm_net_mock_actor_resource_name((u8)actorJob, (u8)actorSex);
     sceneKey = vm_net_mock_scene_key_name();
-    actorResourceArg = (u16)vm_net_mock_env_u32("CBE_ACTOR_RESOURCE_ARG", 0);
+    actorResourceArg = (u16)vm_net_mock_env_u32("CBE_ACTOR_RESOURCE_ARG", roleLevel);
     motionResourceArg0 = (u16)vm_net_mock_env_u32("CBE_ACTOR_MOTION_ARG0", actorGridX);
     motionResourceArg1 = (u16)vm_net_mock_env_u32("CBE_ACTOR_MOTION_ARG1", actorGridY);
 
@@ -11480,8 +11565,8 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
      *   u32 primaryBaseMax
      *   u32 secondaryCurrent
      *   u32 secondaryBaseMax
-     *   u32 extra132
-     *   six truncated u32 -> word fields
+     *   u32 charm-like attribute
+     *   six truncated u32 -> property words (str/agi/wis/end/charm/reserve)
      *   u32 summary176
      *   u32 gap09C0
      *   u8 backpackCapacity (stored into main item manager +38)
@@ -11490,13 +11575,13 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
      *   u32 secondaryDisplayMax
      *   u8 targetPosX
      *   u8 targetPosY
-     *   str shortLabel
+     *   str shortLabel/title
      *   str previewImage
      *   u32 gap0CC0
      *   u32 gap0CC4
      *   u32 gap0CC8
      *   str actorResource
-     *   i16 actorResourceArg
+     *   i16 level word
      *   str sceneKey
      *   i16 motionArg0
      *   i16 motionArg1
@@ -11511,12 +11596,13 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
         return 0;
     if (!vm_net_mock_seq_put_u32(out, outCap, &pos, secondaryBaseMax))
         return 0;
-    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, vm_net_mock_env_u32("CBE_ACTOR_EXTRA132", 0)))
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos,
+                                 vm_net_mock_env_u32("CBE_ACTOR_EXTRA132", actorCharm)))
         return 0;
 
     for (u32 i = 0; i < 6; ++i)
     {
-        if (!vm_net_mock_seq_put_u32(out, outCap, &pos, 0))
+        if (!vm_net_mock_seq_put_u32(out, outCap, &pos, actorAttrWords[i]))
             return 0;
     }
 
