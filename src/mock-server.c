@@ -2412,6 +2412,7 @@ static bool vm_net_mock_append_fb_target_result12_for_scene(u8 *out, u32 outCap,
                                                             const char *sceneKey, u16 spawnX, u16 spawnY);
 static bool vm_net_mock_append_fb_target_result4_object(u8 *out, u32 outCap, u32 *pos,
                                                         u8 typeValue, const char *infoText);
+static void vm_net_mock_append_preview_u32(char *out, u32 outCap, u32 *pos, u32 value);
 
 enum
 {
@@ -2426,7 +2427,10 @@ enum
     VM_NET_MOCK_SHOP17_MAX_CATALOG_ITEMS = 10,
     VM_NET_MOCK_SHOP_MAX_CATALOG_ITEMS = 2048,
     VM_NET_MOCK_ITEM_EFFECT_CATALOG_MAX_ITEMS = 2048,
+    VM_NET_MOCK_SKILL_CATALOG_MAX_ITEMS = 256,
+    VM_NET_MOCK_LEARNED_SKILL_MAX_ITEMS = 64,
     VM_NET_MOCK_SHOP_NAME_BYTES = 12,
+    VM_NET_MOCK_SKILL_NAME_BYTES = 24,
     VM_NET_MOCK_TELEPORT_STONE_DEFAULT_EXIT_ID = 1,
     VM_NET_MOCK_SCENE_LANDING_SAFE_GAP = 32,
     VM_NET_MOCK_ROLE_DB_MAX_ROLES = 5,
@@ -2440,7 +2444,7 @@ enum
     VM_NET_MOCK_BATTLE_POISON_SLIME_EXP = 5,
     VM_NET_MOCK_BATTLE_POISON_SLIME_GOLD = 5,
     VM_NET_MOCK_BATTLE_CHANGMING_SAN_ITEM_ID = 304,
-    VM_NET_MOCK_BATTLE_CHANGMING_SAN_DROP_RATE = 10,
+    VM_NET_MOCK_BATTLE_CHANGMING_SAN_DROP_RATE = 100,
     VM_NET_MOCK_ROLE_DEFAULT_ID = 10001,
     VM_NET_MOCK_ROLE_DEFAULT_HP = 120,
     VM_NET_MOCK_ROLE_DEFAULT_MP = 100,
@@ -2667,6 +2671,15 @@ typedef struct
     u32 exp;
 } vm_net_mock_item_effect_catalog_item;
 
+typedef struct
+{
+    u32 skillId;
+    u8 job;
+    u8 levelRequired;
+    u16 reserved0;
+    char name[VM_NET_MOCK_SKILL_NAME_BYTES + 1];
+} vm_net_mock_skill_catalog_item;
+
 static vm_net_mock_shop_catalog_item g_vm_net_mock_shop_catalog[VM_NET_MOCK_SHOP_MAX_CATALOG_ITEMS];
 static u32 g_vm_net_mock_shop_catalog_count = 0;
 static bool g_vm_net_mock_shop_catalog_loaded = false;
@@ -2676,6 +2689,9 @@ static bool g_vm_net_mock_equipment_catalog_loaded = false;
 static vm_net_mock_item_effect_catalog_item g_vm_net_mock_item_effect_catalog[VM_NET_MOCK_ITEM_EFFECT_CATALOG_MAX_ITEMS];
 static u32 g_vm_net_mock_item_effect_catalog_count = 0;
 static bool g_vm_net_mock_item_effect_catalog_loaded = false;
+static vm_net_mock_skill_catalog_item g_vm_net_mock_skill_catalog[VM_NET_MOCK_SKILL_CATALOG_MAX_ITEMS];
+static u32 g_vm_net_mock_skill_catalog_count = 0;
+static bool g_vm_net_mock_skill_catalog_loaded = false;
 
 static u32 vm_net_mock_shop_catalog_group(u32 itemId)
 {
@@ -2759,6 +2775,223 @@ static u32 vm_net_mock_parse_dsh_u32(const u8 *raw, u32 len, u32 fallback)
         value = value * 10u + (u32)(raw[i] - '0');
     }
     return haveDigit ? value : fallback;
+}
+
+static int vm_net_mock_compare_skill_catalog_items(const void *lhs, const void *rhs)
+{
+    const vm_net_mock_skill_catalog_item *a = (const vm_net_mock_skill_catalog_item *)lhs;
+    const vm_net_mock_skill_catalog_item *b = (const vm_net_mock_skill_catalog_item *)rhs;
+
+    if (a->job != b->job)
+        return a->job < b->job ? -1 : 1;
+    if (a->levelRequired != b->levelRequired)
+        return a->levelRequired < b->levelRequired ? -1 : 1;
+    if (a->skillId != b->skillId)
+        return a->skillId < b->skillId ? -1 : 1;
+    return 0;
+}
+
+static void vm_net_mock_sort_skill_catalog(void)
+{
+    if (g_vm_net_mock_skill_catalog_count > 1)
+    {
+        qsort(g_vm_net_mock_skill_catalog,
+              g_vm_net_mock_skill_catalog_count,
+              sizeof(g_vm_net_mock_skill_catalog[0]),
+              vm_net_mock_compare_skill_catalog_items);
+    }
+}
+
+static bool vm_net_mock_add_skill_catalog_item(u32 skillId, u32 rawJob,
+                                               u32 levelRequired,
+                                               const u8 *name,
+                                               u32 nameLen)
+{
+    vm_net_mock_skill_catalog_item *skill = NULL;
+    u32 copyLen = 0;
+
+    if (skillId == 0 ||
+        rawJob > 2 ||
+        g_vm_net_mock_skill_catalog_count >= VM_NET_MOCK_SKILL_CATALOG_MAX_ITEMS)
+    {
+        return false;
+    }
+
+    skill = &g_vm_net_mock_skill_catalog[g_vm_net_mock_skill_catalog_count++];
+    memset(skill, 0, sizeof(*skill));
+    skill->skillId = skillId;
+    skill->job = (u8)(rawJob + 1);
+    skill->levelRequired = (u8)((levelRequired == 0) ? 1 :
+                                (levelRequired > 255 ? 255 : levelRequired));
+    copyLen = vm_net_mock_shop_safe_name_len(name, nameLen, VM_NET_MOCK_SKILL_NAME_BYTES);
+    if (copyLen > 0)
+        memcpy(skill->name, name, copyLen);
+    skill->name[copyLen] = 0;
+    return true;
+}
+
+static u32 vm_net_mock_load_skill_catalog_dsh(const char *path)
+{
+    static u8 data[32768];
+    u32 len = vm_net_mock_load_response_file(path, data, sizeof(data));
+    u32 columnCount = 0;
+    u32 rowCount = 0;
+    u32 pos = 16;
+    u32 added = 0;
+
+    if (len < 16)
+        return 0;
+    columnCount = vm_net_mock_read_le32_at(data, 4);
+    rowCount = vm_net_mock_read_le32_at(data, 8);
+    if (columnCount == 0 || columnCount > 64 || rowCount > 10000)
+        return 0;
+
+    for (u32 i = 0; i < columnCount; ++i)
+    {
+        u32 fieldLen = 0;
+        if (pos >= len)
+            return added;
+        fieldLen = data[pos++];
+        if (pos + fieldLen > len)
+            return added;
+        pos += fieldLen;
+    }
+
+    for (u32 row = 0; row < rowCount && pos + 4 <= len; ++row)
+    {
+        u32 rowLen = vm_net_mock_read_le32_at(data, pos);
+        u32 rowPos = pos + 4;
+        u32 rowEnd = rowPos + rowLen;
+        u32 skillId = 0;
+        u32 rawJob = 0xff;
+        u32 levelRequired = 1;
+        const u8 *name = NULL;
+        u32 nameLen = 0;
+
+        if (rowEnd > len || rowEnd < rowPos)
+            break;
+
+        for (u32 col = 0; col < columnCount && rowPos < rowEnd; ++col)
+        {
+            u32 valueLen = data[rowPos++];
+            const u8 *value = data + rowPos;
+
+            if (rowPos + valueLen > rowEnd)
+                break;
+            switch (col)
+            {
+            case 0:
+                skillId = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+                break;
+            case 1:
+                name = value;
+                nameLen = valueLen;
+                break;
+            case 4:
+                levelRequired = vm_net_mock_parse_dsh_u32(value, valueLen, 1);
+                break;
+            case 6:
+                rawJob = vm_net_mock_parse_dsh_u32(value, valueLen, 0xff);
+                break;
+            default:
+                break;
+            }
+            rowPos += valueLen;
+        }
+
+        if (vm_net_mock_add_skill_catalog_item(skillId, rawJob, levelRequired,
+                                               name, nameLen))
+        {
+            ++added;
+        }
+        pos = rowEnd;
+    }
+
+    return added;
+}
+
+static u32 vm_net_mock_load_skill_catalog(void)
+{
+    u32 skillCount = 0;
+
+    if (g_vm_net_mock_skill_catalog_loaded)
+        return g_vm_net_mock_skill_catalog_count;
+
+    g_vm_net_mock_skill_catalog_loaded = true;
+    g_vm_net_mock_skill_catalog_count = 0;
+    skillCount = vm_net_mock_load_skill_catalog_dsh("JHOnlineData/skill.dsh");
+    if (skillCount == 0)
+        skillCount = vm_net_mock_load_skill_catalog_dsh("bin/JHOnlineData/skill.dsh");
+
+    if (skillCount == 0)
+    {
+        (void)vm_net_mock_add_skill_catalog_item(1, 0, 1,
+                                                (const u8 *)"\xcd\xf2\xbd\xa3\xd6\xef\xcf\xc9\x31",
+                                                9);
+        (void)vm_net_mock_add_skill_catalog_item(101, 1, 1,
+                                                (const u8 *)"\xb7\xe7\xce\xe8\xc8\xd0\xd0\xd0\x31",
+                                                9);
+        (void)vm_net_mock_add_skill_catalog_item(201, 2, 1,
+                                                (const u8 *)"\xe7\xca\xd1\xd7\xbb\xc3\xb7\xa8\x31",
+                                                9);
+        printf("[warn][network] mock_skill_catalog fallback=skill.dsh-not-found total=%u\n",
+               g_vm_net_mock_skill_catalog_count);
+    }
+    else
+    {
+        vm_net_mock_sort_skill_catalog();
+        printf("[info][network] mock_skill_catalog total=%u source=skill.dsh\n",
+               g_vm_net_mock_skill_catalog_count);
+    }
+    return g_vm_net_mock_skill_catalog_count;
+}
+
+static u32 vm_net_mock_role_learned_skill_limit(u32 level)
+{
+    if (level == 0)
+        level = 1;
+    return 1 + level / 5;
+}
+
+static u32 vm_net_mock_build_role_learned_skill_blob(const vm_net_mock_role_state *role,
+                                                     u8 *out, u32 outCap,
+                                                     u8 *learnedCountOut,
+                                                     char *previewOut,
+                                                     u32 previewCap)
+{
+    u32 total = vm_net_mock_load_skill_catalog();
+    u32 pos = 0;
+    u32 learned = 0;
+    u32 limit = vm_net_mock_role_learned_skill_limit(role ? role->level : 1);
+    u8 job = role ? role->job : 1;
+    u32 previewPos = 0;
+
+    if (learnedCountOut)
+        *learnedCountOut = 0;
+    if (previewOut && previewCap > 0)
+        previewOut[0] = 0;
+    if (out == NULL || outCap == 0)
+        return 0;
+    if (job == 0 || job > 3)
+        job = 1;
+    if (limit > VM_NET_MOCK_LEARNED_SKILL_MAX_ITEMS)
+        limit = VM_NET_MOCK_LEARNED_SKILL_MAX_ITEMS;
+
+    for (u32 i = 0; i < total && learned < limit; ++i)
+    {
+        const vm_net_mock_skill_catalog_item *skill = &g_vm_net_mock_skill_catalog[i];
+        if (skill->job != job)
+            continue;
+        if (!vm_net_mock_seq_put_u32(out, outCap, &pos, skill->skillId))
+            break;
+        if (previewOut && previewCap > 0)
+            vm_net_mock_append_preview_u32(previewOut, previewCap, &previewPos, skill->skillId);
+        ++learned;
+    }
+
+    if (learnedCountOut)
+        *learnedCountOut = (u8)learned;
+    return pos;
 }
 
 static bool vm_net_mock_add_shop_catalog_item(u32 itemId, const u8 *name, u32 nameLen,
@@ -3818,6 +4051,12 @@ typedef struct
     bool haveItemSelector;
 } vm_net_mock_item_discard_request;
 
+typedef struct
+{
+    u32 index;
+    u16 seq;
+} vm_net_mock_battle_item_use_request;
+
 static bool vm_net_mock_get_object_number_field(const u8 *payload, u32 payloadLen,
                                                 const char *field, u32 *value)
 {
@@ -4061,6 +4300,12 @@ static u32 vm_net_mock_add_capped_u32(u32 value, u32 add)
     if (0xffffffffu - value < add)
         return 0xffffffffu;
     return value + add;
+}
+
+static u32 vm_net_mock_mul_capped_u32(u32 value, u32 count)
+{
+    uint64_t product = (uint64_t)value * (uint64_t)count;
+    return product > 0xffffffffull ? 0xffffffffu : (u32)product;
 }
 
 static void vm_net_mock_role_apply_item_effect(vm_net_mock_role_state *role,
@@ -8946,18 +9191,40 @@ static u32 vm_net_mock_build_scene_change_response(const u8 *request, u32 reques
 static bool vm_net_mock_append_login_tail_skill_objects(u8 *out, u32 outCap, u32 *pos, u8 *addedCount)
 {
     u32 objectStart = 0;
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u8 learnedSkill[512];
+    u32 learnedSkillLen = 0;
+    u8 learnedCount = 0;
+    char learnedPreview[192];
+
     if (addedCount == NULL)
         return false;
     *addedCount = 0;
+    memset(learnedSkill, 0, sizeof(learnedSkill));
+    learnedPreview[0] = 0;
+    learnedSkillLen = vm_net_mock_build_role_learned_skill_blob(role,
+                                                                learnedSkill,
+                                                                sizeof(learnedSkill),
+                                                                &learnedCount,
+                                                                learnedPreview,
+                                                                sizeof(learnedPreview));
 
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 0x0c, 1, &objectStart))
         return false;
-    if (!vm_net_mock_put_object_u32(out, outCap, pos, "learnednum", 0))
+    if (!vm_net_mock_put_object_u32(out, outCap, pos, "learnednum", learnedCount))
         return false;
-    if (!vm_net_mock_put_object_blob(out, outCap, pos, "learnedskill", NULL, 0))
+    if (!vm_net_mock_put_object_blob(out, outCap, pos, "learnedskill",
+                                     learnedSkillLen ? learnedSkill : NULL,
+                                     (u16)learnedSkillLen))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
     *addedCount = (u8)(*addedCount + 1);
+    vm_autotest_note("mock_role_skills role=%u job=%u level=%u learned=%u ids=%s evidence=JianghuOL.CBE:0x1010594 skill.dsh\n",
+                     role ? role->roleId : 0,
+                     role ? role->job : 0,
+                     role ? role->level : 1,
+                     learnedCount,
+                     learnedPreview);
 
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 42, &objectStart))
         return false;
@@ -11270,6 +11537,47 @@ static bool vm_net_mock_is_battle_operate_request(const u8 *request, u32 request
            vm_net_mock_request_contains(request, requestLen, "Operate");
 }
 
+static bool vm_net_mock_parse_battle_item_use_request(const u8 *request, u32 requestLen,
+                                                      vm_net_mock_battle_item_use_request *parsedOut)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+    vm_net_mock_battle_item_use_request parsed;
+    u32 index = 0;
+    u32 seq = 0;
+
+    if (parsedOut)
+        memset(parsedOut, 0, sizeof(*parsedOut));
+    memset(&parsed, 0, sizeof(parsed));
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T')
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        return false;
+    if (offset != requestLen)
+        return false;
+    if (object.major != 1 || object.kind != 4 || object.subtype != 3 ||
+        object.payloadLen == 0)
+    {
+        return false;
+    }
+    if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "index", &index))
+        return false;
+    if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "seq", &seq) &&
+        !vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "itemseq", &seq) &&
+        !vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "itemSeq", &seq))
+    {
+        return false;
+    }
+    if (seq == 0 || seq > 0xffffu)
+        return false;
+
+    parsed.index = index;
+    parsed.seq = (u16)seq;
+    if (parsedOut)
+        *parsedOut = parsed;
+    return true;
+}
+
 static bool vm_net_mock_is_battle_operate_request_relaxed(const u8 *request, u32 requestLen)
 {
     u32 offset = 4;
@@ -11462,6 +11770,263 @@ static u32 vm_net_mock_build_battle_case11_auto_off_response(u8 *out, u32 outCap
         !vm_net_mock_append_battle_case11_auto_flag_object(out, outCap, &pos, 0))
         return 0;
     vm_net_mock_finish_wt_packet(out, pos, 1);
+    return pos;
+}
+
+static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 requestLen,
+                                                      u8 *out, u32 outCap)
+{
+    vm_net_mock_battle_item_use_request parsed;
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_backpack_item_state *item = NULL;
+    const vm_net_mock_item_effect_catalog_item *effect = NULL;
+    u32 itemId = 0;
+    u32 remaining = 0;
+    u32 hpEffect = 0;
+    u32 mpEffect = 0;
+    u32 expEffect = 0;
+    u32 hpApplied = 0;
+    u32 mpApplied = 0;
+    u32 expApplied = 0;
+    u32 counterDamageValue = 0;
+    u32 counterHpDelta = 0;
+    bool consumed = false;
+    bool applied = false;
+    bool includeCounterattack = false;
+    bool battleEndsThisRound = false;
+    bool playerOnRight = vm_net_mock_battle_player_on_right();
+    u8 battleSide = (u8)vm_net_mock_env_u32("CBE_BATTLE_SIDE",
+                                            vm_net_mock_battle_default_side(playerOnRight));
+    u8 defaultPlayerSlot = 0;
+    u8 defaultEnemySlot = 1;
+    u8 playerSlot = 0;
+    u8 enemySlot = 0;
+    u8 counterActionType = (u8)vm_net_mock_env_u32("CBE_BATTLE_COUNTER_ACTION_TYPE", 0);
+    u8 counterChildFlag = (u8)vm_net_mock_env_u32("CBE_BATTLE_COUNTER_CHILD_FLAG", 0);
+    u32 itemEffectIndex = vm_net_mock_env_u32("CBE_BATTLE_ITEM_EFFECT_INDEX", 0);
+    u8 itemTail0 = (u8)vm_net_mock_env_u32("CBE_BATTLE_ITEM_TAIL0", 0);
+    u8 itemTail1 = (u8)vm_net_mock_env_u32("CBE_BATTLE_ITEM_TAIL1", 0);
+    u8 itemTail2 = (u8)vm_net_mock_env_u32("CBE_BATTLE_ITEM_TAIL2", 0);
+    u8 actionInfo[192];
+    u32 actionInfoLen = 0;
+    u8 actionCount = 0;
+    u32 pos = 5;
+    u8 objectCount = 0;
+
+    if (out == NULL || outCap < pos)
+        return 0;
+    if (!vm_net_mock_parse_battle_item_use_request(request, requestLen, &parsed))
+        return 0;
+
+    vm_net_mock_battle_default_wire_slots(playerOnRight, battleSide,
+                                          &defaultPlayerSlot, &defaultEnemySlot);
+    playerSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_PLAYER_WIRE_SLOT", defaultPlayerSlot);
+    enemySlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_ENEMY_WIRE_SLOT", defaultEnemySlot);
+
+    if (g_mockBattleAwaitingSettlement != 0)
+        return vm_net_mock_build_battle_pending_settlement_response(out, outCap);
+
+    role = vm_net_mock_active_role();
+    if (role != NULL)
+    {
+        vm_net_mock_role_sync_derived_vitals(role);
+        item = vm_net_mock_role_find_backpack_item(role, 0, parsed.seq);
+    }
+    if (item != NULL)
+    {
+        itemId = item->itemId;
+        effect = vm_net_mock_find_item_effect_catalog_item(itemId);
+        if (vm_net_mock_item_effect_is_usable(effect))
+        {
+            hpEffect = effect->hp;
+            mpEffect = effect->mp;
+            expEffect = effect->exp;
+            consumed = vm_net_mock_role_consume_backpack_item(role, itemId, parsed.seq, 1, &remaining);
+        }
+    }
+
+    if (role != NULL && consumed)
+    {
+        u32 hpMax = role->hpMax ? role->hpMax : VM_NET_MOCK_ROLE_DEFAULT_HP;
+        u32 mpMax = role->mpMax ? role->mpMax : VM_NET_MOCK_ROLE_DEFAULT_MP;
+        u32 beforeHp = 0;
+        u32 beforeMp = role->mp;
+        u32 addHp = vm_net_mock_mul_capped_u32(hpEffect, 1);
+        u32 addMp = vm_net_mock_mul_capped_u32(mpEffect, 1);
+        u32 addExp = vm_net_mock_mul_capped_u32(expEffect, 1);
+
+        if (g_mockBattleRoleHpCurrent == 0)
+            g_mockBattleRoleHpCurrent = role->hp;
+        if (g_mockBattleRoleHpMax == 0)
+            g_mockBattleRoleHpMax = hpMax;
+        if (g_mockBattleRoleHpMax < g_mockBattleRoleHpCurrent)
+            g_mockBattleRoleHpMax = g_mockBattleRoleHpCurrent;
+        beforeHp = g_mockBattleRoleHpCurrent;
+
+        if (addHp != 0)
+        {
+            g_mockBattleRoleHpCurrent =
+                vm_net_mock_min_u32(vm_net_mock_add_capped_u32(g_mockBattleRoleHpCurrent, addHp),
+                                    g_mockBattleRoleHpMax);
+            hpApplied = g_mockBattleRoleHpCurrent >= beforeHp
+                            ? g_mockBattleRoleHpCurrent - beforeHp
+                            : 0;
+        }
+        if (addMp != 0)
+        {
+            role->mp = vm_net_mock_min_u32(vm_net_mock_add_capped_u32(role->mp, addMp), mpMax);
+            mpApplied = role->mp >= beforeMp ? role->mp - beforeMp : 0;
+        }
+        if (addExp != 0)
+        {
+            role->exp = vm_net_mock_add_capped_u32(role->exp, addExp);
+            role->level = vm_net_mock_role_level_from_exp(role->exp);
+            vm_net_mock_role_sync_derived_vitals(role);
+            if (role->hpMax > g_mockBattleRoleHpMax)
+                g_mockBattleRoleHpMax = role->hpMax;
+            if (g_mockBattleRoleHpCurrent > g_mockBattleRoleHpMax)
+                g_mockBattleRoleHpCurrent = g_mockBattleRoleHpMax;
+            expApplied = addExp;
+        }
+
+        role->hp = vm_net_mock_min_u32(g_mockBattleRoleHpCurrent,
+                                       role->hpMax ? role->hpMax : g_mockBattleRoleHpMax);
+        applied = hpApplied != 0 || mpApplied != 0 || expApplied != 0;
+    }
+
+    memset(actionInfo, 0, sizeof(actionInfo));
+    if (consumed)
+    {
+        u8 itemActorWireSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_ITEM_ACTOR_WIRE_SLOT",
+                                                       playerSlot);
+        u8 itemTargetWireSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_ITEM_TARGET_WIRE_SLOT",
+                                                        playerSlot);
+        if (!vm_net_mock_append_battle_actioninfo_record(actionInfo, sizeof(actionInfo),
+                                                         &actionInfoLen, 2,
+                                                         itemActorWireSlot,
+                                                         itemTargetWireSlot,
+                                                         0, hpApplied, mpApplied,
+                                                         itemEffectIndex,
+                                                         itemTail0, itemTail1, itemTail2))
+        {
+            return 0;
+        }
+        actionCount = 1;
+
+        includeCounterattack = vm_net_mock_env_u32("CBE_BATTLE_ITEM_USE_COUNTER", 1) != 0 &&
+                               g_mockBattleEnemyHpCurrent > 0 &&
+                               g_mockBattleRoleHpCurrent > 0;
+        if (includeCounterattack)
+        {
+            u8 counterActorWireSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_COUNTER_ACTOR_WIRE_SLOT",
+                                                             enemySlot);
+            u8 counterTargetWireSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_COUNTER_TARGET_WIRE_SLOT",
+                                                              playerSlot);
+            u32 type1EffectIndex = vm_net_mock_env_u32("CBE_BATTLE_TYPE1_EFFECT_INDEX", 0);
+            u8 type1Tail0 = (u8)vm_net_mock_env_u32("CBE_BATTLE_TYPE1_TAIL0", 0);
+            u8 type1Tail1 = (u8)vm_net_mock_env_u32("CBE_BATTLE_TYPE1_TAIL1", 0);
+            u8 type1Tail2 = (u8)vm_net_mock_env_u32("CBE_BATTLE_TYPE1_TAIL2", 0);
+
+            if (counterActionType == 1)
+            {
+                counterActorWireSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_TYPE1_COUNTER_ACTOR_WIRE_SLOT",
+                                                              counterActorWireSlot);
+                counterTargetWireSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_TYPE1_COUNTER_TARGET_WIRE_SLOT",
+                                                               counterTargetWireSlot);
+            }
+            counterDamageValue = vm_net_mock_battle_enemy_damage_to_role(g_vm_net_mock_battle_enemy_id_current,
+                                                                         g_mockBattleRoleHpCurrent);
+            if (counterDamageValue == 0 && g_mockBattleRoleHpCurrent > 0)
+                counterDamageValue = 1;
+            if (g_mockBattleRoleHpCurrent >= counterDamageValue)
+                g_mockBattleRoleHpCurrent -= counterDamageValue;
+            else
+                g_mockBattleRoleHpCurrent = 0;
+            if (role != NULL)
+                role->hp = g_mockBattleRoleHpCurrent;
+            counterHpDelta = vm_net_mock_battle_negative_delta_u32(counterDamageValue);
+            if (!vm_net_mock_append_battle_actioninfo_record(actionInfo, sizeof(actionInfo),
+                                                             &actionInfoLen, counterActionType,
+                                                             counterActorWireSlot,
+                                                             counterTargetWireSlot,
+                                                             counterChildFlag,
+                                                             counterHpDelta, 0,
+                                                             (counterActionType == 1 || counterActionType == 2) ? type1EffectIndex : 0,
+                                                             (counterActionType == 1 || counterActionType == 2) ? type1Tail0 : 0,
+                                                             (counterActionType == 1 || counterActionType == 2) ? type1Tail1 : 0,
+                                                             (counterActionType == 1 || counterActionType == 2) ? type1Tail2 : 0))
+            {
+                return 0;
+            }
+            ++actionCount;
+        }
+
+        battleEndsThisRound = g_mockBattleRoleHpCurrent == 0;
+        if (battleEndsThisRound)
+        {
+            u8 terminalActionType = (u8)vm_net_mock_env_u32("CBE_BATTLE_TERMINAL_ACTION_TYPE", 3);
+            u8 terminalActorWireSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_TERMINAL_ACTOR_WIRE_SLOT",
+                                                              playerSlot);
+            if (!vm_net_mock_append_battle_actioninfo_record(actionInfo, sizeof(actionInfo),
+                                                             &actionInfoLen, terminalActionType,
+                                                             terminalActorWireSlot, 0, 0,
+                                                             0, 0, 0, 0, 0, 0))
+            {
+                return 0;
+            }
+            ++actionCount;
+        }
+    }
+    else
+    {
+        if (!vm_net_mock_append_battle_actioninfo_record(actionInfo, sizeof(actionInfo),
+                                                         &actionInfoLen, 4,
+                                                         playerSlot, 0, 0,
+                                                         0, 0, 0, 0, 0, 0))
+        {
+            return 0;
+        }
+        actionCount = 1;
+    }
+
+    if (battleEndsThisRound)
+    {
+        if (!vm_net_mock_append_battle_status7_object(out, outCap, &pos))
+            return 0;
+        ++objectCount;
+        g_vm_net_mock_battle_settlement_sent_serial = g_mockBattleOperateSessionSerial;
+    }
+    if (!vm_net_mock_append_battle_action6_object(out, outCap, &pos,
+                                                 actionInfo, actionInfoLen,
+                                                 actionCount))
+        return 0;
+    ++objectCount;
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+
+    if (consumed && !battleEndsThisRound)
+        vm_net_mock_role_db_save("battle-item-use");
+    if (g_mockBattleOperateSessionArmed != 0)
+        ++g_mockBattleOperateTurnCounter;
+    if (battleEndsThisRound)
+    {
+        g_mockBattleOperateSessionArmed = 0;
+        g_mockBattleOperateSessionFinished = 0;
+        g_mockBattlePendingEnemyTurn = 0;
+        g_mockBattleAwaitingSettlement = 1;
+    }
+    else
+    {
+        g_mockBattlePendingEnemyTurn = 0;
+    }
+
+    printf("[info][network] mock_battle_item_use index=%u seq=%u item=%u remaining=%u hp=%u/%u mp=%u/%u exp=%u consumed=%u applied=%u counter=%u resp=%u evidence=mmBattle:0x2B50->4/3,0x7BD0/0x6EB0->4/6\n",
+           parsed.index, parsed.seq, itemId, remaining,
+           hpApplied, hpEffect, mpApplied, mpEffect, expApplied,
+           consumed ? 1 : 0, applied ? 1 : 0, counterDamageValue, pos);
+    vm_autotest_note("mock_battle_item_use index=%u seq=%u item=%u remaining=%u hp=%u/%u mp=%u/%u exp=%u consumed=%u applied=%u counter=%u response=4/6-actionType2 evidence=mmBattle:0x2B50,0x6EB0\n",
+                     parsed.index, parsed.seq, itemId, remaining,
+                     hpApplied, hpEffect, mpApplied, mpEffect, expApplied,
+                     consumed ? 1 : 0, applied ? 1 : 0, counterDamageValue);
     return pos;
 }
 
@@ -15185,6 +15750,13 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_battle_item_use_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-battle-item-use", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
     hookedLen = vm_net_mock_build_battle_operate_response(request, requestLen, out, outCap);
     if (hookedLen)
     {
@@ -15538,4 +16110,3 @@ static u32 vm_net_mock_read_data(u32 dst, u32 dstLen)
     }
     return vm_set_call_result(copyLen);
 }
-
