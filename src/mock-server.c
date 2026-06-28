@@ -2402,6 +2402,7 @@ enum
     VM_NET_MOCK_ROLE_EXP_PER_LEVEL = 100,
     VM_NET_MOCK_BATTLE_POISON_SLIME_ID = 105,
     VM_NET_MOCK_BATTLE_POISON_SLIME_EXP = 5,
+    VM_NET_MOCK_BATTLE_POISON_SLIME_GOLD = 5,
     VM_NET_MOCK_BATTLE_CHANGMING_SAN_ITEM_ID = 304,
     VM_NET_MOCK_BATTLE_CHANGMING_SAN_DROP_RATE = 10,
     VM_NET_MOCK_ROLE_MONSTER_EXP = VM_NET_MOCK_BATTLE_POISON_SLIME_EXP,
@@ -3566,6 +3567,7 @@ static u32 g_vm_net_mock_battle_rewarded_drop_item = 0;
 static u16 g_vm_net_mock_battle_rewarded_drop_seq = 0;
 static u32 g_vm_net_mock_battle_enemy_id_current = VM_NET_MOCK_BATTLE_POISON_SLIME_ID;
 static u32 g_vm_net_mock_battle_reward_rng = 0;
+static u32 g_vm_net_mock_battle_settlement_sent_serial = 0;
 static char g_vm_net_mock_scene_moveinfo_npc_pending_scene[64];
 static bool g_vm_net_mock_scene_moveinfo_npc_pending = false;
 static char g_vm_net_mock_scene_moveinfo_npc_seeded_scene[64];
@@ -4588,6 +4590,13 @@ static u32 vm_net_mock_battle_reward_exp_for_enemy(u32 enemyId)
     return VM_NET_MOCK_ROLE_MONSTER_EXP;
 }
 
+static u32 vm_net_mock_battle_reward_gold_for_enemy(u32 enemyId)
+{
+    if (enemyId == VM_NET_MOCK_BATTLE_POISON_SLIME_ID)
+        return VM_NET_MOCK_BATTLE_POISON_SLIME_GOLD;
+    return 0;
+}
+
 static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
                                                 u16 *dropSeqOut,
                                                 bool *dropGrantedOut)
@@ -4717,17 +4726,19 @@ static void vm_net_mock_battle_save_terminal_role_state(const char *reason)
                                                          &dropSeq,
                                                          &dropGranted);
         if (rewardExp != 0)
-            rewardGold = vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_GOLD", 0);
+            rewardGold = vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_GOLD",
+                                                    vm_net_mock_battle_reward_gold_for_enemy(g_vm_net_mock_battle_enemy_id_current));
     }
     vm_net_mock_role_apply_battle_settlement(roleHp, roleMp, rewardExp, rewardGold,
                                              &statusLastExp, &statusCurExp,
                                              &statusPercentExp, &statusLevel,
                                              &statusGold, &roleHp, &roleMp);
-    vm_autotest_note("mock_battle_terminal_save reason=%s enemy=%u victory=%u apply_exp=%u total_exp=%u level=%u hp=%u mp=%u drop=%u seq=%u\n",
+    vm_autotest_note("mock_battle_terminal_save reason=%s enemy=%u victory=%u apply_exp=%u gold=%u total_exp=%u level=%u hp=%u mp=%u drop=%u seq=%u\n",
                      reason ? reason : "terminal",
                      g_vm_net_mock_battle_enemy_id_current,
                      victory ? 1 : 0,
                      rewardExp,
+                     statusGold,
                      role->exp,
                      statusLevel,
                      roleHp,
@@ -8451,6 +8462,7 @@ static bool vm_net_mock_append_scene_actorinfo_npc_object(u8 *out, u32 outCap, u
 }
 
 static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *pos);
+static u32 vm_net_mock_build_battle_pending_settlement_response(u8 *out, u32 outCap);
 
 static bool vm_net_mock_is_actor_other_only10_request(const u8 *request, u32 requestLen)
 {
@@ -9745,6 +9757,8 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
     if (g_mockBattleAwaitingSettlement != 0)
     {
         (void)requestedTargetSlot;
+        if (g_vm_net_mock_battle_settlement_sent_serial != g_mockBattleOperateSessionSerial)
+            return vm_net_mock_build_battle_pending_settlement_response(out, outCap);
         return vm_net_mock_build_battle_case11_auto_off_response(out, outCap);
     }
     if (!terminalFollowup && g_mockBattleEnemyHpCurrent == 0)
@@ -9919,6 +9933,13 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
         }
     }
 
+    if (battleEndsThisRound)
+    {
+        if (!vm_net_mock_append_battle_status7_object(out, outCap, &pos))
+            return 0;
+        ++responseObjectCount;
+        g_vm_net_mock_battle_settlement_sent_serial = g_mockBattleOperateSessionSerial;
+    }
     if (!vm_net_mock_append_battle_action6_object(out, outCap, &pos,
                                                  actionInfo, actionInfoLen,
                                                  actionCount))
@@ -10027,6 +10048,8 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
     if (g_mockBattleAwaitingSettlement != 0)
     {
         (void)requestedTargetSlot;
+        if (g_vm_net_mock_battle_settlement_sent_serial != g_mockBattleOperateSessionSerial)
+            return vm_net_mock_build_battle_pending_settlement_response(out, outCap);
         return vm_net_mock_build_battle_case11_auto_off_response(out, outCap);
     }
     if (!terminalFollowup && g_mockBattleEnemyHpCurrent == 0)
@@ -10193,6 +10216,13 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
         }
     }
 
+    if (battleEndsThisRound)
+    {
+        if (!vm_net_mock_append_battle_status7_object(out, outCap, &pos))
+            return 0;
+        ++responseObjectCount;
+        g_vm_net_mock_battle_settlement_sent_serial = g_mockBattleOperateSessionSerial;
+    }
     if (!vm_net_mock_append_battle_action6_object(out, outCap, &pos,
                                                  actionInfo, actionInfoLen,
                                                  actionCount))
@@ -10242,10 +10272,13 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
     u32 statusPercentExp = vm_net_mock_role_exp_percent(totalExp);
     u32 statusGold = role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY;
     u32 statusLevel = role ? role->level : 1;
+    u32 recoverHp = vm_net_mock_env_u32_if_set("CBE_BATTLE_RECOVER_HP", 0);
+    u32 recoverMp = vm_net_mock_env_u32_if_set("CBE_BATTLE_RECOVER_MP", 0);
     u32 dropItemId = 0;
     u16 dropSeq = 0;
     bool dropGranted = false;
     u32 applyRewardExp = 0;
+    u32 displayExpGain = 0;
     bool victory = g_mockBattleEnemyHpCurrent == 0 && roleHp > 0;
 
     if (victory)
@@ -10253,31 +10286,40 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
         applyRewardExp = vm_net_mock_battle_grant_reward_once(&dropItemId,
                                                               &dropSeq,
                                                               &dropGranted);
-        statusExp = (g_vm_net_mock_battle_rewarded_serial == g_mockBattleOperateSessionSerial)
-                        ? g_vm_net_mock_battle_rewarded_exp
-                        : applyRewardExp;
+        displayExpGain = (g_vm_net_mock_battle_rewarded_serial == g_mockBattleOperateSessionSerial)
+                             ? g_vm_net_mock_battle_rewarded_exp
+                             : applyRewardExp;
     }
     if (role != NULL)
     {
-        u32 rewardGold = applyRewardExp ? vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_GOLD", 0) : 0;
+        u32 rewardGold = applyRewardExp ? vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_GOLD",
+                                                                     vm_net_mock_battle_reward_gold_for_enemy(g_vm_net_mock_battle_enemy_id_current)) : 0;
         vm_net_mock_role_apply_battle_settlement(roleHp, roleMp, applyRewardExp, rewardGold,
                                                  &statusLastExp, &statusCurExp,
                                                  &statusPercentExp, &statusLevel,
                                                  &statusGold, &roleHp, &roleMp);
+        statusExp = role->exp;
+    }
+    else
+    {
+        statusExp = totalExp + applyRewardExp;
     }
     statusLastExp = vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_LAST_EXP", statusLastExp);
     statusCurExp = vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_CUR_EXP", statusCurExp);
     statusPercentExp = vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_PERCENT_EXP",
                                                   statusPercentExp);
     statusLevel = vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_LEVEL", statusLevel);
-    vm_autotest_note("mock_battle_settle enemy=%u victory=%u exp=%u total_exp=%u level=%u hp=%u mp=%u drop=%u seq=%u\n",
+    vm_autotest_note("mock_battle_settle enemy=%u victory=%u exp_gain=%u exp_total=%u gold=%u level=%u hp=%u mp=%u recover=%u/%u drop=%u seq=%u\n",
                      g_vm_net_mock_battle_enemy_id_current,
                      victory ? 1 : 0,
+                     displayExpGain,
                      statusExp,
-                     role ? role->exp : totalExp,
+                     statusGold,
                      statusLevel,
                      roleHp,
                      roleMp,
+                     recoverHp,
+                     recoverMp,
                      dropGranted ? dropItemId : 0,
                      dropSeq);
 
@@ -10310,9 +10352,9 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
         return false;
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "bagstatus", 0))
         return false;
-    if (!vm_net_mock_put_object_u32(out, outCap, pos, "hp", roleHp))
+    if (!vm_net_mock_put_object_u32(out, outCap, pos, "hp", recoverHp))
         return false;
-    if (!vm_net_mock_put_object_u32(out, outCap, pos, "mp", roleMp))
+    if (!vm_net_mock_put_object_u32(out, outCap, pos, "mp", recoverMp))
         return false;
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "itemnum", 0))
         return false;
@@ -10372,6 +10414,31 @@ static bool vm_net_mock_append_battle_terminal_case9_object(u8 *out, u32 outCap,
 static bool vm_net_mock_append_battle_terminal_case11_object(u8 *out, u32 outCap, u32 *pos)
 {
     return vm_net_mock_append_battle_case11_auto_flag_object(out, outCap, pos, 0);
+}
+
+static u32 vm_net_mock_build_battle_pending_settlement_response(u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u8 objectCount = 0;
+
+    if (outCap < pos)
+        return 0;
+    if (!vm_net_mock_append_battle_status7_object(out, outCap, &pos))
+        return 0;
+    ++objectCount;
+    if (!vm_net_mock_append_battle_terminal_case11_object(out, outCap, &pos))
+        return 0;
+    ++objectCount;
+    if (!vm_net_mock_append_battle_terminal_case9_object(out, outCap, &pos))
+        return 0;
+    ++objectCount;
+
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    g_vm_net_mock_battle_settlement_sent_serial = g_mockBattleOperateSessionSerial;
+    vm_autotest_note("mock_battle_pending_settlement serial=%u objects=%u response=4/7+4/11+4/9 evidence=mmBattle:0x7BD0/0x743C\n",
+                     g_mockBattleOperateSessionSerial,
+                     objectCount);
+    return pos;
 }
 
 static u32 vm_net_mock_build_battle_auto12_cancel_response(const u8 *request, u32 requestLen,
@@ -10570,6 +10637,7 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
     g_vm_net_mock_battle_rewarded_exp = 0;
     g_vm_net_mock_battle_rewarded_drop_item = 0;
     g_vm_net_mock_battle_rewarded_drop_seq = 0;
+    g_vm_net_mock_battle_settlement_sent_serial = 0;
     g_mockBattleRoleHpCurrent = roleHp;
     g_mockBattleRoleHpMax = roleMaxHp;
     if (g_mockBattleRoleHpMax < g_mockBattleRoleHpCurrent)

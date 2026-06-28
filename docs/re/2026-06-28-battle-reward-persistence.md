@@ -6,6 +6,7 @@ Implement the first persisted monster reward loop for the local Jianghu OL mock
 server:
 
 - killing the default scene monster `actor_id=105` grants 5 EXP;
+- killing that monster also grants 5 copper;
 - the same kill rolls a 10% drop into the active role backpack;
 - current HP/MP, total EXP, derived level, money, position, and backpack state
   remain attached to the selected role row in `nvram/jhol_mock_roles.bin`.
@@ -42,6 +43,7 @@ scene challenge request. The default poison slime constants are:
 ```text
 enemy_id = 105
 reward_exp = 5
+reward_gold = 5
 drop_item_id = 304
 drop_rate = 10%
 ```
@@ -52,6 +54,30 @@ round ends. That helper persists the active role's current HP/MP and grants the
 reward only once per battle session. If the later `1/4/7` settlement object path
 also runs, it can display the same reward cache without applying EXP a second
 time.
+
+Runtime correction:
+
+- The first reward implementation saved EXP/HP/MP into the role DB when the
+  terminal action ended, but the later `g_mockBattleAwaitingSettlement` branch
+  still answered the next battle request with only `4/11 {result=1,type=0}`.
+  The client result panel gets "获得经验" and "金钱" from
+  `HandleBattleSettleMsg(0x743C)`, which only runs for server command case
+  `4/7`.
+- The waiting-settlement branch now sends a one-shot packet containing
+  `4/7 + 4/11 + 4/9`. `4/7` carries the cached reward fields and total money,
+  while later duplicate waiting-settlement requests fall back to the old `4/11`
+  auto-battle-off response.
+- A later runtime check showed that waiting for the next request was still too
+  late for the result panel. The terminal action in `4/6` can bring up the
+  panel immediately, so terminal operate responses now place `4/7` before `4/6`.
+  `HandleBattleSettleMsg(0x743C)` treats the `exp` field as total EXP and the
+  `gold` field as total money, then computes the visible gained values by
+  subtracting the old client-side actor fields. Therefore `4/7.exp` must be the
+  role's post-reward total EXP, not the per-kill delta.
+- The `hp` and `mp` fields in `4/7` are settlement-panel recovery amounts, not
+  the role's persisted current HP/MP. Current battle HP/MP remains stored from
+  the server-side battle state; packet `hp/mp` now default to `0/0` so the panel
+  shows no automatic recovery unless explicit recovery mechanics are added.
 
 Role normalization was tightened to clamp HP/MP only when they exceed max
 values. It no longer treats `hp == 0` or `mp == 0` as "missing data", because
