@@ -56,10 +56,12 @@ Runtime/server boundary:
   server level and monster family.
 - `vm_net_mock_monster_stats_for_enemy()`: derives HP, MP, attack, defense, EXP,
   copper, and optional drop info from the monster entry.
-- `vm_net_mock_battle_player_damage_to_enemy()`: player attack minus monster
-  defense, with role strength/level as the default player attack source.
-- `vm_net_mock_battle_enemy_damage_to_role()`: monster attack minus role defense,
-  with role endurance/level as the default role defense source.
+- `vm_net_mock_battle_player_damage_to_enemy()`: player attack from the unified
+  player attribute model against monster defense.
+- `vm_net_mock_battle_enemy_damage_to_role()`: monster attack against player
+  defense from the unified player attribute model.
+- `vm_net_mock_damage_after_defense()`: soft mitigation
+  `attack * 100 / (100 + defense)`, minimum `1`.
 
 The existing environment overrides remain useful for focused experiments:
 
@@ -202,5 +204,6 @@ result: passed
 - There is still no recovered live drop table. Only the user-specified poison
   slime drop is active. The stat layer supports `dropItemId/dropRatePercent`,
   so later recovered drops can be added without changing battle flow.
-- Player skill formulas are not yet recovered. The current normal attack uses a
-  conservative server-side default based on role strength and level.
+- Player skill formulas are not yet recovered. The current normal attack uses
+  the server-side player attribute model documented in
+  `2026-06-28-player-attribute-model.md`.

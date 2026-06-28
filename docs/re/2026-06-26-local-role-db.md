@@ -14,9 +14,12 @@ Current contract:
 - derive level from cumulative EXP thresholds: level 2 starts at 100 EXP,
   level 3 at 300 EXP, level 4 at 600 EXP, and each next level costs 100 more
   than the previous level
-- grant 10 EXP once per victorious monster battle settlement
+- grant battle rewards through the monster stat table; poison slime currently
+  grants 5 EXP and 5 copper
 - keep position and backpack state in the selected role row; do not use legacy
   mock-wide position or backpack state as a source of truth
+- keep equipped item ids in the selected role row; do not use a global equipment
+  state
 
 ## IDA Evidence
 
@@ -114,7 +117,7 @@ Header:
 
 ```text
 magic      "JHR1"
-version    2
+version    3
 activeRoleId
 roleCount
 roles[5]
@@ -139,6 +142,7 @@ u16 x, y
 u8 backpackItemCount
 u8 reserved
 u16 nextBackpackSeq
+equippedItemIds[8]
 backpackItems[40]:
   u32 itemId
   u16 seq
@@ -160,11 +164,14 @@ scene = default local Penglai scene
 position = 223,382
 backpack = item 800 seq 1 count 5
 nextBackpackSeq = 2
+equippedItemIds[0] = 1001
 ```
 
-Version 1 role DB files are upgraded in-place to version 2 by copying existing
-role fields and seeding each role with the default backpack. The old
-`nvram/jhol_mock_player_pos.bin` mirror is no longer read or written.
+Version 1 role DB files are upgraded in-place to version 3 by copying existing
+role fields, seeding each role with the default backpack, and assigning starter
+equipment. Version 2 files migrate to version 3 by keeping the existing
+backpack and adding equipment slots. The old `nvram/jhol_mock_player_pos.bin`
+mirror is no longer read or written.
 
 ## Server Behavior
 
@@ -186,9 +193,8 @@ Login and scene enter:
     old hard-coded `Codex`;
   - level words default to the normalized role level, so a fresh role displays
     level `1` in the property panel;
-  - strength/agility/wisdom/endurance/charm are derived from level and job with
-    small RPG-style base/gain tables, so old persisted role files immediately
-    show nonzero attributes without a DB format migration.
+  - strength/agility/wisdom/endurance/charm are derived from level/job and the
+    role's equipped items. Equipment data is parsed from local `equip.dsh`.
 - actor motion-resource generation uses the active role job/sex as its default,
   so the map sprite resource follows the selected role unless a `CBE_ACTOR_*`
   environment override is explicitly set.

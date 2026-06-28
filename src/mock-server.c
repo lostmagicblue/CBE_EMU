@@ -2398,8 +2398,11 @@ enum
     VM_NET_MOCK_SCENE_LANDING_SAFE_GAP = 32,
     VM_NET_MOCK_ROLE_DB_MAX_ROLES = 5,
     VM_NET_MOCK_ROLE_DB_LEGACY_VERSION = 1,
-    VM_NET_MOCK_ROLE_DB_VERSION = 2,
+    VM_NET_MOCK_ROLE_DB_BACKPACK_VERSION = 2,
+    VM_NET_MOCK_ROLE_DB_VERSION = 3,
     VM_NET_MOCK_ROLE_EXP_PER_LEVEL = 100,
+    VM_NET_MOCK_EQUIP_SLOT_COUNT = 8,
+    VM_NET_MOCK_EQUIP_CATALOG_MAX_ITEMS = 2048,
     VM_NET_MOCK_BATTLE_POISON_SLIME_ID = 105,
     VM_NET_MOCK_BATTLE_POISON_SLIME_EXP = 5,
     VM_NET_MOCK_BATTLE_POISON_SLIME_GOLD = 5,
@@ -2442,8 +2445,33 @@ typedef struct
     u8 backpackItemCount;
     u8 reserved1;
     u16 nextBackpackSeq;
+    u32 equippedItemIds[VM_NET_MOCK_EQUIP_SLOT_COUNT];
     vm_net_mock_backpack_item_state backpackItems[VM_NET_MOCK_BACKPACK_MAX_ITEMS];
 } vm_net_mock_role_state;
+
+typedef struct
+{
+    u32 roleId;
+    char name[32];
+    u8 job;
+    u8 sex;
+    u8 backpackCapacity;
+    u8 reserved0;
+    u32 level;
+    u32 exp;
+    u32 hp;
+    u32 hpMax;
+    u32 mp;
+    u32 mpMax;
+    u32 money;
+    char scene[64];
+    u16 x;
+    u16 y;
+    u8 backpackItemCount;
+    u8 reserved1;
+    u16 nextBackpackSeq;
+    vm_net_mock_backpack_item_state backpackItems[VM_NET_MOCK_BACKPACK_MAX_ITEMS];
+} vm_net_mock_role_state_v2;
 
 typedef struct
 {
@@ -2480,14 +2508,65 @@ typedef struct
     u32 version;
     u32 activeRoleId;
     u32 roleCount;
+    vm_net_mock_role_state_v2 roles[VM_NET_MOCK_ROLE_DB_MAX_ROLES];
+} vm_net_mock_role_db_file_v2;
+
+typedef struct
+{
+    char magic[4];
+    u32 version;
+    u32 activeRoleId;
+    u32 roleCount;
     vm_net_mock_role_state roles[VM_NET_MOCK_ROLE_DB_MAX_ROLES];
 } vm_net_mock_role_db_file;
+
+typedef struct
+{
+    u32 hp;
+    u32 mp;
+    u32 attack;
+    u32 armor;
+    u32 strength;
+    u32 agility;
+    u32 wisdom;
+    u32 crit;
+    u32 hit;
+    u32 dodge;
+    u32 resist;
+} vm_net_mock_equipment_bonus;
+
+typedef struct
+{
+    u32 level;
+    u32 job;
+    u32 baseStrength;
+    u32 baseAgility;
+    u32 baseWisdom;
+    u32 baseEndurance;
+    u32 baseCharm;
+    u32 strength;
+    u32 agility;
+    u32 wisdom;
+    u32 endurance;
+    u32 charm;
+    u32 maxHp;
+    u32 maxMp;
+    u32 attack;
+    u32 defense;
+    u32 hit;
+    u32 dodge;
+    u32 crit;
+    u32 resist;
+    vm_net_mock_equipment_bonus equipment;
+} vm_net_mock_player_stats;
 
 static vm_net_mock_role_state *vm_net_mock_active_role(void);
 static u32 vm_net_mock_role_level_from_exp(u32 exp);
 static u32 vm_net_mock_role_next_level_start_exp(u32 exp);
 static u32 vm_net_mock_role_exp_percent(u32 exp);
 static u32 vm_net_mock_role_last_level_exp(u32 exp);
+static void vm_net_mock_role_build_player_stats(const vm_net_mock_role_state *role,
+                                                vm_net_mock_player_stats *stats);
 static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap);
 
 static u8 vm_net_mock_role_backpack_count(const vm_net_mock_role_state *role)
@@ -2520,9 +2599,21 @@ typedef struct
     u8 visual;
 } vm_net_mock_shop_catalog_item;
 
+typedef struct
+{
+    u32 itemId;
+    u8 slot;
+    u8 levelRequired;
+    u16 reserved0;
+    vm_net_mock_equipment_bonus bonus;
+} vm_net_mock_equipment_catalog_item;
+
 static vm_net_mock_shop_catalog_item g_vm_net_mock_shop_catalog[VM_NET_MOCK_SHOP_MAX_CATALOG_ITEMS];
 static u32 g_vm_net_mock_shop_catalog_count = 0;
 static bool g_vm_net_mock_shop_catalog_loaded = false;
+static vm_net_mock_equipment_catalog_item g_vm_net_mock_equipment_catalog[VM_NET_MOCK_EQUIP_CATALOG_MAX_ITEMS];
+static u32 g_vm_net_mock_equipment_catalog_count = 0;
+static bool g_vm_net_mock_equipment_catalog_loaded = false;
 
 static u32 vm_net_mock_shop_catalog_group(u32 itemId)
 {
@@ -2757,6 +2848,202 @@ static u32 vm_net_mock_load_shop_catalog(void)
     vm_autotest_note("mock_shop_catalog_loaded total=%u items=%u equips=%u source=item.dsh/equip.dsh\n",
                      g_vm_net_mock_shop_catalog_count, itemCount, equipCount);
     return g_vm_net_mock_shop_catalog_count;
+}
+
+static u8 vm_net_mock_equipment_slot_for_category(u32 category)
+{
+    switch (category)
+    {
+    case 7: /* sword */
+    case 8: /* dagger */
+    case 9: /* staff */
+        return 0;
+    case 0:
+        return 1; /* helmet */
+    case 1:
+        return 2; /* chest */
+    case 2:
+        return 3; /* cloak */
+    case 3:
+        return 4; /* belt */
+    case 4:
+        return 5; /* leggings */
+    case 5:
+        return 6; /* boots */
+    case 6:
+        return 7; /* ring */
+    default:
+        return 0xff;
+    }
+}
+
+static bool vm_net_mock_add_equipment_catalog_item(u32 itemId, u32 levelRequired,
+                                                   u32 category,
+                                                   const vm_net_mock_equipment_bonus *bonus)
+{
+    vm_net_mock_equipment_catalog_item *item = NULL;
+    u8 slot = vm_net_mock_equipment_slot_for_category(category);
+
+    if (itemId == 0 || bonus == NULL || slot >= VM_NET_MOCK_EQUIP_SLOT_COUNT ||
+        g_vm_net_mock_equipment_catalog_count >= VM_NET_MOCK_EQUIP_CATALOG_MAX_ITEMS)
+    {
+        return false;
+    }
+
+    item = &g_vm_net_mock_equipment_catalog[g_vm_net_mock_equipment_catalog_count++];
+    memset(item, 0, sizeof(*item));
+    item->itemId = itemId;
+    item->slot = slot;
+    item->levelRequired = (u8)(levelRequired > 255 ? 255 : levelRequired);
+    item->bonus = *bonus;
+    return true;
+}
+
+static u32 vm_net_mock_load_equipment_catalog_dsh(const char *path)
+{
+    static u8 data[131072];
+    u32 len = vm_net_mock_load_response_file(path, data, sizeof(data));
+    u32 columnCount = 0;
+    u32 rowCount = 0;
+    u32 pos = 16;
+    u32 added = 0;
+
+    if (len < 16)
+        return 0;
+    columnCount = vm_net_mock_read_le32_at(data, 4);
+    rowCount = vm_net_mock_read_le32_at(data, 8);
+    if (columnCount == 0 || columnCount > 64 || rowCount > 10000)
+        return 0;
+
+    for (u32 i = 0; i < columnCount; ++i)
+    {
+        u32 fieldLen = 0;
+        if (pos >= len)
+            return added;
+        fieldLen = data[pos++];
+        if (pos + fieldLen > len)
+            return added;
+        pos += fieldLen;
+    }
+
+    for (u32 row = 0; row < rowCount && pos + 4 <= len; ++row)
+    {
+        u32 rowLen = vm_net_mock_read_le32_at(data, pos);
+        u32 rowPos = pos + 4;
+        u32 rowEnd = rowPos + rowLen;
+        u32 itemId = 0;
+        u32 levelRequired = 1;
+        u32 category = 0xffffffffu;
+        vm_net_mock_equipment_bonus bonus;
+
+        memset(&bonus, 0, sizeof(bonus));
+        if (rowEnd > len || rowEnd < rowPos)
+            break;
+
+        for (u32 col = 0; col < columnCount && rowPos < rowEnd; ++col)
+        {
+            u32 valueLen = data[rowPos++];
+            const u8 *value = data + rowPos;
+            u32 parsed = 0;
+
+            if (rowPos + valueLen > rowEnd)
+                break;
+            parsed = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+            switch (col)
+            {
+            case 0:
+                itemId = parsed;
+                break;
+            case 3:
+                levelRequired = parsed ? parsed : 1;
+                break;
+            case 7:
+                category = parsed;
+                break;
+            case 8:
+                bonus.armor = parsed;
+                break;
+            case 9:
+                bonus.attack = parsed;
+                break;
+            case 10:
+                bonus.hp = parsed;
+                break;
+            case 11:
+                bonus.mp = parsed;
+                break;
+            case 12:
+                bonus.strength = parsed;
+                break;
+            case 13:
+                bonus.agility = parsed;
+                break;
+            case 14:
+                bonus.wisdom = parsed;
+                break;
+            case 15:
+                bonus.crit = parsed;
+                break;
+            case 16:
+                bonus.hit = parsed;
+                break;
+            case 17:
+                bonus.dodge = parsed;
+                break;
+            case 18:
+                bonus.resist = parsed;
+                break;
+            default:
+                break;
+            }
+            rowPos += valueLen;
+        }
+
+        if (vm_net_mock_add_equipment_catalog_item(itemId, levelRequired, category, &bonus))
+            ++added;
+        pos = rowEnd;
+    }
+
+    return added;
+}
+
+static u32 vm_net_mock_load_equipment_catalog(void)
+{
+    u32 equipCount = 0;
+
+    if (g_vm_net_mock_equipment_catalog_loaded)
+        return g_vm_net_mock_equipment_catalog_count;
+
+    g_vm_net_mock_equipment_catalog_loaded = true;
+    g_vm_net_mock_equipment_catalog_count = 0;
+    equipCount = vm_net_mock_load_equipment_catalog_dsh("JHOnlineData/equip.dsh");
+    if (equipCount == 0)
+        equipCount = vm_net_mock_load_equipment_catalog_dsh("bin/JHOnlineData/equip.dsh");
+
+    if (equipCount == 0)
+    {
+        printf("[warn][network] mock_equip_catalog fallback=equip.dsh-not-found\n");
+    }
+    else
+    {
+        printf("[info][network] mock_equip_catalog total=%u source=equip.dsh\n",
+               g_vm_net_mock_equipment_catalog_count);
+    }
+    return g_vm_net_mock_equipment_catalog_count;
+}
+
+static const vm_net_mock_equipment_catalog_item *vm_net_mock_find_equipment_catalog_item(u32 itemId)
+{
+    u32 total = vm_net_mock_load_equipment_catalog();
+
+    if (itemId == 0)
+        return NULL;
+    for (u32 i = 0; i < total; ++i)
+    {
+        if (g_vm_net_mock_equipment_catalog[i].itemId == itemId)
+            return &g_vm_net_mock_equipment_catalog[i];
+    }
+    return NULL;
 }
 
 static bool vm_net_mock_shop17_should_include_item(u32 itemId);
@@ -3948,6 +4235,176 @@ static u16 vm_net_mock_role_charm(const vm_net_mock_role_state *role, u32 level,
     return (u16)value;
 }
 
+static u32 vm_net_mock_cap_u32(u32 value, u32 cap)
+{
+    return value > cap ? cap : value;
+}
+
+static void vm_net_mock_equipment_bonus_add(vm_net_mock_equipment_bonus *dst,
+                                            const vm_net_mock_equipment_bonus *src)
+{
+    if (dst == NULL || src == NULL)
+        return;
+    dst->hp += src->hp;
+    dst->mp += src->mp;
+    dst->attack += src->attack;
+    dst->armor += src->armor;
+    dst->strength += src->strength;
+    dst->agility += src->agility;
+    dst->wisdom += src->wisdom;
+    dst->crit += src->crit;
+    dst->hit += src->hit;
+    dst->dodge += src->dodge;
+    dst->resist += src->resist;
+}
+
+static void vm_net_mock_role_collect_equipment_bonus(const vm_net_mock_role_state *role,
+                                                     u32 level,
+                                                     vm_net_mock_equipment_bonus *bonus)
+{
+    if (bonus == NULL)
+        return;
+    memset(bonus, 0, sizeof(*bonus));
+    if (role == NULL)
+        return;
+    if (level == 0)
+        level = 1;
+    for (u32 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
+    {
+        u32 itemId = role->equippedItemIds[slot];
+        const vm_net_mock_equipment_catalog_item *item = NULL;
+
+        if (itemId == 0)
+            continue;
+        item = vm_net_mock_find_equipment_catalog_item(itemId);
+        if (item == NULL || item->slot != slot)
+            continue;
+        if (item->levelRequired > level)
+            continue;
+        vm_net_mock_equipment_bonus_add(bonus, &item->bonus);
+    }
+}
+
+static void vm_net_mock_role_build_player_stats(const vm_net_mock_role_state *role,
+                                                vm_net_mock_player_stats *stats)
+{
+    u32 level = role ? role->level : 1;
+    u32 job = role ? role->job : 1;
+    vm_net_mock_equipment_bonus equipment;
+
+    if (stats == NULL)
+        return;
+    memset(stats, 0, sizeof(*stats));
+    if (level == 0 && role != NULL)
+        level = vm_net_mock_role_level_from_exp(role->exp);
+    if (level == 0)
+        level = 1;
+    if (job == 0 || job > 3)
+        job = 1;
+
+    vm_net_mock_role_collect_equipment_bonus(role, level, &equipment);
+    stats->level = level;
+    stats->job = job;
+    stats->equipment = equipment;
+    stats->baseStrength = vm_net_mock_role_derived_attr(level, job, 0);
+    stats->baseAgility = vm_net_mock_role_derived_attr(level, job, 1);
+    stats->baseWisdom = vm_net_mock_role_derived_attr(level, job, 2);
+    stats->baseEndurance = vm_net_mock_role_derived_attr(level, job, 3);
+    stats->baseCharm = vm_net_mock_role_derived_attr(level, job, 4);
+    stats->strength = vm_net_mock_cap_u32(stats->baseStrength + equipment.strength, 999);
+    stats->agility = vm_net_mock_cap_u32(stats->baseAgility + equipment.agility, 999);
+    stats->wisdom = vm_net_mock_cap_u32(stats->baseWisdom + equipment.wisdom, 999);
+    stats->endurance = vm_net_mock_cap_u32(stats->baseEndurance, 999);
+    stats->charm = vm_net_mock_cap_u32(vm_net_mock_role_charm(role, level, job), 999);
+
+    stats->maxHp = 90 + level * 8 + stats->endurance * 2 + equipment.hp;
+    stats->maxMp = 70 + level * 9 + stats->wisdom * 3 + equipment.mp;
+    stats->attack = 6 + level * 2 + stats->strength / 2 + equipment.attack / 3;
+    stats->defense = 4 + level + stats->endurance / 2 + equipment.armor / 5;
+    stats->hit = 75 + level + stats->agility * 2 + equipment.hit;
+    stats->dodge = 3 + level / 2 + stats->agility / 2 + equipment.dodge / 2;
+    stats->crit = 1 + stats->agility / 3 + stats->wisdom / 5 + equipment.crit / 2;
+    stats->resist = stats->wisdom / 2 + stats->endurance / 3 + equipment.resist;
+
+    stats->maxHp = vm_net_mock_cap_u32(stats->maxHp, 9999);
+    stats->maxMp = vm_net_mock_cap_u32(stats->maxMp, 9999);
+    stats->attack = vm_net_mock_cap_u32(stats->attack, 9999);
+    stats->defense = vm_net_mock_cap_u32(stats->defense, 9999);
+    stats->hit = vm_net_mock_cap_u32(stats->hit, 9999);
+    stats->dodge = vm_net_mock_cap_u32(stats->dodge, 9999);
+    stats->crit = vm_net_mock_cap_u32(stats->crit, 9999);
+    stats->resist = vm_net_mock_cap_u32(stats->resist, 9999);
+}
+
+static void vm_net_mock_role_sync_derived_vitals(vm_net_mock_role_state *role)
+{
+    vm_net_mock_player_stats stats;
+    bool refillHp = false;
+    bool refillMp = false;
+
+    if (role == NULL)
+        return;
+    vm_net_mock_role_build_player_stats(role, &stats);
+    refillHp = (role->hpMax == 0);
+    refillMp = (role->mpMax == 0);
+    role->hpMax = stats.maxHp ? stats.maxHp : VM_NET_MOCK_ROLE_DEFAULT_HP;
+    role->mpMax = stats.maxMp ? stats.maxMp : VM_NET_MOCK_ROLE_DEFAULT_MP;
+    if (refillHp)
+        role->hp = role->hpMax;
+    if (refillMp)
+        role->mp = role->mpMax;
+    if (role->hp > role->hpMax)
+        role->hp = role->hpMax;
+    if (role->mp > role->mpMax)
+        role->mp = role->mpMax;
+}
+
+static u32 vm_net_mock_damage_after_defense(u32 attack, u32 defense)
+{
+    uint64_t scaled = 0;
+
+    if (attack == 0)
+        attack = 1;
+    scaled = ((uint64_t)attack * 100ull + defense / 2u) / (100u + defense);
+    if (scaled == 0)
+        scaled = 1;
+    if (scaled > 0xffffffffull)
+        scaled = 0xffffffffull;
+    return (u32)scaled;
+}
+
+static void vm_net_mock_role_default_vitals(const vm_net_mock_role_state *role,
+                                            u32 *hpOut, u32 *hpMaxOut,
+                                            u32 *mpOut, u32 *mpMaxOut)
+{
+    vm_net_mock_player_stats stats;
+    u32 hp = VM_NET_MOCK_ROLE_DEFAULT_HP;
+    u32 mp = VM_NET_MOCK_ROLE_DEFAULT_MP;
+
+    vm_net_mock_role_build_player_stats(role, &stats);
+    if (role != NULL)
+    {
+        hp = role->hp;
+        mp = role->mp;
+    }
+    if (stats.maxHp == 0)
+        stats.maxHp = VM_NET_MOCK_ROLE_DEFAULT_HP;
+    if (stats.maxMp == 0)
+        stats.maxMp = VM_NET_MOCK_ROLE_DEFAULT_MP;
+    if (hp > stats.maxHp)
+        hp = stats.maxHp;
+    if (mp > stats.maxMp)
+        mp = stats.maxMp;
+    if (hpOut)
+        *hpOut = hp;
+    if (hpMaxOut)
+        *hpMaxOut = stats.maxHp;
+    if (mpOut)
+        *mpOut = mp;
+    if (mpMaxOut)
+        *mpMaxOut = stats.maxMp;
+}
+
 typedef enum
 {
     VM_NET_MOCK_MONSTER_SLIME = 0,
@@ -4232,23 +4689,17 @@ static vm_net_mock_monster_stats vm_net_mock_monster_stats_for_enemy(u32 enemyId
 static u32 vm_net_mock_battle_role_attack_default(void)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
-    u32 level = role ? role->level : 1;
-    u32 job = role ? role->job : 1;
-    u32 strength = vm_net_mock_role_derived_attr(level, job, 0);
-    if (level == 0)
-        level = 1;
-    return 8 + level + strength / 2;
+    vm_net_mock_player_stats stats;
+    vm_net_mock_role_build_player_stats(role, &stats);
+    return stats.attack ? stats.attack : 1;
 }
 
 static u32 vm_net_mock_battle_role_defense_default(void)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
-    u32 level = role ? role->level : 1;
-    u32 job = role ? role->job : 1;
-    u32 endurance = vm_net_mock_role_derived_attr(level, job, 3);
-    if (level == 0)
-        level = 1;
-    return 1 + endurance / 3 + level / 4;
+    vm_net_mock_player_stats stats;
+    vm_net_mock_role_build_player_stats(role, &stats);
+    return stats.defense;
 }
 
 static u32 vm_net_mock_battle_player_damage_to_enemy(u32 enemyId, u32 enemyHpCurrent)
@@ -4257,7 +4708,7 @@ static u32 vm_net_mock_battle_player_damage_to_enemy(u32 enemyId, u32 enemyHpCur
     u32 attack = vm_net_mock_env_u32_if_set("CBE_BATTLE_PLAYER_ATTACK",
                                             vm_net_mock_battle_role_attack_default());
     u32 defense = vm_net_mock_env_u32_if_set("CBE_BATTLE_ENEMY_DEFENSE", stats.defense);
-    u32 damage = attack > defense ? attack - defense : 1;
+    u32 damage = vm_net_mock_damage_after_defense(attack, defense);
 
     if (enemyHpCurrent == 0)
         return 0;
@@ -4272,7 +4723,7 @@ static u32 vm_net_mock_battle_enemy_damage_to_role(u32 enemyId, u32 roleHpCurren
     u32 attack = vm_net_mock_env_u32_if_set("CBE_BATTLE_ENEMY_ATTACK", stats.attack);
     u32 defense = vm_net_mock_env_u32_if_set("CBE_BATTLE_ROLE_DEFENSE",
                                              vm_net_mock_battle_role_defense_default());
-    u32 damage = attack > defense ? attack - defense : 1;
+    u32 damage = vm_net_mock_damage_after_defense(attack, defense);
 
     if (roleHpCurrent == 0)
         return 0;
@@ -4284,6 +4735,28 @@ static u32 vm_net_mock_battle_enemy_damage_to_role(u32 enemyId, u32 roleHpCurren
 static const char *vm_net_mock_role_initial_scene_name(void)
 {
     return vm_net_mock_default_scene_name();
+}
+
+static u32 vm_net_mock_role_default_weapon_for_job(u32 job)
+{
+    switch (job)
+    {
+    case 2:
+        return 1501; /* starter dagger */
+    case 3:
+        return 2001; /* starter staff */
+    case 1:
+    default:
+        return 1001; /* starter sword */
+    }
+}
+
+static void vm_net_mock_role_init_default_equipment(vm_net_mock_role_state *role)
+{
+    if (role == NULL)
+        return;
+    memset(role->equippedItemIds, 0, sizeof(role->equippedItemIds));
+    role->equippedItemIds[0] = vm_net_mock_role_default_weapon_for_job(role->job);
 }
 
 static void vm_net_mock_role_init_default_backpack(vm_net_mock_role_state *role)
@@ -4334,7 +4807,9 @@ static void vm_net_mock_role_init_default(vm_net_mock_role_state *role)
     snprintf(role->scene, sizeof(role->scene), "%s", vm_net_mock_role_initial_scene_name());
     role->x = VM_NET_MOCK_ROLE_INITIAL_X;
     role->y = VM_NET_MOCK_ROLE_INITIAL_Y;
+    vm_net_mock_role_init_default_equipment(role);
     vm_net_mock_role_init_default_backpack(role);
+    vm_net_mock_role_sync_derived_vitals(role);
 }
 
 static void vm_net_mock_role_copy_from_v1(vm_net_mock_role_state *dst,
@@ -4358,7 +4833,36 @@ static void vm_net_mock_role_copy_from_v1(vm_net_mock_role_state *dst,
     memcpy(dst->scene, src->scene, sizeof(dst->scene));
     dst->x = src->x;
     dst->y = src->y;
+    vm_net_mock_role_init_default_equipment(dst);
     vm_net_mock_role_init_default_backpack(dst);
+}
+
+static void vm_net_mock_role_copy_from_v2(vm_net_mock_role_state *dst,
+                                          const vm_net_mock_role_state_v2 *src)
+{
+    if (dst == NULL || src == NULL)
+        return;
+    memset(dst, 0, sizeof(*dst));
+    dst->roleId = src->roleId;
+    memcpy(dst->name, src->name, sizeof(dst->name));
+    dst->job = src->job;
+    dst->sex = src->sex;
+    dst->backpackCapacity = src->backpackCapacity;
+    dst->level = src->level;
+    dst->exp = src->exp;
+    dst->hp = src->hp;
+    dst->hpMax = src->hpMax;
+    dst->mp = src->mp;
+    dst->mpMax = src->mpMax;
+    dst->money = src->money;
+    memcpy(dst->scene, src->scene, sizeof(dst->scene));
+    dst->x = src->x;
+    dst->y = src->y;
+    dst->backpackItemCount = src->backpackItemCount;
+    dst->reserved1 = src->reserved1;
+    dst->nextBackpackSeq = src->nextBackpackSeq;
+    memcpy(dst->backpackItems, src->backpackItems, sizeof(dst->backpackItems));
+    vm_net_mock_role_init_default_equipment(dst);
 }
 
 static void vm_net_mock_role_normalize_backpack(vm_net_mock_role_state *role)
@@ -4418,14 +4922,8 @@ static void vm_net_mock_role_normalize(vm_net_mock_role_state *role)
         role->sex = 0;
     if (role->backpackCapacity == 0 || role->backpackCapacity > VM_NET_MOCK_BACKPACK_CAPACITY)
         role->backpackCapacity = VM_NET_MOCK_BACKPACK_CAPACITY;
-    if (role->hpMax == 0)
-        role->hpMax = VM_NET_MOCK_ROLE_DEFAULT_HP;
-    if (role->mpMax == 0)
-        role->mpMax = VM_NET_MOCK_ROLE_DEFAULT_MP;
-    if (role->hp > role->hpMax)
-        role->hp = role->hpMax;
-    if (role->mp > role->mpMax)
-        role->mp = role->mpMax;
+    role->level = vm_net_mock_role_level_from_exp(role->exp);
+    vm_net_mock_role_sync_derived_vitals(role);
     role->scene[sizeof(role->scene) - 1] = 0;
     if (!vm_net_mock_scene_name_is_safe(role->scene))
         snprintf(role->scene, sizeof(role->scene), "%s", vm_net_mock_role_initial_scene_name());
@@ -4436,7 +4934,6 @@ static void vm_net_mock_role_normalize(vm_net_mock_role_state *role)
     }
     vm_net_mock_adjust_safe_player_pos_for_scene(role->scene, &role->x, &role->y);
     vm_net_mock_role_normalize_backpack(role);
-    role->level = vm_net_mock_role_level_from_exp(role->exp);
 }
 
 static u32 vm_net_mock_role_db_repair_duplicate_default_names(void)
@@ -4494,6 +4991,7 @@ static void vm_net_mock_role_db_load(void)
     char path[128];
     u8 fileBuf[sizeof(vm_net_mock_role_db_file)];
     vm_net_mock_role_db_file loaded;
+    vm_net_mock_role_db_file_v2 backpackFile;
     vm_net_mock_role_db_file_v1 legacy;
     bool loadedFromFile = false;
     bool needsSave = false;
@@ -4524,6 +5022,28 @@ static void vm_net_mock_role_db_load(void)
             g_vm_net_mock_role_db = loaded;
             loadedFromFile = true;
         }
+        else if (readLen == sizeof(backpackFile))
+        {
+            memcpy(&backpackFile, fileBuf, sizeof(backpackFile));
+            if (memcmp(backpackFile.magic, "JHR1", 4) == 0 &&
+                backpackFile.version == VM_NET_MOCK_ROLE_DB_BACKPACK_VERSION &&
+                backpackFile.roleCount <= VM_NET_MOCK_ROLE_DB_MAX_ROLES)
+            {
+                memset(&g_vm_net_mock_role_db, 0, sizeof(g_vm_net_mock_role_db));
+                memcpy(g_vm_net_mock_role_db.magic, "JHR1", 4);
+                g_vm_net_mock_role_db.version = VM_NET_MOCK_ROLE_DB_VERSION;
+                g_vm_net_mock_role_db.activeRoleId = backpackFile.activeRoleId;
+                g_vm_net_mock_role_db.roleCount = backpackFile.roleCount;
+                for (u32 i = 0; i < backpackFile.roleCount; ++i)
+                    vm_net_mock_role_copy_from_v2(&g_vm_net_mock_role_db.roles[i],
+                                                  &backpackFile.roles[i]);
+                loadedFromFile = true;
+                needsSave = true;
+                vm_autotest_note("mock_role_db_migrate version=2->3 roles=%u active=%u\n",
+                                 g_vm_net_mock_role_db.roleCount,
+                                 g_vm_net_mock_role_db.activeRoleId);
+            }
+        }
         else if (readLen == sizeof(legacy))
         {
             memcpy(&legacy, fileBuf, sizeof(legacy));
@@ -4541,7 +5061,7 @@ static void vm_net_mock_role_db_load(void)
                                                   &legacy.roles[i]);
                 loadedFromFile = true;
                 needsSave = true;
-                vm_autotest_note("mock_role_db_migrate version=1->2 roles=%u active=%u\n",
+                vm_autotest_note("mock_role_db_migrate version=1->3 roles=%u active=%u\n",
                                  g_vm_net_mock_role_db.roleCount,
                                  g_vm_net_mock_role_db.activeRoleId);
             }
@@ -4751,7 +5271,10 @@ static bool vm_net_mock_role_db_create_from_title(const vm_net_mock_title_role_c
         vm_net_mock_role_assign_fallback_name(role);
     role->job = vm_net_mock_role_db_job_from_title_value(request->rawJob, request->rawJobIsIndex);
     role->sex = vm_net_mock_role_db_sex_from_title_value(request->rawSex);
+    vm_net_mock_role_init_default_equipment(role);
     vm_net_mock_role_normalize(role);
+    role->hp = role->hpMax;
+    role->mp = role->mpMax;
 
     g_vm_net_mock_role_db.roleCount += 1;
     g_vm_net_mock_role_db.activeRoleId = actorId;
@@ -5005,6 +5528,7 @@ static void vm_net_mock_role_apply_battle_settlement(u32 hp, u32 mp,
 
     if (role == NULL)
         return;
+    vm_net_mock_role_sync_derived_vitals(role);
     if (hp > role->hpMax)
         hp = role->hpMax;
     if (mp > role->mpMax)
@@ -5035,7 +5559,11 @@ static void vm_net_mock_role_apply_battle_settlement(u32 hp, u32 mp,
 static u32 vm_net_mock_role_current_hp_for_battle(void)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
-    return role ? role->hp : VM_NET_MOCK_ROLE_DEFAULT_HP;
+    u32 hp = 0;
+    u32 hpMax = 0;
+    vm_net_mock_role_default_vitals(role, &hp, &hpMax, NULL, NULL);
+    (void)hpMax;
+    return hp;
 }
 
 static void vm_net_mock_battle_save_terminal_role_state(const char *reason)
@@ -9595,14 +10123,14 @@ static u32 vm_net_mock_build_battle_start_info_blob(u8 *out, u32 outCap,
     const char *roleName = role ? role->name : vm_net_mock_default_role_name();
     const char *leftName = vm_net_mock_env_str("CBE_BATTLE_LEFT_NAME", "Monster");
     u32 roleIdDefault = role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID;
-    u32 roleHpDefault = role ? role->hp : VM_NET_MOCK_ROLE_DEFAULT_HP;
-    u32 roleMaxHpDefault = role ? role->hpMax : VM_NET_MOCK_ROLE_DEFAULT_HP;
-    u32 roleMpDefault = role ? role->mp : VM_NET_MOCK_ROLE_DEFAULT_MP;
-    u32 roleMaxMpDefault = role ? role->mpMax : VM_NET_MOCK_ROLE_DEFAULT_MP;
-    u32 roleHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP", roleHpDefault);
-    u32 roleMaxHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_HP", roleHp);
-    u32 roleMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MP", roleMpDefault);
-    u32 roleMaxMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_MP", roleMp);
+    u32 roleHpDefault = VM_NET_MOCK_ROLE_DEFAULT_HP;
+    u32 roleMaxHpDefault = VM_NET_MOCK_ROLE_DEFAULT_HP;
+    u32 roleMpDefault = VM_NET_MOCK_ROLE_DEFAULT_MP;
+    u32 roleMaxMpDefault = VM_NET_MOCK_ROLE_DEFAULT_MP;
+    u32 roleHp = 0;
+    u32 roleMaxHp = 0;
+    u32 roleMp = 0;
+    u32 roleMaxMp = 0;
     vm_net_mock_monster_stats enemyStats;
     u32 enemyHp = 0;
     u32 enemyMaxHp = 0;
@@ -9621,6 +10149,15 @@ static u32 vm_net_mock_build_battle_start_info_blob(u8 *out, u32 outCap,
     u8 leftVisual0 = vm_net_mock_env_u8("CBE_BATTLE_LEFT_VISUAL_BYTE0", 0);
     u8 leftVisual1 = vm_net_mock_env_u8("CBE_BATTLE_LEFT_VISUAL_BYTE1", 1);
 
+    vm_net_mock_role_default_vitals(role,
+                                    &roleHpDefault,
+                                    &roleMaxHpDefault,
+                                    &roleMpDefault,
+                                    &roleMaxMpDefault);
+    roleHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP", roleHpDefault);
+    roleMaxHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_HP", roleMaxHpDefault);
+    roleMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MP", roleMpDefault);
+    roleMaxMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_MP", roleMaxMpDefault);
     if (roleId == 0)
         roleId = roleIdDefault;
     if (roleMaxHp < roleMaxHpDefault)
@@ -9705,15 +10242,24 @@ static u32 vm_net_mock_build_battle_scene_start_info_blob(u8 *out, u32 outCap,
     u32 pos = 0;
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     u32 roleIdDefault = role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID;
-    u32 roleHpDefault = role ? role->hp : VM_NET_MOCK_ROLE_DEFAULT_HP;
-    u32 roleMaxHpDefault = role ? role->hpMax : VM_NET_MOCK_ROLE_DEFAULT_HP;
-    u32 roleMpDefault = role ? role->mp : VM_NET_MOCK_ROLE_DEFAULT_MP;
-    u32 roleMaxMpDefault = role ? role->mpMax : VM_NET_MOCK_ROLE_DEFAULT_MP;
-    u32 roleHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP", roleHpDefault);
-    u32 roleMaxHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_HP", roleHp);
-    u32 roleMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MP", roleMpDefault);
-    u32 roleMaxMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_MP", roleMp);
+    u32 roleHpDefault = VM_NET_MOCK_ROLE_DEFAULT_HP;
+    u32 roleMaxHpDefault = VM_NET_MOCK_ROLE_DEFAULT_HP;
+    u32 roleMpDefault = VM_NET_MOCK_ROLE_DEFAULT_MP;
+    u32 roleMaxMpDefault = VM_NET_MOCK_ROLE_DEFAULT_MP;
+    u32 roleHp = 0;
+    u32 roleMaxHp = 0;
+    u32 roleMp = 0;
+    u32 roleMaxMp = 0;
 
+    vm_net_mock_role_default_vitals(role,
+                                    &roleHpDefault,
+                                    &roleMaxHpDefault,
+                                    &roleMpDefault,
+                                    &roleMaxMpDefault);
+    roleHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP", roleHpDefault);
+    roleMaxHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_HP", roleMaxHpDefault);
+    roleMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MP", roleMpDefault);
+    roleMaxMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_MP", roleMaxMpDefault);
     if (roleId == 0)
         roleId = roleIdDefault;
     if (roleMaxHp < roleMaxHpDefault)
@@ -10867,11 +11413,15 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
     u32 sceneMonsterPosX = 0;
     u32 sceneMonsterPosY = 0;
     vm_net_mock_role_state *role = vm_net_mock_active_role();
-    u32 roleId = vm_net_mock_env_u32("CBE_BATTLE_ROLE_ID", role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID);
-    u32 roleHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP", role ? role->hp : VM_NET_MOCK_ROLE_DEFAULT_HP);
-    u32 roleMaxHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_HP", roleHp);
-    u32 roleMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MP", role ? role->mp : VM_NET_MOCK_ROLE_DEFAULT_MP);
-    u32 roleMaxMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_MP", roleMp);
+    u32 roleHpDefault = VM_NET_MOCK_ROLE_DEFAULT_HP;
+    u32 roleMaxHpDefault = VM_NET_MOCK_ROLE_DEFAULT_HP;
+    u32 roleMpDefault = VM_NET_MOCK_ROLE_DEFAULT_MP;
+    u32 roleMaxMpDefault = VM_NET_MOCK_ROLE_DEFAULT_MP;
+    u32 roleId = 0;
+    u32 roleHp = 0;
+    u32 roleMaxHp = 0;
+    u32 roleMp = 0;
+    u32 roleMaxMp = 0;
     bool playerOnRight = vm_net_mock_battle_player_on_right();
     u8 battleSide = (u8)vm_net_mock_env_u32("CBE_BATTLE_SIDE",
                                             vm_net_mock_battle_default_side(playerOnRight));
@@ -10887,10 +11437,21 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
 
     if (outCap < pos || !vm_net_mock_is_challenge_interaction_request(request, requestLen))
         return 0;
-    if (role && roleMaxHp < role->hpMax)
-        roleMaxHp = role->hpMax;
-    if (role && roleMaxMp < role->mpMax)
-        roleMaxMp = role->mpMax;
+    vm_net_mock_role_default_vitals(role,
+                                    &roleHpDefault,
+                                    &roleMaxHpDefault,
+                                    &roleMpDefault,
+                                    &roleMaxMpDefault);
+    roleId = vm_net_mock_env_u32("CBE_BATTLE_ROLE_ID",
+                                 role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID);
+    roleHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP", roleHpDefault);
+    roleMaxHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_HP", roleMaxHpDefault);
+    roleMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MP", roleMpDefault);
+    roleMaxMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_MP", roleMaxMpDefault);
+    if (roleMaxHp < roleMaxHpDefault)
+        roleMaxHp = roleMaxHpDefault;
+    if (roleMaxMp < roleMaxMpDefault)
+        roleMaxMp = roleMaxMpDefault;
     if (roleHp > roleMaxHp)
         roleHp = roleMaxHp;
     if (roleMp > roleMaxMp)
@@ -12083,6 +12644,11 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
     u32 roleExp = role ? role->exp : 0;
     u32 actorJob = vm_net_mock_env_u8("CBE_ACTOR_JOB", role ? role->job : 1);
     u32 actorSex = vm_net_mock_env_u8("CBE_ACTOR_SEX", role ? role->sex : 0);
+    vm_net_mock_player_stats playerStats;
+    u32 roleHpDefault = VM_NET_MOCK_ROLE_DEFAULT_HP;
+    u32 roleMaxHpDefault = VM_NET_MOCK_ROLE_DEFAULT_HP;
+    u32 roleMpDefault = VM_NET_MOCK_ROLE_DEFAULT_MP;
+    u32 roleMaxMpDefault = VM_NET_MOCK_ROLE_DEFAULT_MP;
     u32 visualVariant = 0;
     u32 visualGroup = 0;
     u16 actorStrength = 0;
@@ -12091,16 +12657,10 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
     u16 actorEndurance = 0;
     u16 actorCharm = 0;
     u32 actorAttrWords[6];
-    u32 primaryCurrent = vm_net_mock_env_u32("CBE_ACTOR_HP_CURRENT",
-                                             vm_net_mock_env_u32("CBE_ACTOR_HP",
-                                                                 role ? role->hp : VM_NET_MOCK_ROLE_DEFAULT_HP));
-    u32 primaryBaseMax = vm_net_mock_env_u32("CBE_ACTOR_HP_MAX",
-                                             role ? role->hpMax : VM_NET_MOCK_ROLE_DEFAULT_HP);
-    u32 secondaryCurrent = vm_net_mock_env_u32("CBE_ACTOR_MP_CURRENT",
-                                               vm_net_mock_env_u32("CBE_ACTOR_MP",
-                                                                   role ? role->mp : VM_NET_MOCK_ROLE_DEFAULT_MP));
-    u32 secondaryBaseMax = vm_net_mock_env_u32("CBE_ACTOR_MP_MAX",
-                                               role ? role->mpMax : VM_NET_MOCK_ROLE_DEFAULT_MP);
+    u32 primaryCurrent = 0;
+    u32 primaryBaseMax = 0;
+    u32 secondaryCurrent = 0;
+    u32 secondaryBaseMax = 0;
     u32 actorSummaryValue = vm_net_mock_env_u32("CBE_ACTOR_SUMMARY_VALUE", roleExp);
     u32 actorGap09C0 = vm_net_mock_env_u32("CBE_ACTOR_GAP09C0",
                                            role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY);
@@ -12121,12 +12681,26 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
     u16 actorGridY = 0;
     u16 motionResourceArg0 = 0;
     u16 motionResourceArg1 = 0;
-    u32 primaryDisplayMax = vm_net_mock_env_u32("CBE_ACTOR_HP_DISPLAY_MAX", primaryBaseMax);
-    u32 secondaryDisplayMax = vm_net_mock_env_u32("CBE_ACTOR_MP_DISPLAY_MAX", secondaryBaseMax);
+    u32 primaryDisplayMax = 0;
+    u32 secondaryDisplayMax = 0;
     u32 actorGap0CC0 = 0;
     u32 actorGap0CC4 = 0;
     u32 actorGap0CC8 = 0;
 
+    vm_net_mock_role_build_player_stats(role, &playerStats);
+    vm_net_mock_role_default_vitals(role,
+                                    &roleHpDefault,
+                                    &roleMaxHpDefault,
+                                    &roleMpDefault,
+                                    &roleMaxMpDefault);
+    primaryCurrent = vm_net_mock_env_u32("CBE_ACTOR_HP_CURRENT",
+                                         vm_net_mock_env_u32("CBE_ACTOR_HP", roleHpDefault));
+    primaryBaseMax = vm_net_mock_env_u32("CBE_ACTOR_HP_MAX", roleMaxHpDefault);
+    secondaryCurrent = vm_net_mock_env_u32("CBE_ACTOR_MP_CURRENT",
+                                           vm_net_mock_env_u32("CBE_ACTOR_MP", roleMpDefault));
+    secondaryBaseMax = vm_net_mock_env_u32("CBE_ACTOR_MP_MAX", roleMaxMpDefault);
+    primaryDisplayMax = vm_net_mock_env_u32("CBE_ACTOR_HP_DISPLAY_MAX", primaryBaseMax);
+    secondaryDisplayMax = vm_net_mock_env_u32("CBE_ACTOR_MP_DISPLAY_MAX", secondaryBaseMax);
     if (roleLevel == 0)
         roleLevel = 1;
     if (actorJob == 0 || actorJob > 3)
@@ -12146,22 +12720,22 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
     if (secondaryDisplayMax == 0)
         secondaryDisplayMax = secondaryBaseMax;
 
-    actorStrength = vm_net_mock_role_derived_attr(roleLevel, actorJob, 0);
-    actorAgility = vm_net_mock_role_derived_attr(roleLevel, actorJob, 1);
-    actorWisdom = vm_net_mock_role_derived_attr(roleLevel, actorJob, 2);
-    actorEndurance = vm_net_mock_role_derived_attr(roleLevel, actorJob, 3);
-    actorCharm = vm_net_mock_role_charm(role, roleLevel, actorJob);
+    actorStrength = (u16)vm_net_mock_cap_u32(playerStats.strength, 999);
+    actorAgility = (u16)vm_net_mock_cap_u32(playerStats.agility, 999);
+    actorWisdom = (u16)vm_net_mock_cap_u32(playerStats.wisdom, 999);
+    actorEndurance = (u16)vm_net_mock_cap_u32(playerStats.endurance, 999);
+    actorCharm = (u16)vm_net_mock_cap_u32(playerStats.charm, 999);
     actorAttrWords[0] = vm_net_mock_env_u32("CBE_ACTOR_ATTR_STRENGTH", actorStrength);
     actorAttrWords[1] = vm_net_mock_env_u32("CBE_ACTOR_ATTR_AGILITY", actorAgility);
     actorAttrWords[2] = vm_net_mock_env_u32("CBE_ACTOR_ATTR_WISDOM", actorWisdom);
     actorAttrWords[3] = vm_net_mock_env_u32("CBE_ACTOR_ATTR_ENDURANCE", actorEndurance);
     actorAttrWords[4] = vm_net_mock_env_u32("CBE_ACTOR_ATTR_CHARM", actorCharm);
     actorAttrWords[5] = vm_net_mock_env_u32("CBE_ACTOR_ATTR_RESERVE",
-                                            (actorStrength + actorEndurance) / 2);
+                                            playerStats.defense);
     actorSummaryStatus = vm_net_mock_env_u32("CBE_ACTOR_STATUS_WORD", roleLevel);
-    actorGap0CC0 = vm_net_mock_env_u32("CBE_ACTOR_GAP0CC0", actorStrength);
-    actorGap0CC4 = vm_net_mock_env_u32("CBE_ACTOR_GAP0CC4", actorAgility);
-    actorGap0CC8 = vm_net_mock_env_u32("CBE_ACTOR_GAP0CC8", actorWisdom);
+    actorGap0CC0 = vm_net_mock_env_u32("CBE_ACTOR_GAP0CC0", playerStats.attack);
+    actorGap0CC4 = vm_net_mock_env_u32("CBE_ACTOR_GAP0CC4", playerStats.defense);
+    actorGap0CC8 = vm_net_mock_env_u32("CBE_ACTOR_GAP0CC8", playerStats.resist);
     shortLabel = vm_net_mock_env_str("CBE_ACTOR_SHORT_LABEL", vm_net_mock_role_title(role));
 
     /*
