@@ -59,10 +59,8 @@ reads one triplet per team member and copies the third value into `unit+1344`.
 `DrawBattleSceneBg(0x4BE8)` later assigns `attacker.currentMP = attacker+1344`
 at the end of type-1 playback, so omitting `teaminfo` leaves that cache as `0`
 and clears visible MP after a spell. Subtype `4/7` field `mp` remains the
-settlement/recovery display delta; current temporary tuning defaults battle-end
-MP recovery to `50`, still overrideable through `CBE_BATTLE_RECOVER_MP`. The
-mock applies the same recovery to the persisted role MP before saving the
-battle settlement, capped by the role's derived MP max.
+settlement/recovery display delta; default battle-end MP recovery is `0`,
+overrideable through `CBE_BATTLE_RECOVER_MP` only for explicit experiments.
 
 Current contract: a skill response keeps type-1 scoped to the enemy target only.
 That record carries skill-derived HP damage in `valueA`, target MP delta `0` in
@@ -71,8 +69,8 @@ object carries `teaminfo = roleId, currentHp, postCostMp`, and the mock server
 also updates the selected role's MP in the local role database. `actionnum`
 still permits multiple records: if the enemy survives the skill hit, append the
 normal monster counterattack record in the same subtype-6 response. If the skill
-kills the enemy, append the terminal record instead and defer settlement as
-usual.
+kills the enemy, append the terminal record and include subtype `4/7` in the
+same terminal response so the result panel has populated reward caches.
 
 Negative evidence: encoding the caster as a second child in the same type-1
 record made both the monster and the player receive the spell visual, because
@@ -346,9 +344,11 @@ Negative runtime: sending `teaminfo` as three normal tagged u32 values made the
 third read return `hp_low16 + next tagged header`, observed as `0x210004` when
 HP was `33`, then crashed in the renderer. Encode one overlapped row instead:
 `00 04, roleId32, hp32, mp32`.
-runtime with terminal inline `4/7 mp=0` drove MP to 0 after first showing the
-post-cost value, so terminal settlement must be deferred until action playback
-has completed.
+runtime after deferring terminal `4/7` showed the result panel with all reward
+fields as zero. The panel is opened by the terminal action; by the time the next
+request asks for pending settlement, the UI has already copied zeroed caches.
+Therefore terminal responses keep `4/7` inline by default, while `hp/mp` remain
+explicit recovery deltas and default to zero.
 ```
 
 Implementation note: type-1 `effect_text` should carry the display magnitude
@@ -380,21 +380,18 @@ fields:
 `persentexp`, and the remaining status fields. Bytes at `0x771C` confirm the
 first key is the string `exp`.
 
-Important timing correction: `HandleBattleSettleMsg(0x743C)` clears and fills
-the battle temporary display/state area at `r9+15724`. It writes response field
-`hp` to `r9+15728` and response field `mp` to `r9+15724`; then
-`BattleSettle_UpdateCharAttrs(0x2C50)` adds those values to the selected battle
-unit. Therefore subtype `4/7` must not be sent in the same response before the
-terminal `4/6 actioninfo` has finished animating, or the recovery MP field can
-overwrite the pending skill MP-cost state. Default behavior is deferred
-settlement: terminal action first, pending `4/7+4/11+4/9` afterwards.
+Timing correction: `HandleBattleSettleMsg(0x743C)` clears and fills the battle
+temporary display/state area at `r9+15724`. It snapshots the old actor EXP,
+gold, and level fields, writes response `exp/gold/level` as the new totals, then
+stores the visible result-panel deltas as `new - old`. Therefore `4/7.exp` and
+`4/7.gold` must be post-reward totals, not per-kill deltas. The terminal action
+opens the panel immediately, so `4/7` must be present in the same terminal
+response by default. `hp/mp` remain recovery deltas and default to `0/0`.
 
-Implementation correction: terminal action handling saves the role state before
-the client necessarily asks for the deferred settlement packet. Therefore the
-mock applies the configured battle-end MP recovery during terminal state save as
-well as in the deferred settlement builder, guarded by the current battle serial
-so recovery is persisted once. The `4/7 mp` field remains the visible recovery
-delta sent to the client.
+Dropped-item display: `itemnum` is separate from raw `iteminfo`. The recovered
+ordinary item row is `ownerRoleId, displayFlag, itemId, itemName, rewardType=2,
+i16 value, u32 value`. Rows whose owner role id does not match the current
+player are skipped by the client.
 
 ## implementation target
 
@@ -425,8 +422,10 @@ Minimum server fix:
   current-level percentage progress after reward. Encode all three EXP fields
   as normal integer object fields: `HandleBattleSettleMsg(0x743C)` reads them
   through object getter `+0x44` and only narrows `persentexp` after parsing.
-- defer subtype 7 until after the terminal action response; keep recovery
-  `hp/mp` as settlement display deltas, not as inline action-state data.
+- include subtype 7 in the terminal action response by default; keep recovery
+  `hp/mp` as explicit display deltas and default them to `0/0`.
+- include `itemnum/iteminfo` for displayed ordinary item drops after the reward
+  roll inserts the item into the role backpack.
 - use negative two's-complement HP deltas in subtype `4/6`; positive values heal
 
 ## unknowns

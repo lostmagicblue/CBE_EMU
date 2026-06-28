@@ -2452,7 +2452,7 @@ enum
     VM_NET_MOCK_BATTLE_POISON_SLIME_EXP = 5,
     VM_NET_MOCK_BATTLE_POISON_SLIME_GOLD = 5,
     VM_NET_MOCK_BATTLE_CHANGMING_SAN_ITEM_ID = 304,
-    VM_NET_MOCK_BATTLE_CHANGMING_SAN_DROP_RATE = 100,
+    VM_NET_MOCK_BATTLE_CHANGMING_SAN_DROP_RATE = 10,
     VM_NET_MOCK_ROLE_DEFAULT_ID = 10001,
     VM_NET_MOCK_ROLE_DEFAULT_HP = 120,
     VM_NET_MOCK_ROLE_DEFAULT_MP = 100,
@@ -3243,6 +3243,18 @@ static u32 vm_net_mock_load_shop_catalog(void)
     vm_autotest_note("mock_shop_catalog_loaded total=%u items=%u equips=%u source=item.dsh/equip.dsh\n",
                      g_vm_net_mock_shop_catalog_count, itemCount, equipCount);
     return g_vm_net_mock_shop_catalog_count;
+}
+
+static const vm_net_mock_shop_catalog_item *vm_net_mock_find_shop_catalog_item(u32 itemId)
+{
+    u32 total = vm_net_mock_load_shop_catalog();
+
+    for (u32 i = 0; i < total; ++i)
+    {
+        if (g_vm_net_mock_shop_catalog[i].itemId == itemId)
+            return &g_vm_net_mock_shop_catalog[i];
+    }
+    return NULL;
 }
 
 static u8 vm_net_mock_equipment_slot_for_category(u32 category)
@@ -6846,7 +6858,56 @@ static void vm_net_mock_role_apply_battle_settlement(u32 hp, u32 mp,
 
 static u32 vm_net_mock_battle_recover_mp_value(void)
 {
-    return vm_net_mock_env_u32_if_set("CBE_BATTLE_RECOVER_MP", 50);
+    return vm_net_mock_env_u32_if_set("CBE_BATTLE_RECOVER_MP", 0);
+}
+
+static bool vm_net_mock_build_battle_settle_iteminfo_blob(u8 *out, u32 outCap,
+                                                          u32 *blobLenOut,
+                                                          u32 *rowCountOut,
+                                                          u32 ownerRoleId,
+                                                          u32 itemId)
+{
+    u32 pos = 0;
+    const vm_net_mock_shop_catalog_item *item = NULL;
+    const char *itemName = "Item";
+
+    if (blobLenOut)
+        *blobLenOut = 0;
+    if (rowCountOut)
+        *rowCountOut = 0;
+    if (out == NULL || itemId == 0 || ownerRoleId == 0)
+        return true;
+
+    item = vm_net_mock_find_shop_catalog_item(itemId);
+    if (item != NULL && item->name[0] != 0)
+        itemName = item->name;
+
+    /*
+     * mmBattle HandleBattleSettleMsg(0x743C) reads itemnum separately, then
+     * loops over this raw stream. Each row starts with the owner role id; rows
+     * for other ids are skipped. For a normal dropped item, rewardType=2 avoids
+     * the equipment branch (1) and the money-add branch (3).
+     */
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, ownerRoleId))
+        return false;
+    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 1))
+        return false;
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, itemId))
+        return false;
+    if (!vm_net_mock_seq_put_string(out, outCap, &pos, itemName))
+        return false;
+    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 2))
+        return false;
+    if (!vm_net_mock_seq_put_i16(out, outCap, &pos, 1))
+        return false;
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, 1))
+        return false;
+
+    if (blobLenOut)
+        *blobLenOut = pos;
+    if (rowCountOut)
+        *rowCountOut = 1;
+    return true;
 }
 
 static u32 vm_net_mock_battle_apply_mp_recovery_once(vm_net_mock_role_state *role,
@@ -11800,12 +11861,12 @@ static bool vm_net_mock_battle_operate_is_skill(u32 operate)
 static bool vm_net_mock_battle_inline_settlement_enabled(void)
 {
     /*
-     * Battle.cbm parses subtype 4/7 into the same HP/MP temporary area used by
-     * action playback. Keep terminal settlement deferred by default so a final
-     * skill action can finish applying its MP cost before 4/7 writes
-     * recover-hp/recover-mp display deltas.
+     * The result panel is opened by the terminal battle action. If 4/7 arrives
+     * only on the next request, the panel has already copied zeroed settlement
+     * caches. Keep 4/7 in the terminal response by default and make hp/mp
+     * recovery deltas explicit zero unless an env override opts in.
      */
-    return vm_net_mock_env_u32("CBE_BATTLE_INLINE_SETTLEMENT", 0) != 0;
+    return vm_net_mock_env_u32("CBE_BATTLE_INLINE_SETTLEMENT", 1) != 0;
 }
 
 static u32 vm_net_mock_battle_operate_skill_id(u32 operate)
@@ -13271,6 +13332,9 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
     u32 dropItemId = 0;
     u16 dropSeq = 0;
     bool dropGranted = false;
+    u8 itemInfo[128];
+    u32 itemInfoLen = 0;
+    u32 itemInfoRows = 0;
     u32 applyRewardExp = 0;
     u32 displayExpGain = 0;
     bool victory = g_mockBattleEnemyHpCurrent == 0 && roleHp > 0;
@@ -13310,7 +13374,30 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
     statusPercentExp = vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_PERCENT_EXP",
                                                   statusPercentExp);
     statusLevel = vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_LEVEL", statusLevel);
-    vm_autotest_note("mock_battle_settle enemy=%u victory=%u exp_gain=%u exp_total=%u gold=%u level=%u hp=%u mp=%u recover=%u/%u recovered=%u drop=%u seq=%u\n",
+    memset(itemInfo, 0, sizeof(itemInfo));
+    if (dropGranted && role != NULL)
+    {
+        if (!vm_net_mock_build_battle_settle_iteminfo_blob(itemInfo, sizeof(itemInfo),
+                                                          &itemInfoLen, &itemInfoRows,
+                                                          role->roleId, dropItemId))
+        {
+            return false;
+        }
+    }
+    printf("[info][network] mock_battle_settle enemy=%u victory=%u exp_gain=%u exp_total=%u gold=%u level=%u recover=%u/%u drop=%u seq=%u item_rows=%u iteminfo_len=%u\n",
+           g_vm_net_mock_battle_enemy_id_current,
+           victory ? 1 : 0,
+           displayExpGain,
+           statusExp,
+           statusGold,
+           statusLevel,
+           recoverHp,
+           recoverMp,
+           dropGranted ? dropItemId : 0,
+           dropSeq,
+           itemInfoRows,
+           itemInfoLen);
+    vm_autotest_note("mock_battle_settle enemy=%u victory=%u exp_gain=%u exp_total=%u gold=%u level=%u hp=%u mp=%u recover=%u/%u recovered=%u drop=%u seq=%u item_rows=%u iteminfo_len=%u\n",
                      g_vm_net_mock_battle_enemy_id_current,
                      victory ? 1 : 0,
                      displayExpGain,
@@ -13323,7 +13410,9 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
                      recoverMp,
                      mpRecoveryApplied ? 1 : 0,
                      dropGranted ? dropItemId : 0,
-                     dropSeq);
+                     dropSeq,
+                     itemInfoRows,
+                     itemInfoLen);
 
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 4, 7, &objectStart))
         return false;
@@ -13358,9 +13447,11 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
         return false;
     if (!vm_net_mock_put_object_u32(out, outCap, pos, "mp", recoverMp))
         return false;
-    if (!vm_net_mock_put_object_u8(out, outCap, pos, "itemnum", 0))
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "itemnum", itemInfoRows > 255 ? 255 : (u8)itemInfoRows))
         return false;
-    if (!vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo", NULL, 0))
+    if (!vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo",
+                                    itemInfoLen ? itemInfo : NULL,
+                                    (u16)itemInfoLen))
         return false;
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "autorevive", 0))
         return false;

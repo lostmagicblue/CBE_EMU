@@ -24,8 +24,10 @@ IDA evidence:
   `energy`, `energymax`, `gold`, `level`, `result`, `bagstatus`, `hp`, `mp`,
   `itemnum`, `iteminfo`.
 - `iteminfo` is handed to the battle module's stream reader after the raw field
-  lookup. The exact dropped-item row grammar is still not recovered, so this
-  change does not emit battle-result item rows yet.
+  lookup. The tail block reached from `0x7612 -> 0x78C6` reads one row per
+  `itemnum`: owner role id, display flag, item id, item name, reward type, and
+  two small value fields. `reward type == 1` enters equipment attribute parsing;
+  `reward type == 3` adds a money value; ordinary dropped items use type `2`.
 
 Local resource evidence:
 
@@ -69,15 +71,30 @@ Runtime correction:
   auto-battle-off response.
 - A later runtime check showed that waiting for the next request was still too
   late for the result panel. The terminal action in `4/6` can bring up the
-  panel immediately, so terminal operate responses now place `4/7` before `4/6`.
-  `HandleBattleSettleMsg(0x743C)` treats the `exp` field as total EXP and the
-  `gold` field as total money, then computes the visible gained values by
-  subtracting the old client-side actor fields. Therefore `4/7.exp` must be the
-  role's post-reward total EXP, not the per-kill delta.
+  panel immediately, so terminal operate responses place `4/7` before `4/6` by
+  default. `HandleBattleSettleMsg(0x743C)` treats the `exp` field as total EXP
+  and the `gold` field as total money, then computes the visible gained values
+  by subtracting the old client-side actor fields. Therefore `4/7.exp` must be
+  the role's post-reward total EXP, not the per-kill delta.
 - The `hp` and `mp` fields in `4/7` are settlement-panel recovery amounts, not
   the role's persisted current HP/MP. Current battle HP/MP remains stored from
   the server-side battle state; packet `hp/mp` now default to `0/0` so the panel
   shows no automatic recovery unless explicit recovery mechanics are added.
+- Battle-result drop display now sends `itemnum=1` and one `iteminfo` row when
+  the reward roll inserted a backpack item. The row is:
+
+```text
+u32 owner_role_id
+u8  display_flag = 1
+u32 item_id
+string item_name
+u8  reward_type = 2
+i16 count_or_seq = 1
+u32 value = 1
+```
+
+The row is display-only for the result panel; the actual durable item has
+already been inserted through the active role backpack state.
 
 Role normalization was tightened to clamp HP/MP only when they exceed max
 values. It no longer treats `hp == 0` or `mp == 0` as "missing data", because
@@ -86,8 +103,7 @@ normalized the role.
 
 ## Remaining Unknown
 
-Battle settlement drop display is intentionally deferred. The `itemnum/iteminfo`
-contract needs the rest of `HandleBattleSettleMsg(0x743C)` stream grammar before
-we should send non-empty item rows. The drop is still real server state: it is
-added to the active role backpack through the same persisted per-role backpack
-path used by shop purchases and default inventory.
+The ordinary dropped-item row is recovered enough to show item drops on the
+result panel. Equipment reward rows still need a dedicated sample before using
+`reward_type=1`, because that branch enters the larger equipment attribute
+parser.
