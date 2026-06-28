@@ -93,6 +93,37 @@ static bool vm_net_mock_get_object_u8_field(const u8 *request, u32 requestLen, c
     return false;
 }
 
+static bool vm_net_mock_get_object_u16_field(const u8 *request, u32 requestLen, const char *field, u16 *value)
+{
+    u32 fieldLen = (u32)strlen(field);
+    if (fieldLen == 0 || fieldLen > 0xff || requestLen < fieldLen + 6)
+        return false;
+
+    for (u32 i = 0; i + fieldLen + 6 <= requestLen; ++i)
+    {
+        if (request[i] != (u8)fieldLen)
+            continue;
+        if (memcmp(request + i + 1, field, fieldLen) != 0)
+            continue;
+        u32 p = i + 1 + fieldLen;
+        if (p < requestLen && request[p] == 0)
+            p++;
+        if (p + 5 <= requestLen && request[p] == 4 && request[p + 1] == 0 && request[p + 2] == 2)
+        {
+            if (value)
+                *value = (u16)(((u16)request[p + 3] << 8) | request[p + 4]);
+            return true;
+        }
+        if (p + 3 <= requestLen && request[p] == 2)
+        {
+            if (value)
+                *value = (u16)(((u16)request[p + 1] << 8) | request[p + 2]);
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool vm_net_mock_get_object_u32_field(const u8 *request, u32 requestLen, const char *field, u32 *value)
 {
     u32 fieldLen = (u32)strlen(field);
@@ -2375,6 +2406,7 @@ static u32 vm_net_mock_build_pos_info(u8 *out, u32 outCap, u16 x, u16 y)
 }
 
 static bool vm_net_mock_append_books42_object(u8 *out, u32 outCap, u32 *pos);
+static bool vm_net_mock_append_backpack_items_object(u8 *out, u32 outCap, u32 *pos);
 static bool vm_net_mock_append_fb_target_empty11_object(u8 *out, u32 outCap, u32 *pos);
 static bool vm_net_mock_append_fb_target_result12_for_scene(u8 *out, u32 outCap, u32 *pos,
                                                             const char *sceneKey, u16 spawnX, u16 spawnY);
@@ -2393,6 +2425,7 @@ enum
     VM_NET_MOCK_SHOP_PAGE_SIZE = 10,
     VM_NET_MOCK_SHOP17_MAX_CATALOG_ITEMS = 10,
     VM_NET_MOCK_SHOP_MAX_CATALOG_ITEMS = 2048,
+    VM_NET_MOCK_ITEM_EFFECT_CATALOG_MAX_ITEMS = 2048,
     VM_NET_MOCK_SHOP_NAME_BYTES = 12,
     VM_NET_MOCK_TELEPORT_STONE_DEFAULT_EXIT_ID = 1,
     VM_NET_MOCK_SCENE_LANDING_SAFE_GAP = 32,
@@ -2565,6 +2598,20 @@ static u32 vm_net_mock_role_level_from_exp(u32 exp);
 static u32 vm_net_mock_role_next_level_start_exp(u32 exp);
 static u32 vm_net_mock_role_exp_percent(u32 exp);
 static u32 vm_net_mock_role_last_level_exp(u32 exp);
+static void vm_net_mock_role_db_save(const char *reason);
+static vm_net_mock_backpack_item_state *vm_net_mock_role_find_backpack_item(vm_net_mock_role_state *role,
+                                                                            u32 itemId,
+                                                                            u16 seq);
+static vm_net_mock_backpack_item_state *vm_net_mock_role_find_backpack_item_by_effect(vm_net_mock_role_state *role,
+                                                                                      u32 hp,
+                                                                                      u32 mp,
+                                                                                      u32 exp);
+static bool vm_net_mock_role_consume_backpack_item(vm_net_mock_role_state *role,
+                                                   u32 itemId,
+                                                   u16 seq,
+                                                   u32 count,
+                                                   u32 *remainingOut);
+static void vm_net_mock_role_sync_derived_vitals(vm_net_mock_role_state *role);
 static void vm_net_mock_role_build_player_stats(const vm_net_mock_role_state *role,
                                                 vm_net_mock_player_stats *stats);
 static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap);
@@ -2608,12 +2655,27 @@ typedef struct
     vm_net_mock_equipment_bonus bonus;
 } vm_net_mock_equipment_catalog_item;
 
+typedef struct
+{
+    u32 itemId;
+    u8 category;
+    u8 levelRequired;
+    u8 stack;
+    u8 reserved0;
+    u32 hp;
+    u32 mp;
+    u32 exp;
+} vm_net_mock_item_effect_catalog_item;
+
 static vm_net_mock_shop_catalog_item g_vm_net_mock_shop_catalog[VM_NET_MOCK_SHOP_MAX_CATALOG_ITEMS];
 static u32 g_vm_net_mock_shop_catalog_count = 0;
 static bool g_vm_net_mock_shop_catalog_loaded = false;
 static vm_net_mock_equipment_catalog_item g_vm_net_mock_equipment_catalog[VM_NET_MOCK_EQUIP_CATALOG_MAX_ITEMS];
 static u32 g_vm_net_mock_equipment_catalog_count = 0;
 static bool g_vm_net_mock_equipment_catalog_loaded = false;
+static vm_net_mock_item_effect_catalog_item g_vm_net_mock_item_effect_catalog[VM_NET_MOCK_ITEM_EFFECT_CATALOG_MAX_ITEMS];
+static u32 g_vm_net_mock_item_effect_catalog_count = 0;
+static bool g_vm_net_mock_item_effect_catalog_loaded = false;
 
 static u32 vm_net_mock_shop_catalog_group(u32 itemId)
 {
@@ -3044,6 +3106,179 @@ static const vm_net_mock_equipment_catalog_item *vm_net_mock_find_equipment_cata
             return &g_vm_net_mock_equipment_catalog[i];
     }
     return NULL;
+}
+
+static bool vm_net_mock_add_item_effect_catalog_item(u32 itemId, u32 category,
+                                                     u32 levelRequired, u32 stack,
+                                                     u32 hp, u32 mp, u32 exp)
+{
+    vm_net_mock_item_effect_catalog_item *item = NULL;
+
+    if (itemId == 0 ||
+        g_vm_net_mock_item_effect_catalog_count >= VM_NET_MOCK_ITEM_EFFECT_CATALOG_MAX_ITEMS)
+    {
+        return false;
+    }
+
+    item = &g_vm_net_mock_item_effect_catalog[g_vm_net_mock_item_effect_catalog_count++];
+    memset(item, 0, sizeof(*item));
+    item->itemId = itemId;
+    item->category = (u8)(category > 255 ? 255 : category);
+    item->levelRequired = (u8)(levelRequired > 255 ? 255 : levelRequired);
+    item->stack = (u8)(stack > 255 ? 255 : stack);
+    item->hp = hp;
+    item->mp = mp;
+    item->exp = exp;
+    return true;
+}
+
+static u32 vm_net_mock_load_item_effect_catalog_dsh(const char *path)
+{
+    static u8 data[131072];
+    u32 len = vm_net_mock_load_response_file(path, data, sizeof(data));
+    u32 columnCount = 0;
+    u32 rowCount = 0;
+    u32 pos = 16;
+    u32 added = 0;
+
+    if (len < 16)
+        return 0;
+    columnCount = vm_net_mock_read_le32_at(data, 4);
+    rowCount = vm_net_mock_read_le32_at(data, 8);
+    if (columnCount == 0 || columnCount > 64 || rowCount > 10000)
+        return 0;
+
+    for (u32 i = 0; i < columnCount; ++i)
+    {
+        u32 fieldLen = 0;
+        if (pos >= len)
+            return added;
+        fieldLen = data[pos++];
+        if (pos + fieldLen > len)
+            return added;
+        pos += fieldLen;
+    }
+
+    for (u32 row = 0; row < rowCount && pos + 4 <= len; ++row)
+    {
+        u32 rowLen = vm_net_mock_read_le32_at(data, pos);
+        u32 rowPos = pos + 4;
+        u32 rowEnd = rowPos + rowLen;
+        u32 itemId = 0;
+        u32 category = 0xff;
+        u32 levelRequired = 1;
+        u32 stack = 1;
+        u32 hp = 0;
+        u32 mp = 0;
+        u32 exp = 0;
+
+        if (rowEnd > len || rowEnd < rowPos)
+            break;
+
+        for (u32 col = 0; col < columnCount && rowPos < rowEnd; ++col)
+        {
+            u32 valueLen = data[rowPos++];
+            const u8 *value = data + rowPos;
+            u32 parsed = 0;
+
+            if (rowPos + valueLen > rowEnd)
+                break;
+            parsed = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+            switch (col)
+            {
+            case 0:
+                itemId = parsed;
+                break;
+            case 5:
+                category = parsed;
+                break;
+            case 6:
+                levelRequired = parsed ? parsed : 1;
+                break;
+            case 10:
+                stack = parsed ? parsed : 1;
+                break;
+            case 15:
+                hp = parsed;
+                break;
+            case 16:
+                mp = parsed;
+                break;
+            case 17:
+                exp = parsed;
+                break;
+            default:
+                break;
+            }
+            rowPos += valueLen;
+        }
+
+        if (vm_net_mock_add_item_effect_catalog_item(itemId, category, levelRequired,
+                                                     stack, hp, mp, exp))
+        {
+            ++added;
+        }
+        pos = rowEnd;
+    }
+
+    return added;
+}
+
+static u32 vm_net_mock_load_item_effect_catalog(void)
+{
+    u32 itemCount = 0;
+
+    if (g_vm_net_mock_item_effect_catalog_loaded)
+        return g_vm_net_mock_item_effect_catalog_count;
+
+    g_vm_net_mock_item_effect_catalog_loaded = true;
+    g_vm_net_mock_item_effect_catalog_count = 0;
+    itemCount = vm_net_mock_load_item_effect_catalog_dsh("JHOnlineData/item.dsh");
+    if (itemCount == 0)
+        itemCount = vm_net_mock_load_item_effect_catalog_dsh("bin/JHOnlineData/item.dsh");
+
+    if (itemCount == 0)
+    {
+        (void)vm_net_mock_add_item_effect_catalog_item(301, 10, 1, 20, 100, 0, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(302, 10, 1, 20, 350, 0, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(303, 10, 1, 20, 600, 0, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(304, 10, 1, 20, 850, 0, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(305, 10, 1, 20, 1100, 0, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(321, 10, 1, 20, 0, 100, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(322, 10, 1, 20, 0, 350, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(323, 10, 1, 20, 0, 600, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(324, 10, 1, 20, 0, 850, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(325, 10, 1, 20, 0, 1100, 0);
+        printf("[warn][network] mock_item_effect_catalog fallback=item.dsh-not-found total=%u\n",
+               g_vm_net_mock_item_effect_catalog_count);
+    }
+    else
+    {
+        printf("[info][network] mock_item_effect_catalog total=%u source=item.dsh\n",
+               g_vm_net_mock_item_effect_catalog_count);
+    }
+    return g_vm_net_mock_item_effect_catalog_count;
+}
+
+static const vm_net_mock_item_effect_catalog_item *vm_net_mock_find_item_effect_catalog_item(u32 itemId)
+{
+    u32 total = vm_net_mock_load_item_effect_catalog();
+
+    if (itemId == 0)
+        return NULL;
+    for (u32 i = 0; i < total; ++i)
+    {
+        if (g_vm_net_mock_item_effect_catalog[i].itemId == itemId)
+            return &g_vm_net_mock_item_effect_catalog[i];
+    }
+    return NULL;
+}
+
+static bool vm_net_mock_item_effect_is_usable(const vm_net_mock_item_effect_catalog_item *item)
+{
+    if (item == NULL)
+        return false;
+    return item->category == 10 || item->hp != 0 || item->mp != 0 || item->exp != 0;
 }
 
 static bool vm_net_mock_shop17_should_include_item(u32 itemId);
@@ -3558,6 +3793,403 @@ static bool vm_net_mock_is_backpack_items_books_combo_request(const u8 *request,
     if (itemsPayloadLenOut)
         *itemsPayloadLenOut = itemsObject.payloadLen;
     return true;
+}
+
+typedef struct
+{
+    u32 itemId;
+    u16 seq;
+    u32 count;
+    u32 num;
+    u32 hp;
+    u32 mp;
+    u32 exp;
+    u8 type;
+    bool haveItemSelector;
+    bool haveEffect;
+} vm_net_mock_item_use_request;
+
+static bool vm_net_mock_get_object_number_field(const u8 *payload, u32 payloadLen,
+                                                const char *field, u32 *value)
+{
+    u32 value32 = 0;
+    u16 value16 = 0;
+    u8 value8 = 0;
+
+    if (value)
+        *value = 0;
+    if (vm_net_mock_get_object_u32_field(payload, payloadLen, field, &value32))
+    {
+        if (value)
+            *value = value32;
+        return true;
+    }
+    if (vm_net_mock_get_object_u16_field(payload, payloadLen, field, &value16))
+    {
+        if (value)
+            *value = value16;
+        return true;
+    }
+    if (vm_net_mock_get_object_u8_field(payload, payloadLen, field, &value8))
+    {
+        if (value)
+            *value = value8;
+        return true;
+    }
+    return false;
+}
+
+static bool vm_net_mock_item_id_is_active_backpack_row(u32 itemId)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    return vm_net_mock_role_find_backpack_item(role, itemId, 0) != NULL;
+}
+
+static bool vm_net_mock_parse_item_use_request(const u8 *request, u32 requestLen,
+                                               vm_net_mock_item_use_request *parsedOut)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+    vm_net_mock_item_use_request parsed;
+    u32 candidate = 0;
+    u32 value = 0;
+    bool haveCandidate = false;
+
+    if (parsedOut)
+        memset(parsedOut, 0, sizeof(*parsedOut));
+    memset(&parsed, 0, sizeof(parsed));
+    parsed.count = 1;
+
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T')
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        return false;
+    if (offset != requestLen)
+        return false;
+    if (object.major != 1 || object.kind != 7 || object.subtype != 1 || object.payloadLen == 0)
+        return false;
+
+    (void)vm_net_mock_get_object_u8_field(object.payload, object.payloadLen, "type", &parsed.type);
+    if (!vm_net_mock_get_object_u16_field(object.payload, object.payloadLen, "seq", &parsed.seq))
+    {
+        if (vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "seq", &value) &&
+            value <= 0xffffu)
+        {
+            parsed.seq = (u16)value;
+        }
+    }
+
+    haveCandidate = vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "itemId", &candidate) ||
+                    vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "itemID", &candidate) ||
+                    vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "itemid", &candidate);
+    if (haveCandidate)
+    {
+        parsed.itemId = candidate;
+        parsed.haveItemSelector = true;
+    }
+
+    if (!parsed.haveItemSelector &&
+        vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "id", &candidate))
+    {
+        const vm_net_mock_item_effect_catalog_item *effect =
+            vm_net_mock_find_item_effect_catalog_item(candidate);
+        if (vm_net_mock_item_effect_is_usable(effect) ||
+            vm_net_mock_item_id_is_active_backpack_row(candidate))
+        {
+            parsed.itemId = candidate;
+            parsed.haveItemSelector = true;
+        }
+    }
+
+    if (parsed.seq != 0)
+        parsed.haveItemSelector = true;
+
+    (void)vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "num", &parsed.num);
+    if (vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "count", &value) ||
+        vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "usecount", &value) ||
+        vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "useCount", &value))
+    {
+        parsed.count = value ? value : 1;
+    }
+    if (parsed.count == 0)
+        parsed.count = 1;
+    if (parsed.count > 99)
+        parsed.count = 99;
+
+    (void)vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "hp", &parsed.hp);
+    if (parsed.hp == 0)
+        (void)vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "HP", &parsed.hp);
+    (void)vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "mp", &parsed.mp);
+    if (parsed.mp == 0)
+        (void)vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "MP", &parsed.mp);
+    (void)vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "exp", &parsed.exp);
+    if (parsed.exp == 0)
+        (void)vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "EXP", &parsed.exp);
+    if (parsed.hp == 0 && parsed.mp == 0 && parsed.exp == 0 && parsed.num != 0)
+    {
+        if (parsed.type == 2)
+            parsed.mp = parsed.num;
+        else if (parsed.type == 3)
+            parsed.exp = parsed.num;
+        else
+            parsed.hp = parsed.num;
+    }
+    parsed.haveEffect = parsed.hp != 0 || parsed.mp != 0 || parsed.exp != 0;
+
+    if (!parsed.haveItemSelector && !parsed.haveEffect)
+        return false;
+
+    if (parsedOut)
+        *parsedOut = parsed;
+    return true;
+}
+
+static bool vm_net_mock_build_item_use_iteminfo_blob(u8 *out, u32 outCap,
+                                                     u16 seq, u32 itemId,
+                                                     u32 count, u32 *blobLenOut)
+{
+    u32 pos = 0;
+
+    if (blobLenOut)
+        *blobLenOut = 0;
+    if (out == NULL || blobLenOut == NULL || itemId == 0)
+        return false;
+    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 1))
+        return false;
+    if (!vm_net_mock_seq_put_i16(out, outCap, &pos, seq))
+        return false;
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, itemId))
+        return false;
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, count))
+        return false;
+    if (!vm_net_mock_seq_put_item_common_extra(out, outCap, &pos,
+                                              count > 255 ? 255 : (u8)count))
+        return false;
+
+    *blobLenOut = pos;
+    return true;
+}
+
+static bool vm_net_mock_build_item_use_count_info_blob(u8 *out, u32 outCap,
+                                                       u16 seq, u32 count,
+                                                       u32 *blobLenOut)
+{
+    u32 pos = 0;
+
+    if (blobLenOut)
+        *blobLenOut = 0;
+    if (out == NULL || blobLenOut == NULL || seq == 0)
+        return false;
+    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 1))
+        return false;
+    if (!vm_net_mock_seq_put_i16(out, outCap, &pos, seq))
+        return false;
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, count))
+        return false;
+
+    *blobLenOut = pos;
+    return true;
+}
+
+static u32 vm_net_mock_add_capped_u32(u32 value, u32 add)
+{
+    if (0xffffffffu - value < add)
+        return 0xffffffffu;
+    return value + add;
+}
+
+static void vm_net_mock_role_apply_item_effect(vm_net_mock_role_state *role,
+                                               u32 hp, u32 mp, u32 exp,
+                                               u32 count)
+{
+    if (role == NULL || count == 0)
+        return;
+
+    vm_net_mock_role_sync_derived_vitals(role);
+    if (hp != 0)
+    {
+        uint64_t add = (uint64_t)hp * (uint64_t)count;
+        u32 capped = add > 0xffffffffull ? 0xffffffffu : (u32)add;
+        role->hp = vm_net_mock_min_u32(vm_net_mock_add_capped_u32(role->hp, capped), role->hpMax);
+    }
+    if (mp != 0)
+    {
+        uint64_t add = (uint64_t)mp * (uint64_t)count;
+        u32 capped = add > 0xffffffffull ? 0xffffffffu : (u32)add;
+        role->mp = vm_net_mock_min_u32(vm_net_mock_add_capped_u32(role->mp, capped), role->mpMax);
+    }
+    if (exp != 0)
+    {
+        uint64_t add = (uint64_t)exp * (uint64_t)count;
+        u32 capped = add > 0xffffffffull ? 0xffffffffu : (u32)add;
+        role->exp = vm_net_mock_add_capped_u32(role->exp, capped);
+        role->level = vm_net_mock_role_level_from_exp(role->exp);
+        vm_net_mock_role_sync_derived_vitals(role);
+    }
+}
+
+static u32 vm_net_mock_build_item_use_hint_response(u8 *out, u32 outCap, const char *hint)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+
+    if (out == NULL || outCap < pos)
+        return 0;
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 16, 2, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 4))
+        return 0;
+    if (!vm_net_mock_put_object_string(out, outCap, &pos, "hint", hint ? hint : "OK"))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    return pos;
+}
+
+static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen,
+                                               u8 *out, u32 outCap)
+{
+    vm_net_mock_item_use_request parsed;
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_backpack_item_state *item = NULL;
+    const vm_net_mock_item_effect_catalog_item *effect = NULL;
+    u32 itemId = 0;
+    u16 seq = 0;
+    u32 hp = 0;
+    u32 mp = 0;
+    u32 exp = 0;
+    u32 remaining = 0;
+    bool consumed = false;
+    bool applied = false;
+    u8 itemInfo[64];
+    u32 itemInfoLen = 0;
+    u8 countInfo[32];
+    u32 countInfoLen = 0;
+    u8 itemUseType = 1;
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u8 objectCount = 0;
+
+    if (out == NULL || outCap < pos)
+        return 0;
+    if (!vm_net_mock_parse_item_use_request(request, requestLen, &parsed))
+        return 0;
+
+    role = vm_net_mock_active_role();
+    if (role == NULL)
+        return vm_net_mock_build_item_use_hint_response(out, outCap, "item unavailable");
+
+    item = vm_net_mock_role_find_backpack_item(role, parsed.itemId, parsed.seq);
+    if (item == NULL && !parsed.haveItemSelector && parsed.haveEffect)
+        item = vm_net_mock_role_find_backpack_item_by_effect(role, parsed.hp, parsed.mp, parsed.exp);
+    if (item != NULL)
+    {
+        itemId = item->itemId;
+        seq = item->seq;
+    }
+    else
+    {
+        itemId = parsed.itemId;
+        seq = parsed.seq;
+    }
+
+    effect = vm_net_mock_find_item_effect_catalog_item(itemId);
+    if (vm_net_mock_item_effect_is_usable(effect))
+    {
+        hp = effect->hp;
+        mp = effect->mp;
+        exp = effect->exp;
+    }
+    if (hp == 0)
+        hp = parsed.hp;
+    if (mp == 0)
+        mp = parsed.mp;
+    if (exp == 0)
+        exp = parsed.exp;
+
+    if (itemId != 0)
+        consumed = vm_net_mock_role_consume_backpack_item(role, itemId, seq, parsed.count, &remaining);
+
+    if (consumed && (hp != 0 || mp != 0 || exp != 0))
+    {
+        vm_net_mock_role_apply_item_effect(role, hp, mp, exp, parsed.count);
+        applied = true;
+    }
+
+    if (applied || consumed)
+        vm_net_mock_role_db_save("item-use");
+
+    if (itemId == 0)
+    {
+        u32 hintLen = vm_net_mock_build_item_use_hint_response(out, outCap,
+                                                               "item unavailable");
+        vm_autotest_note("mock_item_use type=%u item=0 seq=0 count=%u hp=%u mp=%u exp=%u applied=%u consumed=0 response=16/2-hint evidence=runtime:wt7/1 mmGame:0x11CE\n",
+                         parsed.type, parsed.count, hp, mp, exp, applied ? 1 : 0);
+        return hintLen;
+    }
+
+    itemUseType = parsed.type ? parsed.type : 1;
+    /*
+     * JianghuOL.CBE:0x1033544 handles 7/1 as the original item-use success
+     * acknowledgement.  When the client has a pending use row, result=1 calls
+     * the item-manager operation at +56 with type/id/count=1; this is the path
+     * that also updates the occupied-slot counter when the stack reaches zero.
+     */
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 1, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "type", itemUseType))
+        return 0;
+    if (!vm_net_mock_put_object_u16(out, outCap, &pos, "id", (u16)itemId))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    objectCount += 1;
+
+    /*
+     * mmGame:0xD04 reads 7/7 rows as seq, itemId, count, common-extra.  Use
+     * type=2 for item-use consumption; type=1 is the add/update path and has
+     * already been observed to duplicate stacks when used as a refresh.
+     */
+    if (!vm_net_mock_build_item_use_iteminfo_blob(itemInfo, sizeof(itemInfo),
+                                                  seq, itemId, remaining,
+                                                  &itemInfoLen))
+        return 0;
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 7, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "type", 2))
+        return 0;
+    if (!vm_net_mock_put_object_raw(out, outCap, &pos, "iteminfo", itemInfo, (u16)itemInfoLen))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    objectCount += 1;
+
+    /*
+     * JianghuOL.CBE:0x1033544 handles 7/11 and 7/12 by reading an "info"
+     * stream of row_count, seq, and new_count, then writing the backpack row.
+     * This path is reached before the mmGame callback that ignores kind 17.
+     */
+    if (seq != 0)
+    {
+        if (!vm_net_mock_build_item_use_count_info_blob(countInfo, sizeof(countInfo),
+                                                        seq, remaining, &countInfoLen))
+            return 0;
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 11, &objectStart))
+            return 0;
+        if (!vm_net_mock_put_object_raw(out, outCap, &pos, "info", countInfo, (u16)countInfoLen))
+            return 0;
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        objectCount += 1;
+    }
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+
+    printf("[info][network] mock_item_use item=%u seq=%u count=%u remaining=%u hp=%u mp=%u exp=%u applied=%u consumed=%u refresh=7/1+7/11 resp=%u\n",
+           itemId, seq, parsed.count, remaining, hp, mp, exp,
+           applied ? 1 : 0, consumed ? 1 : 0, pos);
+    vm_autotest_note("mock_item_use item=%u seq=%u count=%u remaining=%u hp=%u mp=%u exp=%u applied=%u consumed=%u response=7/1-use-ok+7/7-type2+7/11-info evidence=runtime:wt7/1 mmGame:0x11CE->0xD04 JianghuOL.CBE:0x1033544\n",
+                     itemId, seq, parsed.count, remaining, hp, mp, exp,
+                     applied ? 1 : 0, consumed ? 1 : 0);
+    return pos;
 }
 
 static bool vm_net_mock_append_backpack_items_object(u8 *out, u32 outCap, u32 *pos)
@@ -5407,6 +6039,107 @@ static bool vm_net_mock_role_add_backpack_item(u32 itemId, u32 count, u16 *seqOu
         *seqOut = item->seq;
     vm_net_mock_role_normalize_backpack(role);
     vm_net_mock_role_db_save("backpack-add-item");
+    return true;
+}
+
+static vm_net_mock_backpack_item_state *vm_net_mock_role_find_backpack_item(vm_net_mock_role_state *role,
+                                                                            u32 itemId,
+                                                                            u16 seq)
+{
+    u8 itemCount = 0;
+
+    if (role == NULL || (itemId == 0 && seq == 0))
+        return NULL;
+
+    vm_net_mock_role_normalize_backpack(role);
+    itemCount = vm_net_mock_role_backpack_count(role);
+    if (seq != 0)
+    {
+        for (u32 i = 0; i < itemCount; ++i)
+        {
+            vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+            if (item->seq == seq && (itemId == 0 || item->itemId == itemId))
+                return item;
+        }
+    }
+    if (itemId != 0)
+    {
+        for (u32 i = 0; i < itemCount; ++i)
+        {
+            vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+            if (item->itemId == itemId)
+                return item;
+        }
+    }
+    return NULL;
+}
+
+static vm_net_mock_backpack_item_state *vm_net_mock_role_find_backpack_item_by_effect(vm_net_mock_role_state *role,
+                                                                                      u32 hp,
+                                                                                      u32 mp,
+                                                                                      u32 exp)
+{
+    u8 itemCount = 0;
+
+    if (role == NULL || (hp == 0 && mp == 0 && exp == 0))
+        return NULL;
+    vm_net_mock_role_normalize_backpack(role);
+    itemCount = vm_net_mock_role_backpack_count(role);
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+        const vm_net_mock_item_effect_catalog_item *effect =
+            vm_net_mock_find_item_effect_catalog_item(item->itemId);
+        if (!vm_net_mock_item_effect_is_usable(effect))
+            continue;
+        if ((hp == 0 || effect->hp == hp) &&
+            (mp == 0 || effect->mp == mp) &&
+            (exp == 0 || effect->exp == exp))
+        {
+            return item;
+        }
+    }
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+        const vm_net_mock_item_effect_catalog_item *effect =
+            vm_net_mock_find_item_effect_catalog_item(item->itemId);
+        if (vm_net_mock_item_effect_is_usable(effect))
+            return item;
+    }
+    return NULL;
+}
+
+static bool vm_net_mock_role_consume_backpack_item(vm_net_mock_role_state *role,
+                                                   u32 itemId,
+                                                   u16 seq,
+                                                   u32 count,
+                                                   u32 *remainingOut)
+{
+    vm_net_mock_backpack_item_state *item = NULL;
+
+    if (remainingOut)
+        *remainingOut = 0;
+    if (role == NULL || count == 0)
+        return false;
+
+    item = vm_net_mock_role_find_backpack_item(role, itemId, seq);
+    if (item == NULL || item->count == 0)
+        return false;
+
+    if (item->count <= count)
+    {
+        item->count = 0;
+        if (remainingOut)
+            *remainingOut = 0;
+    }
+    else
+    {
+        item->count -= count;
+        if (remainingOut)
+            *remainingOut = item->count;
+    }
+    vm_net_mock_role_normalize_backpack(role);
     return true;
 }
 
@@ -14173,6 +14906,13 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     if (hookedLen)
     {
         vm_net_log_handled_packet("builtin-battle-death-prompt-followup", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_item_use_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-item-use", request, requestLen, hookedLen);
         return hookedLen;
     }
 
