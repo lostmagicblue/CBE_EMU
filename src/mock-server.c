@@ -3809,6 +3809,15 @@ typedef struct
     bool haveEffect;
 } vm_net_mock_item_use_request;
 
+typedef struct
+{
+    u32 itemId;
+    u16 seq;
+    u32 count;
+    u8 type;
+    bool haveItemSelector;
+} vm_net_mock_item_discard_request;
+
 static bool vm_net_mock_get_object_number_field(const u8 *payload, u32 payloadLen,
                                                 const char *field, u32 *value)
 {
@@ -3939,6 +3948,62 @@ static bool vm_net_mock_parse_item_use_request(const u8 *request, u32 requestLen
     if (!parsed.haveItemSelector && !parsed.haveEffect)
         return false;
 
+    if (parsedOut)
+        *parsedOut = parsed;
+    return true;
+}
+
+static bool vm_net_mock_parse_item_discard_request(const u8 *request, u32 requestLen,
+                                                   vm_net_mock_item_discard_request *parsedOut)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+    vm_net_mock_item_discard_request parsed;
+    u32 value = 0;
+    u32 candidate = 0;
+
+    if (parsedOut)
+        memset(parsedOut, 0, sizeof(*parsedOut));
+    memset(&parsed, 0, sizeof(parsed));
+
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T')
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        return false;
+    if (offset != requestLen)
+        return false;
+    if (object.major != 1 || object.kind != 7 || object.subtype != 4 || object.payloadLen == 0)
+        return false;
+
+    (void)vm_net_mock_get_object_u8_field(object.payload, object.payloadLen, "type", &parsed.type);
+    if (vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "seq", &value) ||
+        vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "itemseq", &value) ||
+        vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "itemSeq", &value))
+    {
+        if (value <= 0xffffu)
+        {
+            parsed.seq = (u16)value;
+            parsed.haveItemSelector = true;
+        }
+    }
+
+    if (vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "itemId", &candidate) ||
+        vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "itemID", &candidate) ||
+        vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "itemid", &candidate) ||
+        vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "id", &candidate))
+    {
+        parsed.itemId = candidate;
+        parsed.haveItemSelector = true;
+    }
+
+    if (vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "count", &value) ||
+        vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "num", &value))
+    {
+        parsed.count = value;
+    }
+
+    if (!parsed.haveItemSelector)
+        return false;
     if (parsedOut)
         *parsedOut = parsed;
     return true;
@@ -4189,6 +4254,104 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
     vm_autotest_note("mock_item_use item=%u seq=%u count=%u remaining=%u hp=%u mp=%u exp=%u applied=%u consumed=%u response=7/1-use-ok+7/7-type2+7/11-info evidence=runtime:wt7/1 mmGame:0x11CE->0xD04 JianghuOL.CBE:0x1033544\n",
                      itemId, seq, parsed.count, remaining, hp, mp, exp,
                      applied ? 1 : 0, consumed ? 1 : 0);
+    return pos;
+}
+
+static u32 vm_net_mock_build_item_discard_response(const u8 *request, u32 requestLen,
+                                                   u8 *out, u32 outCap)
+{
+    vm_net_mock_item_discard_request parsed;
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_backpack_item_state *item = NULL;
+    u32 itemId = 0;
+    u16 seq = 0;
+    u32 discardCount = 0;
+    u32 remaining = 0;
+    bool consumed = false;
+    u8 result = 2;
+    u8 countInfo[32];
+    u32 countInfoLen = 0;
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u8 objectCount = 0;
+
+    if (out == NULL || outCap < pos)
+        return 0;
+    if (!vm_net_mock_parse_item_discard_request(request, requestLen, &parsed))
+        return 0;
+
+    role = vm_net_mock_active_role();
+    if (role != NULL)
+    {
+        item = vm_net_mock_role_find_backpack_item(role, parsed.itemId, parsed.seq);
+        if (item == NULL && parsed.seq != 0)
+            item = vm_net_mock_role_find_backpack_item(role, 0, parsed.seq);
+        if (item == NULL && parsed.itemId != 0)
+            item = vm_net_mock_role_find_backpack_item(role, parsed.itemId, 0);
+        if (item != NULL)
+        {
+            itemId = item->itemId;
+            seq = item->seq;
+            discardCount = parsed.count ? parsed.count : item->count;
+            if (discardCount == 0)
+                discardCount = item->count;
+            consumed = vm_net_mock_role_consume_backpack_item(role, itemId, seq,
+                                                              discardCount, &remaining);
+            if (consumed)
+            {
+                result = 1;
+                vm_net_mock_role_db_save("item-discard");
+            }
+        }
+        else
+        {
+            itemId = parsed.itemId;
+            seq = parsed.seq;
+        }
+    }
+
+    /*
+     * JianghuOL.CBE:0x1033544 handles 7/4 as the item-operation completion
+     * branch and clears the waiting flag.  The backpack UI callback is the
+     * proven mmGame:0x418C path, so a successful discard also sends a full
+     * 17/1 list rebuild plus 7/42 book filler.
+     */
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 4, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", result))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    objectCount += 1;
+
+    if (consumed)
+    {
+        if (!vm_net_mock_append_backpack_items_object(out, outCap, &pos))
+            return 0;
+        objectCount += 1;
+        if (!vm_net_mock_append_books42_object(out, outCap, &pos))
+            return 0;
+        objectCount += 1;
+        if (seq != 0)
+        {
+            if (!vm_net_mock_build_item_use_count_info_blob(countInfo, sizeof(countInfo),
+                                                            seq, remaining, &countInfoLen))
+                return 0;
+            if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 11, &objectStart))
+                return 0;
+            if (!vm_net_mock_put_object_raw(out, outCap, &pos, "info", countInfo, (u16)countInfoLen))
+                return 0;
+            vm_net_mock_finish_wt_object(out, objectStart, pos);
+            objectCount += 1;
+        }
+    }
+
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    printf("[info][network] mock_item_discard item=%u seq=%u count=%u remaining=%u result=%u refresh=%s resp=%u\n",
+           itemId, seq, discardCount, remaining, result,
+           consumed ? "7/4+17/1+7/42+7/11" : "7/4-fail", pos);
+    vm_autotest_note("mock_item_discard item=%u seq=%u count=%u remaining=%u result=%u response=%s evidence=runtime:wt7/4 JianghuOL.CBE:0x1033544 mmGame:0x418C\n",
+                     itemId, seq, discardCount, remaining, result,
+                     consumed ? "7/4+17/1+7/42+7/11" : "7/4-fail");
     return pos;
 }
 
@@ -14913,6 +15076,13 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     if (hookedLen)
     {
         vm_net_log_handled_packet("builtin-item-use", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_item_discard_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-item-discard", request, requestLen, hookedLen);
         return hookedLen;
     }
 
