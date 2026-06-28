@@ -146,6 +146,21 @@ damage = max(1, attack * 100 / (100 + defense))
 This avoids the old `attack - defense` cliff where a small stat mismatch could
 collapse damage to `1`, while still making defense meaningful at all levels.
 
+## Skill Damage
+
+Battle skills use `skill.dsh` instead of the normal attack value:
+
+```text
+base = abs(生命变化) for offensive rows
+bonus = (strength * 力量系数 + agility * 敏捷系数 + wisdom * 智慧系数) / 100
+raw = base + bonus
+damage = max(base, raw * 100 / (100 + enemy_defense))
+```
+
+This keeps the DSH promise like `造成至少30点单体法术伤害` true while still letting
+player attributes and monster defense matter. Normal attack remains
+`vm_net_mock_battle_player_damage_to_enemy()`.
+
 ## Implementation Points
 
 `src/mock-server.c` now centralizes the model in:
@@ -167,6 +182,7 @@ vm_net_mock_build_challenge_interaction_response()
 vm_net_mock_battle_role_attack_default()
 vm_net_mock_battle_role_defense_default()
 vm_net_mock_battle_player_damage_to_enemy()
+vm_net_mock_battle_player_skill_damage_to_enemy()
 vm_net_mock_battle_enemy_damage_to_role()
 vm_net_mock_role_apply_battle_settlement()
 ```
