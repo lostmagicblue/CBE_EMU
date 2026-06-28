@@ -278,6 +278,8 @@ static u32 g_mockBattleEnemyHpMax = 0;
 static uc_err add_manager_code_hooks(uc_engine *uc);
 static bool vm_host_file_exists(const char *path);
 static bool vm_net_mock_current_screen_is_battle(void);
+static void vm_autotest_note_role_attr_page_pc(u32 pc);
+static void vm_autotest_note_attr_value_write(const char *source, u32 dst, u32 len);
 static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *pos);
 static bool vm_net_mock_append_battle_terminal_subtype8_object(u8 *out, u32 outCap, u32 *pos);
 static bool vm_net_mock_append_battle_terminal_case4_object(u8 *out, u32 outCap, u32 *pos);
@@ -2096,6 +2098,172 @@ static void vm_autotest_format_mem_hex(u32 addr, u32 len, char *out, size_t outC
         out[pos++] = hex[bytes[i] & 0x0F];
     }
     out[pos] = 0;
+}
+
+static void vm_autotest_read_ascii_preview(u32 addr, char *out, size_t outCap)
+{
+    size_t pos = 0;
+
+    if (out == NULL || outCap == 0)
+        return;
+    out[0] = 0;
+    if (addr == 0)
+        return;
+    while (pos + 1 < outCap)
+    {
+        u8 ch = 0;
+        if (uc_mem_read(MTK, addr + (u32)pos, &ch, 1) != UC_ERR_OK || ch == 0)
+            break;
+        out[pos++] = (ch >= 0x20 && ch < 0x7f) ? (char)ch : '.';
+    }
+    out[pos] = 0;
+}
+
+static void vm_autotest_note_format_preview(const char *source, u32 callerPc,
+                                            u32 dstPtr, const char *fmt,
+                                            u32 arg0, u32 arg1)
+{
+    char outText[64];
+    char outHex[64];
+
+    if (!g_autotestEnabled || fmt == NULL)
+        return;
+    if (strstr(fmt, "%d/%d") == NULL &&
+        (callerPc < 0x01022000 || callerPc > 0x01023000))
+    {
+        return;
+    }
+
+    outText[0] = 0;
+    outHex[0] = 0;
+    vm_autotest_read_ascii_preview(dstPtr, outText, sizeof(outText));
+    vm_autotest_format_mem_hex(dstPtr, 16, outHex, sizeof(outHex));
+    vm_autotest_note("format_preview source=%s caller=%08x dst=%08x fmt=%s arg0=%d arg1=%d out=%s out_hex=%s\n",
+                     source ? source : "?", callerPc, dstPtr, fmt, (int)arg0,
+                     (int)arg1, outText, outHex);
+}
+
+static void vm_autotest_note_role_attr_page_pc(u32 pc)
+{
+    static u32 seen = 0;
+    u32 actor = 0;
+    u32 sceneObj = 0;
+    u32 labelTable = 0;
+    u32 valueBase = 0;
+    u16 rowStride = 0;
+    u8 visibleRows = 0;
+    u32 scrollStart = 0;
+    u32 actorLevel = 0;
+    u32 actorExp = 0;
+    u32 actorLastExp = 0;
+    u32 actorNextExp = 0;
+    u32 sceneLastExp = 0;
+    u32 sceneCurExp = 0;
+    u16 sceneNextExp = 0;
+    char actorNameHex[64];
+
+    if (!g_autotestEnabled || Global_R9 == 0 || pc != 0x010227C0)
+        return;
+    if (seen >= 6)
+        return;
+    ++seen;
+
+    actorNameHex[0] = 0;
+    (void)uc_mem_read(MTK, Global_R9 + 0x5CA4, &actor, sizeof(actor));
+    (void)uc_mem_read(MTK, Global_R9 + 0x54AC, &sceneObj, sizeof(sceneObj));
+    (void)uc_mem_read(MTK, Global_R9 + 0x635C, &labelTable, sizeof(labelTable));
+    (void)uc_mem_read(MTK, Global_R9 + 0x6390, &valueBase, sizeof(valueBase));
+    (void)uc_mem_read(MTK, Global_R9 + 0x631E, &rowStride, sizeof(rowStride));
+    (void)uc_mem_read(MTK, Global_R9 + 0x62F6, &visibleRows, sizeof(visibleRows));
+    (void)uc_mem_read(MTK, Global_R9 + 0x63A4, &scrollStart, sizeof(scrollStart));
+    if (rowStride < 4 || rowStride > 128)
+        rowStride = 20;
+
+    if (actor != 0)
+    {
+        (void)uc_mem_read(MTK, actor + 172, &actorLevel, sizeof(actorLevel));
+        (void)uc_mem_read(MTK, actor + 176, &actorExp, sizeof(actorExp));
+        (void)uc_mem_read(MTK, actor + 180, &actorLastExp, sizeof(actorLastExp));
+        (void)uc_mem_read(MTK, actor + 184, &actorNextExp, sizeof(actorNextExp));
+        vm_autotest_format_mem_hex(actor + 68, 16, actorNameHex, sizeof(actorNameHex));
+    }
+    if (sceneObj != 0)
+    {
+        (void)uc_mem_read(MTK, sceneObj + 0x4E4, &sceneLastExp, sizeof(sceneLastExp));
+        (void)uc_mem_read(MTK, sceneObj + 0x4E8, &sceneCurExp, sizeof(sceneCurExp));
+        (void)uc_mem_read(MTK, sceneObj + 0x4FC, &sceneNextExp, sizeof(sceneNextExp));
+    }
+
+    vm_autotest_note("role_attr_page pc=%08x actor=%08x name_hex=%s level=%u exp=%u actor_last=%u actor_next=%u scene_last=%u scene_cur=%u scene_next=%u labels=%08x values=%08x stride=%u visible=%u scroll=%u count=%u\n",
+                     pc, actor, actorNameHex, actorLevel, actorExp,
+                     actorLastExp, actorNextExp, sceneLastExp, sceneCurExp,
+                     sceneNextExp, labelTable, valueBase, rowStride,
+                     visibleRows, scrollStart, seen);
+
+    for (u32 i = 0; i < 20; ++i)
+    {
+        u32 labelPtr = 0;
+        u32 valuePtr = valueBase + i * rowStride;
+        char labelHex[64];
+        char valueHex[64];
+        char valueText[64];
+
+        labelHex[0] = 0;
+        valueHex[0] = 0;
+        valueText[0] = 0;
+        if (labelTable != 0)
+            (void)uc_mem_read(MTK, labelTable + i * 4, &labelPtr, sizeof(labelPtr));
+        vm_autotest_format_mem_hex(labelPtr, 16, labelHex, sizeof(labelHex));
+        vm_autotest_format_mem_hex(valuePtr, 16, valueHex, sizeof(valueHex));
+        vm_autotest_read_ascii_preview(valuePtr, valueText, sizeof(valueText));
+        vm_autotest_note("role_attr_row index=%u label_ptr=%08x label_hex=%s value_ptr=%08x value=%s value_hex=%s\n",
+                         i, labelPtr, labelHex, valuePtr, valueText, valueHex);
+    }
+}
+
+static void vm_autotest_note_attr_value_write(const char *source, u32 dst, u32 len)
+{
+    static u32 seen = 0;
+    u32 valueBase = 0;
+    u16 rowStride = 0;
+    u32 writeEnd = 0;
+
+    if (!g_autotestEnabled || Global_R9 == 0 || dst == 0 || len == 0)
+        return;
+    if (seen >= 120)
+        return;
+
+    (void)uc_mem_read(MTK, Global_R9 + 0x6390, &valueBase, sizeof(valueBase));
+    (void)uc_mem_read(MTK, Global_R9 + 0x631E, &rowStride, sizeof(rowStride));
+    if (valueBase == 0 || rowStride < 4 || rowStride > 128)
+        return;
+
+    writeEnd = dst + len;
+    if (writeEnd < dst)
+        writeEnd = 0xffffffffu;
+
+    for (u32 row = 0; row < 20; ++row)
+    {
+        u32 rowPtr = valueBase + row * rowStride;
+        u32 rowEnd = rowPtr + rowStride;
+        char valueHex[80];
+        char valueText[80];
+
+        if (writeEnd <= rowPtr || dst >= rowEnd)
+            continue;
+
+        valueHex[0] = 0;
+        valueText[0] = 0;
+        vm_autotest_format_mem_hex(rowPtr, rowStride < 20 ? rowStride : 20,
+                                   valueHex, sizeof(valueHex));
+        vm_autotest_read_ascii_preview(rowPtr, valueText, sizeof(valueText));
+        ++seen;
+        vm_autotest_note("attr_value_write source=%s dst=%08x len=%u row=%u row_ptr=%08x value=%s value_hex=%s count=%u\n",
+                         source ? source : "?", dst, len, row, rowPtr,
+                         valueText, valueHex, seen);
+        if (seen >= 120)
+            return;
+    }
 }
 
 static void vm_autotest_note_startup_pc(u32 pc)
@@ -6758,6 +6926,7 @@ static bool hook_vm_manager_stdio_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
         if (tmp1 && tmp2 && tmp3)
             vm_memcpy(tmp1, tmp2, tmp3);
+        vm_autotest_note_attr_value_write("stdio_memcpy", tmp1, tmp3);
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
     }
     else if (idx == 2)
@@ -6779,6 +6948,7 @@ static bool hook_vm_manager_stdio_func(u32 address)
             for (u32 off = 0; off < tmp3; off += sizeof(fill))
                 uc_mem_write(MTK, tmp1 + off, fill, SDL_min((u32)sizeof(fill), tmp3 - off));
         }
+        vm_autotest_note_attr_value_write("stdio_memset", tmp1, tmp3);
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
     }
     else if (idx == 4)
@@ -6788,6 +6958,21 @@ static bool hook_vm_manager_stdio_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
         DEBUG_PRINT("[call]sprintf(%x,%x,%x)\n", tmp1, tmp2, tmp3);
         vm_sprintf_return_buffer();
+        if (g_autotestEnabled && tmp1 != 0)
+        {
+            vm_readStringByPtr(tmp1, sprintfBuff);
+            vm_autotest_note_attr_value_write("stdio_sprintf", tmp1,
+                                              (u32)strlen((char *)sprintfBuff) + 1);
+        }
+        if (g_autotestEnabled)
+        {
+            u32 arg1 = 0;
+            vm_readStringByPtr(tmp2, cbeTextString);
+            uc_reg_read(MTK, UC_ARM_REG_R3, &arg1);
+            vm_autotest_note_format_preview("stdio", lastAddress, tmp1,
+                                            (const char *)cbeTextString,
+                                            tmp3, arg1);
+        }
     }
     else if (idx == 5)
     {
@@ -6828,6 +7013,7 @@ static bool hook_vm_manager_stdio_func(u32 address)
                     uc_mem_write(MTK, tmp1 + i, zero, SDL_min((u32)sizeof(zero), tmp3 - i));
             }
         }
+        vm_autotest_note_attr_value_write("stdio_strncpy", tmp1, tmp3);
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
     }
     else if (idx == 9)
@@ -6836,6 +7022,12 @@ static bool hook_vm_manager_stdio_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         vm_strcpy(tmp1, tmp2);
+        if (g_autotestEnabled && tmp1 != 0)
+        {
+            vm_readStringByPtr(tmp1, sprintfBuff);
+            vm_autotest_note_attr_value_write("stdio_strcpy", tmp1,
+                                              (u32)strlen((char *)sprintfBuff) + 1);
+        }
     }
     else if (idx == 10)
     {
@@ -6846,6 +7038,8 @@ static bool hook_vm_manager_stdio_func(u32 address)
             int dstLen = vm_strlen(tmp1);
             vm_readStringByPtr(tmp2, cbeTextString);
             uc_mem_write(MTK, tmp1 + dstLen, cbeTextString, strlen(cbeTextString) + 1);
+            vm_autotest_note_attr_value_write("stdio_strcat", tmp1 + dstLen,
+                                              (u32)strlen(cbeTextString) + 1);
         }
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
     }
@@ -7357,7 +7551,16 @@ static bool hook_vm_manager_game_util_func(u32 address)
     else if (idx == 37)
     {
         DEBUG_PRINT("[call]DF_GetFormatString\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+        vm_readStringByPtr(tmp1, cbeTextString);
         vm_DF_GetFormatString();
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp5);
+        vm_autotest_note_format_preview("df37", lastAddress, tmp5,
+                                        (const char *)cbeTextString,
+                                        tmp2, tmp3);
     }
     else if (idx == 38)
     {
@@ -8632,7 +8835,16 @@ static bool hook_vm_manager_gameold_func(u32 address)
     else if (idx == 109)
     {
         DEBUG_PRINT("[call]DF_GetFormatString\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+        vm_readStringByPtr(tmp1, cbeTextString);
         vm_DF_GetFormatString();
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp5);
+        vm_autotest_note_format_preview("df109", lastAddress, tmp5,
+                                        (const char *)cbeTextString,
+                                        tmp2, tmp3);
     }
     else if (idx == 111)
     {
@@ -8701,6 +8913,7 @@ static bool hook_vm_manager_gameold_func(u32 address)
                     uc_mem_write(MTK, tmp1 + i, &ch, 1);
             }
         }
+        vm_autotest_note_attr_value_write("gameold_strncpy", tmp1, tmp3);
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
     }
     else if (idx == 142)
@@ -8708,6 +8921,12 @@ static bool hook_vm_manager_gameold_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         vm_strcpy(tmp1, tmp2);
+        if (g_autotestEnabled && tmp1 != 0)
+        {
+            vm_readStringByPtr(tmp1, sprintfBuff);
+            vm_autotest_note_attr_value_write("gameold_strcpy", tmp1,
+                                              (u32)strlen((char *)sprintfBuff) + 1);
+        }
     }
     else if (idx == 143)
     {
@@ -8718,6 +8937,8 @@ static bool hook_vm_manager_gameold_func(u32 address)
             int dstLen = vm_strlen(tmp1);
             vm_readStringByPtr(tmp2, cbeTextString);
             uc_mem_write(MTK, tmp1 + dstLen, cbeTextString, strlen((char *)cbeTextString) + 1);
+            vm_autotest_note_attr_value_write("gameold_strcat", tmp1 + dstLen,
+                                              (u32)strlen((char *)cbeTextString) + 1);
         }
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
     }
@@ -9767,6 +9988,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     vm_autotest_note_scene_actor_parser_pc((u32)address & ~1u);
     vm_autotest_note_backpack_parser_pc((u32)address & ~1u);
     vm_autotest_note_shop_parser_pc((u32)address & ~1u);
+    vm_autotest_note_role_attr_page_pc((u32)address & ~1u);
     vm_note_mmgame_transfer_parser_pc((u32)address & ~1u);
     vm_note_stream_read_i16_pc((u32)address & ~1u);
     vm_note_net_wrapper_pc((u32)address & ~1u);

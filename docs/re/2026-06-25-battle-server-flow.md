@@ -271,7 +271,10 @@ Minimum server fix:
   slot for defeat
 - send subtype 7 settlement with `exp`, `lastexp`, `curexp`, and visible reward
   defaults; `lastexp` is the current level start threshold after reward,
-  `curexp` is total EXP after reward, and `persentexp` is current-level progress
+  `curexp` is the next level start threshold after reward, and `persentexp` is
+  current-level percentage progress after reward. Encode all three EXP fields
+  as normal integer object fields: `HandleBattleSettleMsg(0x743C)` reads them
+  through object getter `+0x44` and only narrows `persentexp` after parsing.
 - use negative two's-complement HP deltas in subtype `4/6`; positive values heal
 
 ## unknowns

@@ -2400,7 +2400,11 @@ enum
     VM_NET_MOCK_ROLE_DB_LEGACY_VERSION = 1,
     VM_NET_MOCK_ROLE_DB_VERSION = 2,
     VM_NET_MOCK_ROLE_EXP_PER_LEVEL = 100,
-    VM_NET_MOCK_ROLE_MONSTER_EXP = 10,
+    VM_NET_MOCK_BATTLE_POISON_SLIME_ID = 105,
+    VM_NET_MOCK_BATTLE_POISON_SLIME_EXP = 5,
+    VM_NET_MOCK_BATTLE_CHANGMING_SAN_ITEM_ID = 304,
+    VM_NET_MOCK_BATTLE_CHANGMING_SAN_DROP_RATE = 10,
+    VM_NET_MOCK_ROLE_MONSTER_EXP = VM_NET_MOCK_BATTLE_POISON_SLIME_EXP,
     VM_NET_MOCK_ROLE_DEFAULT_ID = 10001,
     VM_NET_MOCK_ROLE_DEFAULT_HP = 120,
     VM_NET_MOCK_ROLE_DEFAULT_MP = 100,
@@ -2481,6 +2485,7 @@ typedef struct
 
 static vm_net_mock_role_state *vm_net_mock_active_role(void);
 static u32 vm_net_mock_role_level_from_exp(u32 exp);
+static u32 vm_net_mock_role_next_level_start_exp(u32 exp);
 static u32 vm_net_mock_role_exp_percent(u32 exp);
 static u32 vm_net_mock_role_last_level_exp(u32 exp);
 static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap);
@@ -3556,6 +3561,11 @@ static vm_net_mock_role_db_file g_vm_net_mock_role_db;
 static bool g_vm_net_mock_role_db_loaded = false;
 static bool g_vm_net_mock_role_db_valid = false;
 static u32 g_vm_net_mock_battle_rewarded_serial = 0;
+static u32 g_vm_net_mock_battle_rewarded_exp = 0;
+static u32 g_vm_net_mock_battle_rewarded_drop_item = 0;
+static u16 g_vm_net_mock_battle_rewarded_drop_seq = 0;
+static u32 g_vm_net_mock_battle_enemy_id_current = VM_NET_MOCK_BATTLE_POISON_SLIME_ID;
+static u32 g_vm_net_mock_battle_reward_rng = 0;
 static char g_vm_net_mock_scene_moveinfo_npc_pending_scene[64];
 static bool g_vm_net_mock_scene_moveinfo_npc_pending = false;
 static char g_vm_net_mock_scene_moveinfo_npc_seeded_scene[64];
@@ -3845,13 +3855,31 @@ static u32 vm_net_mock_role_last_level_exp(u32 exp)
     return vm_net_mock_role_level_start_exp(vm_net_mock_role_level_from_exp(exp));
 }
 
+static u32 vm_net_mock_role_next_level_start_exp(u32 exp)
+{
+    u32 level = vm_net_mock_role_level_from_exp(exp);
+    u32 nextLevel = level + 1;
+
+    if (nextLevel == 0)
+        return 0xffffffffu;
+    return vm_net_mock_role_level_start_exp(nextLevel);
+}
+
 static u32 vm_net_mock_role_exp_percent(u32 exp)
 {
     u32 levelStart = vm_net_mock_role_last_level_exp(exp);
+    u32 nextLevelStart = vm_net_mock_role_next_level_start_exp(exp);
+    u32 levelSize = 0;
+    u32 current = 0;
 
-    if (exp < levelStart)
+    if (exp <= levelStart)
         return 0;
-    return exp - levelStart;
+    if (nextLevelStart <= levelStart || nextLevelStart == 0xffffffffu)
+        return 100;
+
+    current = exp - levelStart;
+    levelSize = nextLevelStart - levelStart;
+    return (u32)(((unsigned long long)current * 100ull) / levelSize);
 }
 
 static const char *vm_net_mock_default_role_name(void)
@@ -4060,11 +4088,9 @@ static void vm_net_mock_role_normalize(vm_net_mock_role_state *role)
         role->hpMax = VM_NET_MOCK_ROLE_DEFAULT_HP;
     if (role->mpMax == 0)
         role->mpMax = VM_NET_MOCK_ROLE_DEFAULT_MP;
-    if (role->hp == 0 || role->hp > role->hpMax)
+    if (role->hp > role->hpMax)
         role->hp = role->hpMax;
     if (role->mp > role->mpMax)
-        role->mp = role->mpMax;
-    if (role->mp == 0)
         role->mp = role->mpMax;
     role->scene[sizeof(role->scene) - 1] = 0;
     if (!vm_net_mock_scene_name_is_safe(role->scene))
@@ -4527,10 +4553,105 @@ static bool vm_net_mock_role_add_backpack_item(u32 itemId, u32 count, u16 *seqOu
     return true;
 }
 
+static u32 vm_net_mock_battle_reward_rand(void)
+{
+    if (g_vm_net_mock_battle_reward_rng == 0)
+    {
+        g_vm_net_mock_battle_reward_rng =
+            0x6d2b79f5u ^
+            (g_schedulerTick * 1664525u) ^
+            (g_mockBattleOperateSessionSerial * 1013904223u) ^
+            (g_vm_net_mock_role_db.activeRoleId << 1);
+        if (g_vm_net_mock_battle_reward_rng == 0)
+            g_vm_net_mock_battle_reward_rng = 0x9e3779b9u;
+    }
+
+    g_vm_net_mock_battle_reward_rng ^= g_vm_net_mock_battle_reward_rng << 13;
+    g_vm_net_mock_battle_reward_rng ^= g_vm_net_mock_battle_reward_rng >> 17;
+    g_vm_net_mock_battle_reward_rng ^= g_vm_net_mock_battle_reward_rng << 5;
+    return g_vm_net_mock_battle_reward_rng;
+}
+
+static bool vm_net_mock_battle_roll_percent(u32 percent)
+{
+    if (percent == 0)
+        return false;
+    if (percent >= 100)
+        return true;
+    return (vm_net_mock_battle_reward_rand() % 100u) < percent;
+}
+
+static u32 vm_net_mock_battle_reward_exp_for_enemy(u32 enemyId)
+{
+    if (enemyId == VM_NET_MOCK_BATTLE_POISON_SLIME_ID)
+        return VM_NET_MOCK_BATTLE_POISON_SLIME_EXP;
+    return VM_NET_MOCK_ROLE_MONSTER_EXP;
+}
+
+static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
+                                                u16 *dropSeqOut,
+                                                bool *dropGrantedOut)
+{
+    u32 rewardExp = 0;
+    u32 dropItemId = 0;
+    u16 dropSeq = 0;
+    bool dropGranted = false;
+
+    if (dropItemIdOut)
+        *dropItemIdOut = 0;
+    if (dropSeqOut)
+        *dropSeqOut = 0;
+    if (dropGrantedOut)
+        *dropGrantedOut = false;
+
+    if (g_mockBattleOperateSessionSerial == 0)
+        return 0;
+
+    if (g_vm_net_mock_battle_rewarded_serial == g_mockBattleOperateSessionSerial)
+    {
+        if (dropItemIdOut)
+            *dropItemIdOut = g_vm_net_mock_battle_rewarded_drop_item;
+        if (dropSeqOut)
+            *dropSeqOut = g_vm_net_mock_battle_rewarded_drop_seq;
+        if (dropGrantedOut)
+            *dropGrantedOut = g_vm_net_mock_battle_rewarded_drop_item != 0;
+        return 0;
+    }
+
+    rewardExp = vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_EXP",
+                                           vm_net_mock_battle_reward_exp_for_enemy(g_vm_net_mock_battle_enemy_id_current));
+    if (g_vm_net_mock_battle_enemy_id_current == VM_NET_MOCK_BATTLE_POISON_SLIME_ID &&
+        vm_net_mock_battle_roll_percent(vm_net_mock_env_u32_if_set("CBE_BATTLE_CHANGMING_SAN_DROP_RATE",
+                                                                   VM_NET_MOCK_BATTLE_CHANGMING_SAN_DROP_RATE)))
+    {
+        dropItemId = vm_net_mock_env_u32_if_set("CBE_BATTLE_CHANGMING_SAN_ITEM_ID",
+                                                VM_NET_MOCK_BATTLE_CHANGMING_SAN_ITEM_ID);
+        dropGranted = vm_net_mock_role_add_backpack_item(dropItemId, 1, &dropSeq);
+        if (!dropGranted)
+        {
+            dropItemId = 0;
+            dropSeq = 0;
+        }
+    }
+
+    g_vm_net_mock_battle_rewarded_serial = g_mockBattleOperateSessionSerial;
+    g_vm_net_mock_battle_rewarded_exp = rewardExp;
+    g_vm_net_mock_battle_rewarded_drop_item = dropItemId;
+    g_vm_net_mock_battle_rewarded_drop_seq = dropSeq;
+
+    if (dropItemIdOut)
+        *dropItemIdOut = dropItemId;
+    if (dropSeqOut)
+        *dropSeqOut = dropSeq;
+    if (dropGrantedOut)
+        *dropGrantedOut = dropGranted;
+    return rewardExp;
+}
+
 static void vm_net_mock_role_apply_battle_settlement(u32 hp, u32 mp,
                                                      u32 rewardExp, u32 rewardGold,
                                                      u32 *lastExpOut, u32 *curExpOut,
-                                                     u16 *percentExpOut, u32 *levelOut,
+                                                     u32 *percentExpOut, u32 *levelOut,
                                                      u32 *goldOut, u32 *hpOut, u32 *mpOut)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
@@ -4543,17 +4664,17 @@ static void vm_net_mock_role_apply_battle_settlement(u32 hp, u32 mp,
         mp = role->mpMax;
     role->hp = hp;
     role->mp = mp;
-    role->exp += rewardExp;
-    role->money += rewardGold;
+    role->exp = (0xffffffffu - role->exp < rewardExp) ? 0xffffffffu : role->exp + rewardExp;
+    role->money = (0xffffffffu - role->money < rewardGold) ? 0xffffffffu : role->money + rewardGold;
     vm_net_mock_role_normalize(role);
     vm_net_mock_role_db_save("battle-settle");
 
     if (lastExpOut)
         *lastExpOut = vm_net_mock_role_last_level_exp(role->exp);
     if (curExpOut)
-        *curExpOut = role->exp;
+        *curExpOut = vm_net_mock_role_next_level_start_exp(role->exp);
     if (percentExpOut)
-        *percentExpOut = (u16)vm_net_mock_role_exp_percent(role->exp);
+        *percentExpOut = vm_net_mock_role_exp_percent(role->exp);
     if (levelOut)
         *levelOut = role->level;
     if (goldOut)
@@ -4568,6 +4689,51 @@ static u32 vm_net_mock_role_current_hp_for_battle(void)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     return role ? role->hp : VM_NET_MOCK_ROLE_DEFAULT_HP;
+}
+
+static void vm_net_mock_battle_save_terminal_role_state(const char *reason)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 roleHp = g_mockBattleRoleHpMax != 0 ? g_mockBattleRoleHpCurrent :
+                 (role ? role->hp : VM_NET_MOCK_ROLE_DEFAULT_HP);
+    u32 roleMp = role ? role->mp : VM_NET_MOCK_ROLE_DEFAULT_MP;
+    u32 rewardExp = 0;
+    u32 rewardGold = 0;
+    u32 statusLastExp = 0;
+    u32 statusCurExp = 0;
+    u32 statusPercentExp = 0;
+    u32 statusLevel = 0;
+    u32 statusGold = 0;
+    u32 dropItemId = 0;
+    u16 dropSeq = 0;
+    bool dropGranted = false;
+    bool victory = g_mockBattleEnemyHpCurrent == 0 && roleHp > 0;
+
+    if (role == NULL)
+        return;
+    if (victory)
+    {
+        rewardExp = vm_net_mock_battle_grant_reward_once(&dropItemId,
+                                                         &dropSeq,
+                                                         &dropGranted);
+        if (rewardExp != 0)
+            rewardGold = vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_GOLD", 0);
+    }
+    vm_net_mock_role_apply_battle_settlement(roleHp, roleMp, rewardExp, rewardGold,
+                                             &statusLastExp, &statusCurExp,
+                                             &statusPercentExp, &statusLevel,
+                                             &statusGold, &roleHp, &roleMp);
+    vm_autotest_note("mock_battle_terminal_save reason=%s enemy=%u victory=%u apply_exp=%u total_exp=%u level=%u hp=%u mp=%u drop=%u seq=%u\n",
+                     reason ? reason : "terminal",
+                     g_vm_net_mock_battle_enemy_id_current,
+                     victory ? 1 : 0,
+                     rewardExp,
+                     role->exp,
+                     statusLevel,
+                     roleHp,
+                     roleMp,
+                     dropGranted ? dropItemId : 0,
+                     dropSeq);
 }
 
 static void vm_net_mock_save_player_pos_state(const char *scene, u16 x, u16 y, const char *reason)
@@ -9762,6 +9928,7 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
         ++g_mockBattleOperateTurnCounter;
     if (battleEndsThisRound)
     {
+        vm_net_mock_battle_save_terminal_role_state("battle-operate");
         g_mockBattleOperateSessionArmed = 0;
         g_mockBattleOperateSessionFinished = 0;
         g_mockBattlePendingEnemyTurn = 0;
@@ -10035,6 +10202,7 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
         ++g_mockBattleOperateTurnCounter;
     if (battleEndsThisRound)
     {
+        vm_net_mock_battle_save_terminal_role_state("battle-operate-fallback");
         g_mockBattleOperateSessionArmed = 0;
         g_mockBattleOperateSessionFinished = 0;
         g_mockBattlePendingEnemyTurn = 0;
@@ -10068,42 +10236,59 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
                  (role ? role->hp : VM_NET_MOCK_ROLE_DEFAULT_HP);
     u32 roleMp = role ? role->mp : VM_NET_MOCK_ROLE_DEFAULT_MP;
     u32 statusExp = 0;
-    u32 statusCurExp = role ? role->exp : 0;
-    u32 statusLastExp = vm_net_mock_role_last_level_exp(statusCurExp);
-    u16 statusPercentExp = (u16)vm_net_mock_role_exp_percent(statusCurExp);
+    u32 totalExp = role ? role->exp : 0;
+    u32 statusCurExp = vm_net_mock_role_next_level_start_exp(totalExp);
+    u32 statusLastExp = vm_net_mock_role_last_level_exp(totalExp);
+    u32 statusPercentExp = vm_net_mock_role_exp_percent(totalExp);
     u32 statusGold = role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY;
     u32 statusLevel = role ? role->level : 1;
+    u32 dropItemId = 0;
+    u16 dropSeq = 0;
+    bool dropGranted = false;
+    u32 applyRewardExp = 0;
     bool victory = g_mockBattleEnemyHpCurrent == 0 && roleHp > 0;
-    bool rewardThisSettle = victory &&
-                            g_mockBattleOperateSessionSerial != 0 &&
-                            g_vm_net_mock_battle_rewarded_serial != g_mockBattleOperateSessionSerial;
 
-    if (rewardThisSettle)
+    if (victory)
     {
-        statusExp = vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_EXP",
-                                               VM_NET_MOCK_ROLE_MONSTER_EXP);
-        g_vm_net_mock_battle_rewarded_serial = g_mockBattleOperateSessionSerial;
+        applyRewardExp = vm_net_mock_battle_grant_reward_once(&dropItemId,
+                                                              &dropSeq,
+                                                              &dropGranted);
+        statusExp = (g_vm_net_mock_battle_rewarded_serial == g_mockBattleOperateSessionSerial)
+                        ? g_vm_net_mock_battle_rewarded_exp
+                        : applyRewardExp;
     }
     if (role != NULL)
     {
-        u32 rewardGold = rewardThisSettle ? vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_GOLD", 0) : 0;
-        vm_net_mock_role_apply_battle_settlement(roleHp, roleMp, statusExp, rewardGold,
+        u32 rewardGold = applyRewardExp ? vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_GOLD", 0) : 0;
+        vm_net_mock_role_apply_battle_settlement(roleHp, roleMp, applyRewardExp, rewardGold,
                                                  &statusLastExp, &statusCurExp,
                                                  &statusPercentExp, &statusLevel,
                                                  &statusGold, &roleHp, &roleMp);
     }
     statusLastExp = vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_LAST_EXP", statusLastExp);
     statusCurExp = vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_CUR_EXP", statusCurExp);
-    statusPercentExp = (u16)vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_PERCENT_EXP",
-                                                       statusPercentExp);
+    statusPercentExp = vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_PERCENT_EXP",
+                                                  statusPercentExp);
     statusLevel = vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_LEVEL", statusLevel);
+    vm_autotest_note("mock_battle_settle enemy=%u victory=%u exp=%u total_exp=%u level=%u hp=%u mp=%u drop=%u seq=%u\n",
+                     g_vm_net_mock_battle_enemy_id_current,
+                     victory ? 1 : 0,
+                     statusExp,
+                     role ? role->exp : totalExp,
+                     statusLevel,
+                     roleHp,
+                     roleMp,
+                     dropGranted ? dropItemId : 0,
+                     dropSeq);
 
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 4, 7, &objectStart))
         return false;
     /*
      * Battle.cbm HandleBattleSettleMsg(0x743C) reads exp before lastexp,
-     * curexp, and persentexp. Keep all reward fields in the subtype-7 battle
-     * object so the battle module, not a scene fallback, applies settlement.
+     * curexp, and persentexp. Main CBE property rendering uses actor+0xB0
+     * as total EXP, lastexp as the level-start threshold, and curexp as the
+     * next level-start threshold. persentexp is parsed through the integer
+     * getter too, then narrowed into a separate progress cache.
      */
     if (!vm_net_mock_put_object_u32(out, outCap, pos, "exp", statusExp))
         return false;
@@ -10111,7 +10296,7 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
         return false;
     if (!vm_net_mock_put_object_u32(out, outCap, pos, "curexp", statusCurExp))
         return false;
-    if (!vm_net_mock_put_object_u16(out, outCap, pos, "persentexp", statusPercentExp))
+    if (!vm_net_mock_put_object_u32(out, outCap, pos, "persentexp", statusPercentExp))
         return false;
     if (!vm_net_mock_put_object_u32(out, outCap, pos, "energy", 100))
         return false;
@@ -10281,6 +10466,7 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
     sceneMonsterPosX = posx;
     sceneMonsterPosY = posy;
     requestedEnemyId = vm_net_mock_normalize_battle_enemy_id(id);
+    g_vm_net_mock_battle_enemy_id_current = requestedEnemyId;
     enemyWireId = vm_net_mock_resolve_battle_enemy_id(requestedEnemyId, &enemyTable, enemyTableIds);
     if (seedSceneMonsterMoveinfo)
     {
@@ -10381,6 +10567,9 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
     g_mockBattleSceneMonsterStartActive = useSceneMonsterStart ? 1 : 0;
     g_mockBattleOperateTurnCounter = 0;
     ++g_mockBattleOperateSessionSerial;
+    g_vm_net_mock_battle_rewarded_exp = 0;
+    g_vm_net_mock_battle_rewarded_drop_item = 0;
+    g_vm_net_mock_battle_rewarded_drop_seq = 0;
     g_mockBattleRoleHpCurrent = roleHp;
     g_mockBattleRoleHpMax = roleMaxHp;
     if (g_mockBattleRoleHpMax < g_mockBattleRoleHpCurrent)
@@ -11438,6 +11627,7 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
     const char *displayName = vm_net_mock_env_str("CBE_ACTOR_DISPLAY_NAME",
                                                   vm_net_mock_role_sect_name(role));
     u32 roleLevel = vm_net_mock_env_u32("CBE_ROLE_LEVEL", role ? role->level : 1);
+    u32 roleExp = role ? role->exp : 0;
     u32 actorJob = vm_net_mock_env_u8("CBE_ACTOR_JOB", role ? role->job : 1);
     u32 actorSex = vm_net_mock_env_u8("CBE_ACTOR_SEX", role ? role->sex : 0);
     u32 visualVariant = 0;
@@ -11458,7 +11648,7 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
                                                                    role ? role->mp : VM_NET_MOCK_ROLE_DEFAULT_MP));
     u32 secondaryBaseMax = vm_net_mock_env_u32("CBE_ACTOR_MP_MAX",
                                                role ? role->mpMax : VM_NET_MOCK_ROLE_DEFAULT_MP);
-    u32 actorSummaryValue = vm_net_mock_env_u32("CBE_ACTOR_SUMMARY_VALUE", role ? role->exp : 0);
+    u32 actorSummaryValue = vm_net_mock_env_u32("CBE_ACTOR_SUMMARY_VALUE", roleExp);
     u32 actorGap09C0 = vm_net_mock_env_u32("CBE_ACTOR_GAP09C0",
                                            role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY);
     u32 actorSummaryStatus = 0;
@@ -11567,7 +11757,7 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
      *   u32 secondaryBaseMax
      *   u32 charm-like attribute
      *   six truncated u32 -> property words (str/agi/wis/end/charm/reserve)
-     *   u32 summary176
+     *   u32 total EXP (actor+176)
      *   u32 gap09C0
      *   u8 backpackCapacity (stored into main item manager +38)
      *   u8 state1
@@ -11804,9 +11994,10 @@ static bool vm_net_mock_append_login_success_object(u8 *out,
     u8 actorInfo[512];
     u32 actorInfoLen = 0;
     vm_net_mock_role_state *role = vm_net_mock_active_role();
-    u32 curExp = role ? role->exp : 0;
-    u32 lastExp = vm_net_mock_role_last_level_exp(curExp);
-    u32 percentExp = vm_net_mock_role_exp_percent(curExp);
+    u32 totalExp = role ? role->exp : 0;
+    u32 curExp = vm_net_mock_role_next_level_start_exp(totalExp);
+    u32 lastExp = vm_net_mock_role_last_level_exp(totalExp);
+    u32 percentExp = vm_net_mock_role_exp_percent(totalExp);
 
     if (includeActorInfo)
     {

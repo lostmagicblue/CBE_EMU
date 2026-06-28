@@ -192,8 +192,20 @@ Login and scene enter:
 - actor motion-resource generation uses the active role job/sex as its default,
   so the map sprite resource follows the selected role unless a `CBE_ACTOR_*`
   environment override is explicitly set.
-- `vm_net_mock_append_login_success_object()` sends `lastexp` as the current
-  level start, `curexp` as total EXP, and `persentexp` as EXP within the level.
+- `vm_net_mock_append_login_success_object()` sends EXP bracket fields:
+  `lastexp` is the current level start threshold, `curexp` is the next level
+  start threshold, and `persentexp` is current-level percentage progress. The
+  property page renders current EXP from `actor+0xB0 - lastexp` and the
+  denominator from `curexp - lastexp`.
+- `persentexp` is encoded as a normal u32/integer object field on login and
+  battle settlement paths. The scene and battle parsers both read it through
+  object getter `+0x44`; the later client-side `STRH` only narrows the UI cache.
+  Runtime negative: sending the field as u16 left that progress cache at `0`
+  because the client reads it through the integer getter before narrowing it.
+- a runtime actorinfo probe that put EXP bracket values into the early
+  HP-adjacent scalar slots changed the scene node from `battleHp=120/120` to
+  `battleHp=120/100`, so those scalar slots stay HP/status-shaped until more
+  parser evidence says otherwise.
 
 Title role list:
 
@@ -234,9 +246,9 @@ Battle:
 - battle start reads active role HP/MP/ID/name.
 - battle settlement applies reward only when the enemy HP is zero, player HP is
   nonzero, and the current battle serial has not already been rewarded.
-- battle settlement sends `lastexp` as the current level threshold after the
-  reward, `curexp` as total EXP after the reward, and `persentexp` as progress
-  within the current level.
+- battle settlement sends `lastexp` as the current level start threshold after
+  the reward, `curexp` as the next level start threshold after the reward, and
+  `persentexp` as current-level percentage progress after the reward.
 - default monster reward is `10` EXP and `0` gold. `CBE_BATTLE_REWARD_EXP` and
   `CBE_BATTLE_REWARD_GOLD` remain focused experiment overrides.
 
