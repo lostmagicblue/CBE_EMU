@@ -59,10 +59,14 @@ So level 1 starts with one skill, then new skills unlock at level 5, 10, 15,
 20, and so on. The list is capped by the number of skills available for the
 role's profession.
 
-Response source remains the existing skill-tail object family:
+Response source remains the existing skill-tail object family. `learnednum`
+is read through object getter `+0x48`, so it must be encoded as tagged-u16.
+`learnedskill` is passed directly to `stream_reader_init_from_blob()` and then
+read through stream vtable `+0x20` (`stream_read_i32_be_tagged`), so the field
+payload must be a raw tagged-u32 stream, without an extra blob length prefix.
 
 ```text
-1/12/1 { learnednum, learnedskill }
+1/12/1 { learnednum:u16, learnedskill:raw tagged-u32 stream }
 1/7/42 { booknum, booksinfo }
 1/17/1 { iteminfo }
 ```
@@ -162,4 +166,44 @@ The skill-tail response logs:
 
 ```text
 mock_role_skills role=... job=... level=... learned=... ids=...
+```
+
+## 2026-06-28 Empty Spell List Follow-up
+
+The spell panel is not expected to stay empty after entering the scene. Each
+level-1 profession has a displayable skill row in `skill.dsh`:
+
+```text
+天机: ID 1   万剑诛仙1   法术标示 1
+幻剑: ID 101 风舞刃行1   法术标示 7
+鬼道: ID 201 绯炎幻法1   法术标示 15
+```
+
+Runtime showed the first scene follow-up request as:
+
+```text
+wt=12/1 len=54 source=builtin-scene-task-subset-followup
+```
+
+That broader task-subset handler consumed the request before the standalone
+`builtin-login-tail-skill` handler could run. It now checks whether the request
+contains both `1/12/1` and `1/7/42`; when present, it appends the same
+`learnednum + learnedskill` and books response used by the login-tail skill
+path.
+
+Verification after rebuild:
+
+```text
+mock_role_skills role=10001 job=3 level=2 learned=1 ids=201
+net_send connect=2 wt=12/1 len=54 source=builtin-scene-task-subset-followup resp=304
+skill parser probe: learnednum=1, read_skill=201, MarkListItemActive(skill=201)
+autotest_exit elapsed=40003 max_ms=40000
+```
+
+Negative runtime before the final wire correction:
+
+```text
+learnednum as u32 -> client getter +0x48 read 0, so no skill IDs were consumed.
+learnedskill via blob helper -> client read 262144 because the extra length
+prefix shifted the tagged-u32 stream by two bytes.
 ```

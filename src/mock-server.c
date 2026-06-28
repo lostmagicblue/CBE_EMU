@@ -9211,11 +9211,11 @@ static bool vm_net_mock_append_login_tail_skill_objects(u8 *out, u32 outCap, u32
 
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 0x0c, 1, &objectStart))
         return false;
-    if (!vm_net_mock_put_object_u32(out, outCap, pos, "learnednum", learnedCount))
+    if (!vm_net_mock_put_object_u16(out, outCap, pos, "learnednum", learnedCount))
         return false;
-    if (!vm_net_mock_put_object_blob(out, outCap, pos, "learnedskill",
-                                     learnedSkillLen ? learnedSkill : NULL,
-                                     (u16)learnedSkillLen))
+    if (!vm_net_mock_put_object_raw(out, outCap, pos, "learnedskill",
+                                    learnedSkillLen ? learnedSkill : NULL,
+                                    (u16)learnedSkillLen))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
     *addedCount = (u8)(*addedCount + 1);
@@ -13546,6 +13546,7 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
     bool seedSubsetNpcOther = false;
     bool seedSubsetNpcActorInfo = false;
     bool seedSubsetSceneNpcInfo = false;
+    bool includeSkillBooks = false;
     u8 subsetSceneNpcNum = 0;
     u32 subsetSceneNpcInfoLen = 0;
     u32 subsetNpcActorInfoLen = 0;
@@ -13565,6 +13566,8 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
      * callback at +0x148 unset and crash at scene_draw_actor_pass(0x01014594).
      */
     currentScene = vm_net_mock_current_scene_name();
+    includeSkillBooks = vm_net_mock_request_contains_object(request, requestLen, 1, 0x0c, 1) &&
+                        vm_net_mock_request_contains_object(request, requestLen, 1, 7, 42);
     if (completeDeferredScene &&
         currentScene != NULL &&
         vm_net_mock_scene_is_penglai03(currentScene) &&
@@ -13589,7 +13592,7 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
     seedSubsetNpcActorInfo = vm_net_mock_scene_supports_actor_other_npc_seed(currentScene) &&
                              vm_net_mock_env_u8("CBE_SCENE_TASK_SUBSET_NPC_ACTORINFO", 0) != 0;
     if (!vm_net_mock_append_scene_resource_followup_objects(out, outCap, &pos, &objectCount,
-                                                           false, true, true, true, false, false,
+                                                           includeSkillBooks, true, true, true, false, false,
                                                            seedSubsetNpcOther))
         return 0;
 
