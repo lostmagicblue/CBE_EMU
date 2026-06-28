@@ -2405,7 +2405,6 @@ enum
     VM_NET_MOCK_BATTLE_POISON_SLIME_GOLD = 5,
     VM_NET_MOCK_BATTLE_CHANGMING_SAN_ITEM_ID = 304,
     VM_NET_MOCK_BATTLE_CHANGMING_SAN_DROP_RATE = 10,
-    VM_NET_MOCK_ROLE_MONSTER_EXP = VM_NET_MOCK_BATTLE_POISON_SLIME_EXP,
     VM_NET_MOCK_ROLE_DEFAULT_ID = 10001,
     VM_NET_MOCK_ROLE_DEFAULT_HP = 120,
     VM_NET_MOCK_ROLE_DEFAULT_MP = 100,
@@ -3949,6 +3948,339 @@ static u16 vm_net_mock_role_charm(const vm_net_mock_role_state *role, u32 level,
     return (u16)value;
 }
 
+typedef enum
+{
+    VM_NET_MOCK_MONSTER_SLIME = 0,
+    VM_NET_MOCK_MONSTER_BEAST,
+    VM_NET_MOCK_MONSTER_FLYING,
+    VM_NET_MOCK_MONSTER_INSECT,
+    VM_NET_MOCK_MONSTER_REPTILE,
+    VM_NET_MOCK_MONSTER_UNDEAD,
+    VM_NET_MOCK_MONSTER_SPIRIT,
+    VM_NET_MOCK_MONSTER_ELEMENTAL,
+    VM_NET_MOCK_MONSTER_STONE,
+    VM_NET_MOCK_MONSTER_HUMANOID,
+    VM_NET_MOCK_MONSTER_SOLDIER,
+    VM_NET_MOCK_MONSTER_BOSS
+} vm_net_mock_monster_family;
+
+typedef struct
+{
+    u16 enemyId;
+    u8 level;
+    u8 family;
+    u32 dropItemId;
+    u8 dropRatePercent;
+} vm_net_mock_monster_entry;
+
+typedef struct
+{
+    u32 enemyId;
+    u32 level;
+    u32 hp;
+    u32 mp;
+    u32 attack;
+    u32 defense;
+    u32 exp;
+    u32 gold;
+    u32 dropItemId;
+    u32 dropRatePercent;
+} vm_net_mock_monster_stats;
+
+static const vm_net_mock_monster_entry g_vm_net_mock_monster_entries[] = {
+    {  1,  6, VM_NET_MOCK_MONSTER_BEAST, 0, 0},
+    {  3,  1, VM_NET_MOCK_MONSTER_FLYING, 0, 0},
+    {  4,  2, VM_NET_MOCK_MONSTER_INSECT, 0, 0},
+    {  6,  7, VM_NET_MOCK_MONSTER_BEAST, 0, 0},
+    {  9,  3, VM_NET_MOCK_MONSTER_BEAST, 0, 0},
+    { 13, 12, VM_NET_MOCK_MONSTER_BOSS, 0, 0},
+    { 18, 38, VM_NET_MOCK_MONSTER_ELEMENTAL, 0, 0},
+    { 19, 28, VM_NET_MOCK_MONSTER_BOSS, 0, 0},
+    { 22, 12, VM_NET_MOCK_MONSTER_SPIRIT, 0, 0},
+    { 25,  4, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
+    { 28,  7, VM_NET_MOCK_MONSTER_FLYING, 0, 0},
+    { 29,  8, VM_NET_MOCK_MONSTER_FLYING, 0, 0},
+    { 30,  8, VM_NET_MOCK_MONSTER_STONE, 0, 0},
+    { 31,  9, VM_NET_MOCK_MONSTER_HUMANOID, 0, 0},
+    { 32, 10, VM_NET_MOCK_MONSTER_BEAST, 0, 0},
+    { 34, 11, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
+    { 36, 14, VM_NET_MOCK_MONSTER_STONE, 0, 0},
+    { 40, 20, VM_NET_MOCK_MONSTER_SPIRIT, 0, 0},
+    { 41, 20, VM_NET_MOCK_MONSTER_SLIME, 0, 0},
+    { 42, 22, VM_NET_MOCK_MONSTER_ELEMENTAL, 0, 0},
+    { 45, 22, VM_NET_MOCK_MONSTER_SPIRIT, 0, 0},
+    { 47, 27, VM_NET_MOCK_MONSTER_HUMANOID, 0, 0},
+    { 48, 28, VM_NET_MOCK_MONSTER_SOLDIER, 0, 0},
+    { 49, 31, VM_NET_MOCK_MONSTER_BEAST, 0, 0},
+    { 50, 30, VM_NET_MOCK_MONSTER_INSECT, 0, 0},
+    { 51, 31, VM_NET_MOCK_MONSTER_SPIRIT, 0, 0},
+    { 52, 28, VM_NET_MOCK_MONSTER_REPTILE, 0, 0},
+    { 53, 29, VM_NET_MOCK_MONSTER_REPTILE, 0, 0},
+    { 54, 29, VM_NET_MOCK_MONSTER_REPTILE, 0, 0},
+    { 55, 34, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
+    { 56, 34, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
+    { 57, 32, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
+    { 60, 36, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
+    { 64, 37, VM_NET_MOCK_MONSTER_HUMANOID, 0, 0},
+    { 67, 27, VM_NET_MOCK_MONSTER_SOLDIER, 0, 0},
+    { 69, 24, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
+    { 70, 24, VM_NET_MOCK_MONSTER_SPIRIT, 0, 0},
+    { 71, 23, VM_NET_MOCK_MONSTER_STONE, 0, 0},
+    { 73,  5, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
+    { 74,  5, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
+    { 75,  6, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
+    { 76,  3, VM_NET_MOCK_MONSTER_BEAST, 0, 0},
+    { 77,  4, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
+    { 78,  9, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
+    { 79, 11, VM_NET_MOCK_MONSTER_STONE, 0, 0},
+    { 81, 13, VM_NET_MOCK_MONSTER_SPIRIT, 0, 0},
+    { 82, 15, VM_NET_MOCK_MONSTER_BEAST, 0, 0},
+    { 83, 15, VM_NET_MOCK_MONSTER_BEAST, 0, 0},
+    { 84, 17, VM_NET_MOCK_MONSTER_SPIRIT, 0, 0},
+    { 86, 17, VM_NET_MOCK_MONSTER_SOLDIER, 0, 0},
+    { 87, 17, VM_NET_MOCK_MONSTER_HUMANOID, 0, 0},
+    { 89, 18, VM_NET_MOCK_MONSTER_SOLDIER, 0, 0},
+    { 91, 21, VM_NET_MOCK_MONSTER_INSECT, 0, 0},
+    { 92, 23, VM_NET_MOCK_MONSTER_SLIME, 0, 0},
+    { 94, 26, VM_NET_MOCK_MONSTER_INSECT, 0, 0},
+    { 97, 36, VM_NET_MOCK_MONSTER_ELEMENTAL, 0, 0},
+    { 98, 38, VM_NET_MOCK_MONSTER_SLIME, 0, 0},
+    { 99, 39, VM_NET_MOCK_MONSTER_BEAST, 0, 0},
+    {101, 39, VM_NET_MOCK_MONSTER_HUMANOID, 0, 0},
+    {103, 40, VM_NET_MOCK_MONSTER_HUMANOID, 0, 0},
+    {104, 41, VM_NET_MOCK_MONSTER_HUMANOID, 0, 0},
+    {105,  1, VM_NET_MOCK_MONSTER_SLIME, VM_NET_MOCK_BATTLE_CHANGMING_SAN_ITEM_ID, VM_NET_MOCK_BATTLE_CHANGMING_SAN_DROP_RATE},
+    {106,  2, VM_NET_MOCK_MONSTER_FLYING, 0, 0},
+    {107,  6, VM_NET_MOCK_MONSTER_SPIRIT, 0, 0},
+    {110, 46, VM_NET_MOCK_MONSTER_STONE, 0, 0},
+    {111, 48, VM_NET_MOCK_MONSTER_STONE, 0, 0},
+    {112, 50, VM_NET_MOCK_MONSTER_STONE, 0, 0},
+    {120, 50, VM_NET_MOCK_MONSTER_REPTILE, 0, 0},
+    {121, 52, VM_NET_MOCK_MONSTER_ELEMENTAL, 0, 0},
+    {122, 53, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
+    {200, 43, VM_NET_MOCK_MONSTER_SPIRIT, 0, 0},
+    {201, 44, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
+    {202, 45, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0}
+};
+
+static vm_net_mock_monster_entry vm_net_mock_monster_entry_for_enemy(u32 enemyId)
+{
+    vm_net_mock_monster_entry fallback;
+
+    if (enemyId == 0)
+        enemyId = VM_NET_MOCK_BATTLE_POISON_SLIME_ID;
+    for (u32 i = 0; i < sizeof(g_vm_net_mock_monster_entries) / sizeof(g_vm_net_mock_monster_entries[0]); ++i)
+    {
+        if (g_vm_net_mock_monster_entries[i].enemyId == enemyId)
+            return g_vm_net_mock_monster_entries[i];
+    }
+
+    memset(&fallback, 0, sizeof(fallback));
+    fallback.enemyId = (enemyId <= 0xffffu) ? (u16)enemyId : VM_NET_MOCK_BATTLE_POISON_SLIME_ID;
+    fallback.family = VM_NET_MOCK_MONSTER_BEAST;
+    if (enemyId >= 200)
+        fallback.level = 45;
+    else if (enemyId >= 120)
+        fallback.level = 50;
+    else if (enemyId >= 100)
+        fallback.level = 30;
+    else if (enemyId >= 70)
+        fallback.level = 20;
+    else if (enemyId >= 30)
+        fallback.level = 10;
+    else
+        fallback.level = 3;
+    return fallback;
+}
+
+static vm_net_mock_monster_stats vm_net_mock_monster_stats_for_enemy(u32 enemyId)
+{
+    vm_net_mock_monster_entry entry = vm_net_mock_monster_entry_for_enemy(enemyId);
+    vm_net_mock_monster_stats stats;
+    u32 level = entry.level ? entry.level : 1;
+
+    memset(&stats, 0, sizeof(stats));
+    stats.enemyId = entry.enemyId;
+    stats.level = level;
+    stats.dropItemId = entry.dropItemId;
+    stats.dropRatePercent = entry.dropRatePercent;
+
+    switch ((vm_net_mock_monster_family)entry.family)
+    {
+    case VM_NET_MOCK_MONSTER_SLIME:
+        stats.hp = 16 + level * 4;
+        stats.mp = 18 + level * 2;
+        stats.attack = 6 + level * 2;
+        stats.defense = 2 + level / 4;
+        stats.exp = 3 + level * 2;
+        stats.gold = 3 + level * 2;
+        break;
+    case VM_NET_MOCK_MONSTER_BEAST:
+        stats.hp = 26 + level * 7;
+        stats.mp = 10 + level;
+        stats.attack = 7 + level * 2;
+        stats.defense = 2 + level / 3;
+        stats.exp = 4 + level * 3;
+        stats.gold = 3 + level * 2;
+        break;
+    case VM_NET_MOCK_MONSTER_FLYING:
+        stats.hp = 18 + level * 5;
+        stats.mp = 12 + level;
+        stats.attack = 8 + level * 2;
+        stats.defense = 1 + level / 4;
+        stats.exp = 4 + level * 3;
+        stats.gold = 3 + level * 2;
+        break;
+    case VM_NET_MOCK_MONSTER_INSECT:
+        stats.hp = 16 + level * 5;
+        stats.mp = 12 + level;
+        stats.attack = 8 + level * 2;
+        stats.defense = 1 + level / 5;
+        stats.exp = 4 + level * 3;
+        stats.gold = 3 + level * 2;
+        break;
+    case VM_NET_MOCK_MONSTER_REPTILE:
+        stats.hp = 24 + level * 6;
+        stats.mp = 14 + level;
+        stats.attack = 8 + level * 2;
+        stats.defense = 2 + level / 3;
+        stats.exp = 5 + level * 3;
+        stats.gold = 4 + level * 2;
+        break;
+    case VM_NET_MOCK_MONSTER_UNDEAD:
+        stats.hp = 34 + level * 8;
+        stats.mp = 10 + level;
+        stats.attack = 8 + level * 2;
+        stats.defense = 4 + level / 3;
+        stats.exp = 6 + level * 3;
+        stats.gold = 4 + level * 2;
+        break;
+    case VM_NET_MOCK_MONSTER_SPIRIT:
+        stats.hp = 22 + level * 6;
+        stats.mp = 16 + level * 3;
+        stats.attack = 10 + level * 2;
+        stats.defense = 2 + level / 3;
+        stats.exp = 6 + level * 3;
+        stats.gold = 5 + level * 2;
+        break;
+    case VM_NET_MOCK_MONSTER_ELEMENTAL:
+        stats.hp = 30 + level * 7;
+        stats.mp = 20 + level * 4;
+        stats.attack = 11 + level * 2;
+        stats.defense = 3 + level / 3;
+        stats.exp = 7 + level * 3;
+        stats.gold = 5 + level * 2;
+        break;
+    case VM_NET_MOCK_MONSTER_STONE:
+        stats.hp = 42 + level * 9;
+        stats.mp = 12 + level * 2;
+        stats.attack = 8 + level * 2;
+        stats.defense = 6 + level / 2;
+        stats.exp = 8 + level * 3;
+        stats.gold = 5 + level * 2;
+        break;
+    case VM_NET_MOCK_MONSTER_HUMANOID:
+        stats.hp = 30 + level * 7;
+        stats.mp = 12 + level * 2;
+        stats.attack = 9 + level * 2;
+        stats.defense = 3 + level / 3;
+        stats.exp = 6 + level * 3;
+        stats.gold = 6 + level * 2;
+        break;
+    case VM_NET_MOCK_MONSTER_SOLDIER:
+        stats.hp = 34 + level * 8;
+        stats.mp = 10 + level;
+        stats.attack = 10 + level * 2;
+        stats.defense = 4 + level / 3;
+        stats.exp = 7 + level * 3;
+        stats.gold = 7 + level * 2;
+        break;
+    case VM_NET_MOCK_MONSTER_BOSS:
+        stats.hp = 80 + level * 12;
+        stats.mp = 24 + level * 4;
+        stats.attack = 14 + level * 3;
+        stats.defense = 8 + level / 2;
+        stats.exp = 20 + level * 5;
+        stats.gold = 25 + level * 4;
+        break;
+    default:
+        stats.hp = 20 + level * 5;
+        stats.mp = 10 + level;
+        stats.attack = 7 + level * 2;
+        stats.defense = 2 + level / 3;
+        stats.exp = 4 + level * 3;
+        stats.gold = 3 + level * 2;
+        break;
+    }
+
+    if (stats.enemyId == VM_NET_MOCK_BATTLE_POISON_SLIME_ID)
+    {
+        stats.exp = VM_NET_MOCK_BATTLE_POISON_SLIME_EXP;
+        stats.gold = VM_NET_MOCK_BATTLE_POISON_SLIME_GOLD;
+    }
+    if (stats.hp == 0)
+        stats.hp = 1;
+    if (stats.mp == 0)
+        stats.mp = 1;
+    if (stats.attack == 0)
+        stats.attack = 1;
+    if (stats.exp == 0)
+        stats.exp = 1;
+    return stats;
+}
+
+static u32 vm_net_mock_battle_role_attack_default(void)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 level = role ? role->level : 1;
+    u32 job = role ? role->job : 1;
+    u32 strength = vm_net_mock_role_derived_attr(level, job, 0);
+    if (level == 0)
+        level = 1;
+    return 8 + level + strength / 2;
+}
+
+static u32 vm_net_mock_battle_role_defense_default(void)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 level = role ? role->level : 1;
+    u32 job = role ? role->job : 1;
+    u32 endurance = vm_net_mock_role_derived_attr(level, job, 3);
+    if (level == 0)
+        level = 1;
+    return 1 + endurance / 3 + level / 4;
+}
+
+static u32 vm_net_mock_battle_player_damage_to_enemy(u32 enemyId, u32 enemyHpCurrent)
+{
+    vm_net_mock_monster_stats stats = vm_net_mock_monster_stats_for_enemy(enemyId);
+    u32 attack = vm_net_mock_env_u32_if_set("CBE_BATTLE_PLAYER_ATTACK",
+                                            vm_net_mock_battle_role_attack_default());
+    u32 defense = vm_net_mock_env_u32_if_set("CBE_BATTLE_ENEMY_DEFENSE", stats.defense);
+    u32 damage = attack > defense ? attack - defense : 1;
+
+    if (enemyHpCurrent == 0)
+        return 0;
+    if (damage == 0)
+        damage = 1;
+    return vm_net_mock_min_u32(damage, enemyHpCurrent);
+}
+
+static u32 vm_net_mock_battle_enemy_damage_to_role(u32 enemyId, u32 roleHpCurrent)
+{
+    vm_net_mock_monster_stats stats = vm_net_mock_monster_stats_for_enemy(enemyId);
+    u32 attack = vm_net_mock_env_u32_if_set("CBE_BATTLE_ENEMY_ATTACK", stats.attack);
+    u32 defense = vm_net_mock_env_u32_if_set("CBE_BATTLE_ROLE_DEFENSE",
+                                             vm_net_mock_battle_role_defense_default());
+    u32 damage = attack > defense ? attack - defense : 1;
+
+    if (roleHpCurrent == 0)
+        return 0;
+    if (damage == 0)
+        damage = 1;
+    return vm_net_mock_min_u32(damage, roleHpCurrent);
+}
+
 static const char *vm_net_mock_role_initial_scene_name(void)
 {
     return vm_net_mock_default_scene_name();
@@ -4585,16 +4917,14 @@ static bool vm_net_mock_battle_roll_percent(u32 percent)
 
 static u32 vm_net_mock_battle_reward_exp_for_enemy(u32 enemyId)
 {
-    if (enemyId == VM_NET_MOCK_BATTLE_POISON_SLIME_ID)
-        return VM_NET_MOCK_BATTLE_POISON_SLIME_EXP;
-    return VM_NET_MOCK_ROLE_MONSTER_EXP;
+    vm_net_mock_monster_stats stats = vm_net_mock_monster_stats_for_enemy(enemyId);
+    return stats.exp;
 }
 
 static u32 vm_net_mock_battle_reward_gold_for_enemy(u32 enemyId)
 {
-    if (enemyId == VM_NET_MOCK_BATTLE_POISON_SLIME_ID)
-        return VM_NET_MOCK_BATTLE_POISON_SLIME_GOLD;
-    return 0;
+    vm_net_mock_monster_stats stats = vm_net_mock_monster_stats_for_enemy(enemyId);
+    return stats.gold;
 }
 
 static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
@@ -4605,6 +4935,9 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
     u32 dropItemId = 0;
     u16 dropSeq = 0;
     bool dropGranted = false;
+    vm_net_mock_monster_stats stats = vm_net_mock_monster_stats_for_enemy(g_vm_net_mock_battle_enemy_id_current);
+    u32 dropRate = stats.dropRatePercent;
+    u32 dropItemIdDefault = stats.dropItemId;
 
     if (dropItemIdOut)
         *dropItemIdOut = 0;
@@ -4629,12 +4962,17 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
 
     rewardExp = vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_EXP",
                                            vm_net_mock_battle_reward_exp_for_enemy(g_vm_net_mock_battle_enemy_id_current));
-    if (g_vm_net_mock_battle_enemy_id_current == VM_NET_MOCK_BATTLE_POISON_SLIME_ID &&
-        vm_net_mock_battle_roll_percent(vm_net_mock_env_u32_if_set("CBE_BATTLE_CHANGMING_SAN_DROP_RATE",
-                                                                   VM_NET_MOCK_BATTLE_CHANGMING_SAN_DROP_RATE)))
+    if (g_vm_net_mock_battle_enemy_id_current == VM_NET_MOCK_BATTLE_POISON_SLIME_ID)
     {
-        dropItemId = vm_net_mock_env_u32_if_set("CBE_BATTLE_CHANGMING_SAN_ITEM_ID",
-                                                VM_NET_MOCK_BATTLE_CHANGMING_SAN_ITEM_ID);
+        dropRate = vm_net_mock_env_u32_if_set("CBE_BATTLE_CHANGMING_SAN_DROP_RATE", dropRate);
+        dropItemIdDefault = vm_net_mock_env_u32_if_set("CBE_BATTLE_CHANGMING_SAN_ITEM_ID",
+                                                       dropItemIdDefault);
+    }
+    dropRate = vm_net_mock_env_u32_if_set("CBE_BATTLE_DROP_RATE", dropRate);
+    dropItemIdDefault = vm_net_mock_env_u32_if_set("CBE_BATTLE_DROP_ITEM_ID", dropItemIdDefault);
+    if (dropItemIdDefault != 0 && vm_net_mock_battle_roll_percent(dropRate))
+    {
+        dropItemId = dropItemIdDefault;
         dropGranted = vm_net_mock_role_add_backpack_item(dropItemId, 1, &dropSeq);
         if (!dropGranted)
         {
@@ -4717,15 +5055,17 @@ static void vm_net_mock_battle_save_terminal_role_state(const char *reason)
     u16 dropSeq = 0;
     bool dropGranted = false;
     bool victory = g_mockBattleEnemyHpCurrent == 0 && roleHp > 0;
+    bool rewardAlreadyGranted = false;
 
     if (role == NULL)
         return;
     if (victory)
     {
+        rewardAlreadyGranted = (g_vm_net_mock_battle_rewarded_serial == g_mockBattleOperateSessionSerial);
         rewardExp = vm_net_mock_battle_grant_reward_once(&dropItemId,
                                                          &dropSeq,
                                                          &dropGranted);
-        if (rewardExp != 0)
+        if (!rewardAlreadyGranted)
             rewardGold = vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_GOLD",
                                                     vm_net_mock_battle_reward_gold_for_enemy(g_vm_net_mock_battle_enemy_id_current));
     }
@@ -6661,9 +7001,10 @@ static bool vm_net_mock_append_battle_template_prefill_object_ex(u8 *out, u32 ou
 static bool vm_net_mock_append_battle_enemy_template_prefill_object(u8 *out, u32 outCap,
                                                                     u32 *pos, u32 templateId)
 {
-    u32 templateHp = vm_net_mock_env_u32("CBE_BATTLE_PREFILL_TEMPLATE_HP", 20);
+    vm_net_mock_monster_stats stats = vm_net_mock_monster_stats_for_enemy(templateId);
+    u32 templateHp = vm_net_mock_env_u32("CBE_BATTLE_PREFILL_TEMPLATE_HP", stats.hp);
     u32 templateMaxHp = vm_net_mock_env_u32("CBE_BATTLE_PREFILL_TEMPLATE_MAX_HP", templateHp);
-    u32 templateMp = vm_net_mock_env_u32("CBE_BATTLE_PREFILL_TEMPLATE_MP", 20);
+    u32 templateMp = vm_net_mock_env_u32("CBE_BATTLE_PREFILL_TEMPLATE_MP", stats.mp);
     u32 templateMaxMp = vm_net_mock_env_u32("CBE_BATTLE_PREFILL_TEMPLATE_MAX_MP", templateMp);
     u8 rowByte34 = vm_net_mock_env_u8("CBE_BATTLE_PREFILL_TEMPLATE_BYTE34", 1);
     u8 rowByte35 = vm_net_mock_env_u8("CBE_BATTLE_PREFILL_TEMPLATE_BYTE35", 0);
@@ -8960,9 +9301,10 @@ static bool vm_net_mock_build_scene_monster_moveinfo_blob(u8 *out, u32 outCap,
 {
     u32 pos = 0;
     u8 state[64];
-    u32 enemyHp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", 20);
+    vm_net_mock_monster_stats stats = vm_net_mock_monster_stats_for_enemy(actorId);
+    u32 enemyHp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", stats.hp);
     u32 enemyMaxHp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MAX_HP", enemyHp);
-    u32 enemyMp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MP", 20);
+    u32 enemyMp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MP", stats.mp);
     u32 enemyMaxMp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MAX_MP", enemyMp);
 
     if (out == NULL || blobLenOut == NULL || actorId == 0)
@@ -9019,15 +9361,21 @@ static bool vm_net_mock_append_scene_monster_moveinfo2_object(u8 *out, u32 outCa
                                       moveInfo, (u16)moveInfoLen))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
-    vm_autotest_note("mock_scene_monster_moveinfo actor=%u pos=(%u,%u) hp=%u/%u mp=%u/%u len=%u\n",
-                     actorId, posx, posy,
-                     vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", 20),
-                     vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MAX_HP",
-                                         vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", 20)),
-                     vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MP", 20),
-                     vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MAX_MP",
-                                         vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MP", 20)),
-                     moveInfoLen);
+    {
+        vm_net_mock_monster_stats stats = vm_net_mock_monster_stats_for_enemy(actorId);
+        u32 enemyHp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", stats.hp);
+        u32 enemyMaxHp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MAX_HP", enemyHp);
+        u32 enemyMp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MP", stats.mp);
+        u32 enemyMaxMp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MAX_MP", enemyMp);
+        if (enemyMaxHp < enemyHp)
+            enemyMaxHp = enemyHp;
+        if (enemyMaxMp < enemyMp)
+            enemyMaxMp = enemyMp;
+        vm_autotest_note("mock_scene_monster_moveinfo actor=%u level=%u pos=(%u,%u) hp=%u/%u mp=%u/%u len=%u\n",
+                         actorId, stats.level, posx, posy,
+                         enemyHp, enemyMaxHp, enemyMp, enemyMaxMp,
+                         moveInfoLen);
+    }
     return true;
 }
 
@@ -9255,10 +9603,11 @@ static u32 vm_net_mock_build_battle_start_info_blob(u8 *out, u32 outCap,
     u32 roleMaxHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_HP", roleHp);
     u32 roleMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MP", roleMpDefault);
     u32 roleMaxMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_MP", roleMp);
-    u32 enemyHp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", 20);
-    u32 enemyMaxHp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MAX_HP", enemyHp);
-    u32 enemyMp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MP", 20);
-    u32 enemyMaxMp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MAX_MP", enemyMp);
+    vm_net_mock_monster_stats enemyStats;
+    u32 enemyHp = 0;
+    u32 enemyMaxHp = 0;
+    u32 enemyMp = 0;
+    u32 enemyMaxMp = 0;
     u32 leftId = 0;
     u32 leftHp = 0;
     u32 leftMaxHp = 0;
@@ -9283,7 +9632,16 @@ static u32 vm_net_mock_build_battle_start_info_blob(u8 *out, u32 outCap,
     if (roleMp > roleMaxMp)
         roleMp = roleMaxMp;
     if (enemyId == 0)
-        enemyId = 105;
+        enemyId = VM_NET_MOCK_BATTLE_POISON_SLIME_ID;
+    enemyStats = vm_net_mock_monster_stats_for_enemy(enemyId);
+    enemyHp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", enemyStats.hp);
+    enemyMaxHp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MAX_HP", enemyHp);
+    enemyMp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MP", enemyStats.mp);
+    enemyMaxMp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MAX_MP", enemyMp);
+    if (enemyMaxHp < enemyHp)
+        enemyMaxHp = enemyHp;
+    if (enemyMaxMp < enemyMp)
+        enemyMaxMp = enemyMp;
     leftId = playerOnRight ? enemyId : roleId;
     leftHp = playerOnRight ? enemyHp : roleHp;
     leftMaxHp = playerOnRight ? enemyMaxHp : roleMaxHp;
@@ -9762,7 +10120,10 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
         return vm_net_mock_build_battle_case11_auto_off_response(out, outCap);
     }
     if (!terminalFollowup && g_mockBattleEnemyHpCurrent == 0)
-        g_mockBattleEnemyHpCurrent = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", 20);
+    {
+        vm_net_mock_monster_stats stats = vm_net_mock_monster_stats_for_enemy(g_vm_net_mock_battle_enemy_id_current);
+        g_mockBattleEnemyHpCurrent = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", stats.hp);
+    }
     if (!terminalFollowup && g_mockBattleRoleHpCurrent == 0)
         g_mockBattleRoleHpCurrent = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP",
                                                         vm_net_mock_role_current_hp_for_battle());
@@ -9780,7 +10141,8 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
             counterTargetWireSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_TYPE1_COUNTER_TARGET_WIRE_SLOT",
                                                            counterTargetWireSlot);
         }
-        counterDamageValue = vm_net_mock_min_u32(10u, g_mockBattleRoleHpCurrent);
+        counterDamageValue = vm_net_mock_battle_enemy_damage_to_role(g_vm_net_mock_battle_enemy_id_current,
+                                                                     g_mockBattleRoleHpCurrent);
         if (counterDamageValue == 0)
             counterDamageValue = 1;
         if (g_mockBattleRoleHpCurrent >= counterDamageValue)
@@ -9808,7 +10170,8 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
     }
     else
     {
-        attackDamageValue = vm_net_mock_min_u32(12u, g_mockBattleEnemyHpCurrent);
+        attackDamageValue = vm_net_mock_battle_player_damage_to_enemy(g_vm_net_mock_battle_enemy_id_current,
+                                                                      g_mockBattleEnemyHpCurrent);
         if (attackDamageValue == 0)
             attackDamageValue = 1;
         if (g_mockBattleEnemyHpCurrent >= attackDamageValue)
@@ -9820,7 +10183,8 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
             allowCounterattack = false;
         if (allowCounterattack)
         {
-            counterDamageValue = vm_net_mock_min_u32(10u, g_mockBattleRoleHpCurrent);
+            counterDamageValue = vm_net_mock_battle_enemy_damage_to_role(g_vm_net_mock_battle_enemy_id_current,
+                                                                         g_mockBattleRoleHpCurrent);
             if (counterDamageValue == 0)
                 counterDamageValue = 1;
             if (g_mockBattleRoleHpCurrent >= counterDamageValue)
@@ -10053,7 +10417,10 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
         return vm_net_mock_build_battle_case11_auto_off_response(out, outCap);
     }
     if (!terminalFollowup && g_mockBattleEnemyHpCurrent == 0)
-        g_mockBattleEnemyHpCurrent = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", 20);
+    {
+        vm_net_mock_monster_stats stats = vm_net_mock_monster_stats_for_enemy(g_vm_net_mock_battle_enemy_id_current);
+        g_mockBattleEnemyHpCurrent = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", stats.hp);
+    }
     if (!terminalFollowup && g_mockBattleRoleHpCurrent == 0)
         g_mockBattleRoleHpCurrent = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP",
                                                         vm_net_mock_role_current_hp_for_battle());
@@ -10071,7 +10438,8 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
             counterTargetWireSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_TYPE1_COUNTER_TARGET_WIRE_SLOT",
                                                            counterTargetWireSlot);
         }
-        counterDamageValue = vm_net_mock_min_u32(10u, g_mockBattleRoleHpCurrent);
+        counterDamageValue = vm_net_mock_battle_enemy_damage_to_role(g_vm_net_mock_battle_enemy_id_current,
+                                                                     g_mockBattleRoleHpCurrent);
         if (counterDamageValue == 0)
             counterDamageValue = 1;
         if (g_mockBattleRoleHpCurrent >= counterDamageValue)
@@ -10099,7 +10467,8 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
     }
     else
     {
-        attackDamageValue = vm_net_mock_min_u32(12u, g_mockBattleEnemyHpCurrent);
+        attackDamageValue = vm_net_mock_battle_player_damage_to_enemy(g_vm_net_mock_battle_enemy_id_current,
+                                                                      g_mockBattleEnemyHpCurrent);
         if (attackDamageValue == 0)
             attackDamageValue = 1;
         if (g_mockBattleEnemyHpCurrent >= attackDamageValue)
@@ -10111,7 +10480,8 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
             allowCounterattack = false;
         if (allowCounterattack)
         {
-            counterDamageValue = vm_net_mock_min_u32(10u, g_mockBattleRoleHpCurrent);
+            counterDamageValue = vm_net_mock_battle_enemy_damage_to_role(g_vm_net_mock_battle_enemy_id_current,
+                                                                         g_mockBattleRoleHpCurrent);
             if (counterDamageValue == 0)
                 counterDamageValue = 1;
             if (g_mockBattleRoleHpCurrent >= counterDamageValue)
@@ -10280,9 +10650,11 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
     u32 applyRewardExp = 0;
     u32 displayExpGain = 0;
     bool victory = g_mockBattleEnemyHpCurrent == 0 && roleHp > 0;
+    bool rewardAlreadyGranted = false;
 
     if (victory)
     {
+        rewardAlreadyGranted = (g_vm_net_mock_battle_rewarded_serial == g_mockBattleOperateSessionSerial);
         applyRewardExp = vm_net_mock_battle_grant_reward_once(&dropItemId,
                                                               &dropSeq,
                                                               &dropGranted);
@@ -10292,8 +10664,10 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
     }
     if (role != NULL)
     {
-        u32 rewardGold = applyRewardExp ? vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_GOLD",
-                                                                     vm_net_mock_battle_reward_gold_for_enemy(g_vm_net_mock_battle_enemy_id_current)) : 0;
+        u32 rewardGold = (victory && !rewardAlreadyGranted)
+                             ? vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_GOLD",
+                                                          vm_net_mock_battle_reward_gold_for_enemy(g_vm_net_mock_battle_enemy_id_current))
+                             : 0;
         vm_net_mock_role_apply_battle_settlement(roleHp, roleMp, applyRewardExp, rewardGold,
                                                  &statusLastExp, &statusCurExp,
                                                  &statusPercentExp, &statusLevel,
@@ -10642,17 +11016,28 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
     g_mockBattleRoleHpMax = roleMaxHp;
     if (g_mockBattleRoleHpMax < g_mockBattleRoleHpCurrent)
         g_mockBattleRoleHpMax = g_mockBattleRoleHpCurrent;
-    g_mockBattleEnemyHpCurrent = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", 20);
-    g_mockBattleEnemyHpMax = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MAX_HP", g_mockBattleEnemyHpCurrent);
-    if (g_mockBattleEnemyHpMax < g_mockBattleEnemyHpCurrent)
-        g_mockBattleEnemyHpMax = g_mockBattleEnemyHpCurrent;
-    vm_autotest_note("mock_challenge_battle_start id=%u requested=%u wire=%u index=%u pos=(%u,%u) reqIndex=%u reqPos=(%u,%u) subtype=%u side=%u scene_start=%u table=%08x ids=%u/%u/%u/%u\n",
-                     id, requestedEnemyId, enemyWireId,
-                     sceneMonsterIndex, sceneMonsterPosX, sceneMonsterPosY,
-                     index, posx, posy,
-                     battleStartSubtype, battleSide, useSceneMonsterStart ? 1 : 0,
-                     enemyTable, enemyTableIds[0], enemyTableIds[1],
-                     enemyTableIds[2], enemyTableIds[3]);
+    {
+        vm_net_mock_monster_stats stats = vm_net_mock_monster_stats_for_enemy(requestedEnemyId);
+        g_mockBattleEnemyHpCurrent = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", stats.hp);
+        g_mockBattleEnemyHpMax = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MAX_HP", g_mockBattleEnemyHpCurrent);
+        if (g_mockBattleEnemyHpMax < g_mockBattleEnemyHpCurrent)
+            g_mockBattleEnemyHpMax = g_mockBattleEnemyHpCurrent;
+        vm_autotest_note("mock_challenge_battle_start id=%u requested=%u wire=%u level=%u hp=%u/%u mp=%u atk=%u def=%u exp=%u gold=%u index=%u pos=(%u,%u) reqIndex=%u reqPos=(%u,%u) subtype=%u side=%u scene_start=%u table=%08x ids=%u/%u/%u/%u\n",
+                         id, requestedEnemyId, enemyWireId,
+                         stats.level,
+                         g_mockBattleEnemyHpCurrent,
+                         g_mockBattleEnemyHpMax,
+                         vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MP", stats.mp),
+                         vm_net_mock_env_u32_if_set("CBE_BATTLE_ENEMY_ATTACK", stats.attack),
+                         vm_net_mock_env_u32_if_set("CBE_BATTLE_ENEMY_DEFENSE", stats.defense),
+                         vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_EXP", stats.exp),
+                         vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_GOLD", stats.gold),
+                         sceneMonsterIndex, sceneMonsterPosX, sceneMonsterPosY,
+                         index, posx, posy,
+                         battleStartSubtype, battleSide, useSceneMonsterStart ? 1 : 0,
+                         enemyTable, enemyTableIds[0], enemyTableIds[1],
+                         enemyTableIds[2], enemyTableIds[3]);
+    }
     return pos;
 }
 
