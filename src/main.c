@@ -6,6 +6,10 @@
 #ifdef _WIN32
 #include <direct.h>
 #endif
+#ifdef __ANDROID__
+#include <unistd.h>
+#include "android_compat.c"
+#endif
 #include <stdarg.h>
 #include <math.h>
 #include <stdint.h>
@@ -19,7 +23,7 @@ static void vm_note_battle_mp_write(uc_engine *uc, uc_mem_type type,
 #include "hookRam.c"
 #include "vmEvent.c"
 
-#ifdef GDB_SERVER_SUPPORT
+#if defined(GDB_SERVER_SUPPORT) && !defined(__ANDROID__)
 #include "gdb_client.c"
 pthread_t gdb_server_mutex;
 
@@ -102,7 +106,6 @@ u8 isStepNext = 0;
 
 SDL_Keycode isKeyDown = SDLK_UNKNOWN;
 pthread_t EmuThread;
-pthread_t MainUpdareThread;
 
 bool isMouseDown = false;
 u8 currentProgramDir[256] = {0};
@@ -272,7 +275,7 @@ static u32 g_battleSubtype8InfoDstWatchTick = 0;
 static u32 g_battleSubtype8InfoDstWriteLimitCount = 0;
 static u32 g_mockBattleOperateSessionSerial = 0;
 static u32 g_mockBattleOperateTurnCounter = 0;
-static u8 g_mockBattleOperateSessionArmed = 0;
+u8 g_mockBattleOperateSessionArmed = 0;
 static u8 g_mockBattleOperateSessionFinished = 0;
 static u8 g_mockBattlePendingEnemyTurn = 0;
 static u8 g_mockBattleAwaitingSettlement = 0;
@@ -3826,213 +3829,15 @@ static bool vm_battle_probe_read_u8(u32 addr, u8 *out)
 
 static void vm_note_battle_mp_state(const char *tag, u32 pc, u32 codeBase, u32 battleR9)
 {
-    u32 rolePtr = 0;
-    u32 roleHp = 0;
-    u32 roleMp = 0;
-    u32 roleHpMax = 0;
-    u32 roleMpMax = 0;
-    u32 tmpMp = 0;
-    u32 tmpHp = 0;
-    u32 tmpExpA = 0;
-    u32 tmpExpB = 0;
-    u32 tmpLevelDelta = 0;
-    u16 phase = 0;
-    u8 selected = 0;
-    u8 tempCount = 0;
-
-    if (battleR9 == 0)
-        return;
-
-    (void)uc_mem_read(MTK, battleR9 + 13412, &phase, sizeof(phase));
-    (void)vm_battle_probe_read_u8(battleR9 + 10522, &selected);
-    (void)vm_battle_probe_read_u8(battleR9 + 15814, &tempCount);
-    (void)vm_battle_probe_read_u32(battleR9 + 10348, &rolePtr);
-    (void)vm_battle_probe_read_u32(battleR9 + 15724, &tmpMp);
-    (void)vm_battle_probe_read_u32(battleR9 + 15728, &tmpHp);
-    (void)vm_battle_probe_read_u32(battleR9 + 15732, &tmpExpA);
-    (void)vm_battle_probe_read_u32(battleR9 + 15736, &tmpExpB);
-    (void)vm_battle_probe_read_u32(battleR9 + 15740, &tmpLevelDelta);
-    if (rolePtr != 0)
-    {
-        (void)vm_battle_probe_read_u32(rolePtr + 180, &roleHp);
-        (void)vm_battle_probe_read_u32(rolePtr + 184, &roleMp);
-        (void)vm_battle_probe_read_u32(rolePtr + 196, &roleHpMax);
-        (void)vm_battle_probe_read_u32(rolePtr + 200, &roleMpMax);
-    }
-
-    printf("[info][battle] mp_probe tag=%s pc=%08x off=%04x r9=%08x phase=%u selected=%u tmpHp=%d tmpMp=%d tmpCount=%u tmpExp=%d/%d tmpLevel=%d role=%08x roleHp=%d/%u roleMp=%d/%u\n",
-           tag, pc, codeBase ? pc - codeBase : 0, battleR9, phase, selected,
-           (int32_t)tmpHp, (int32_t)tmpMp, tempCount,
-           (int32_t)tmpExpA, (int32_t)tmpExpB, (int32_t)tmpLevelDelta,
-           rolePtr, (int32_t)roleHp, roleHpMax, (int32_t)roleMp, roleMpMax);
-
-    for (u32 i = 0; i < 2; ++i)
-    {
-        u32 slot = battleR9 + 10532 + i * 100;
-        u8 active = 0;
-        u8 type = 0;
-        u8 actor = 0;
-        u8 childCount = 0;
-        u8 target = 0;
-        u8 childFlag = 0;
-        u8 childConsumed = 0;
-        u32 valueA = 0;
-        u32 valueB = 0;
-        u32 effect = 0;
-
-        (void)vm_battle_probe_read_u8(slot + 0, &active);
-        (void)vm_battle_probe_read_u8(slot + 1, &type);
-        (void)vm_battle_probe_read_u8(slot + 2, &actor);
-        (void)vm_battle_probe_read_u8(slot + 3, &childCount);
-        (void)vm_battle_probe_read_u8(slot + 20, &childConsumed);
-        (void)vm_battle_probe_read_u8(slot + 21, &target);
-        (void)vm_battle_probe_read_u8(slot + 22, &childFlag);
-        (void)vm_battle_probe_read_u32(slot + 24, &valueA);
-        (void)vm_battle_probe_read_u32(slot + 28, &valueB);
-        (void)vm_battle_probe_read_u32(slot + 92, &effect);
-        if (active || type || actor || childCount || target || childFlag ||
-            childConsumed || valueA || valueB || effect)
-        {
-            printf("[info][battle] mp_probe_action[%u] active=%u type=%u actor=%u childCount=%u childConsumed=%u target=%u flag=%u valueA=%d valueB=%d effect=%u\n",
-                   i, active, type, actor, childCount, childConsumed,
-                   target, childFlag, (int32_t)valueA, (int32_t)valueB, effect);
-        }
-    }
-
-    for (u32 i = 0; i < 3; ++i)
-    {
-        u32 unit = battleR9 + 10520 + 1312 + i * 196;
-        u32 id = 0;
-        u32 hp = 0;
-        u32 hpMax = 0;
-        u32 mp = 0;
-        u32 mpMax = 0;
-        u8 active = 0;
-        u8 flag1323 = 0;
-
-        (void)vm_battle_probe_read_u32(unit + 4, &id);
-        (void)vm_battle_probe_read_u8(unit + 11, &active);
-        (void)vm_battle_probe_read_u8(unit + 1323, &flag1323);
-        (void)vm_battle_probe_read_u32(unit + 16, &hp);
-        (void)vm_battle_probe_read_u32(unit + 20, &hpMax);
-        (void)vm_battle_probe_read_u32(unit + 24, &mp);
-        (void)vm_battle_probe_read_u32(unit + 28, &mpMax);
-        if (id || active || hp || hpMax || mp || mpMax)
-        {
-            printf("[info][battle] mp_probe_unit[%u] id=%u active=%u flag1323=%u hp=%d/%u mp=%d/%u\n",
-                   i, id, active, flag1323, (int32_t)hp, hpMax,
-                   (int32_t)mp, mpMax);
-        }
-    }
+    (void)tag;
+    (void)pc;
+    (void)codeBase;
+    (void)battleR9;
 }
 
 static void vm_note_battle_mp_pc(u32 pc)
 {
-    static u32 cachedCodeBase = 0;
-    static u32 cachedBattleR9 = 0;
-    static u32 lastPrintTick[12] = {0};
-    u32 screen = 0;
-    u32 inferredR9 = 0;
-    u32 regR9 = 0;
-    u32 offset = 0;
-    u32 tick = 0;
-    u32 probeIndex = 0xff;
-    const char *tag = NULL;
-
-    pc &= ~1u;
-    if (g_mockBattleOperateSessionArmed == 0 && g_mockBattleEnemyHpMax == 0)
-        return;
-
-    if (cachedCodeBase == 0 ||
-        pc < cachedCodeBase ||
-        pc >= cachedCodeBase + 0x12000u)
-    {
-        if (!vm_autotest_find_battle_screen(&screen, &cachedCodeBase,
-                                            &cachedBattleR9, &inferredR9))
-        {
-            if (pc >= 0x05181FA8u && pc < 0x05195464u)
-            {
-                cachedCodeBase = 0x05181FA8u;
-                if (uc_reg_read(MTK, UC_ARM_REG_R9, &regR9) != UC_ERR_OK)
-                    regR9 = 0;
-                cachedBattleR9 = regR9;
-            }
-            else
-            {
-                return;
-            }
-        }
-        (void)screen;
-        (void)inferredR9;
-    }
-    if (cachedCodeBase == 0 ||
-        pc < cachedCodeBase ||
-        pc >= cachedCodeBase + 0x12000u)
-    {
-        return;
-    }
-
-    offset = pc - cachedCodeBase;
-    switch (offset)
-    {
-    case 0x6eb0:
-        probeIndex = 6;
-        tag = "action_parse_enter";
-        break;
-    case 0x7106:
-        probeIndex = 7;
-        tag = "action_parse_exit";
-        break;
-    case 0x7f66:
-        probeIndex = 0;
-        tag = "server_cmd_action_case";
-        break;
-    case 0x7f80:
-        probeIndex = 1;
-        tag = "after_action_parse";
-        break;
-    case 0x30d4:
-        probeIndex = 2;
-        tag = "callback_before_settle";
-        break;
-    case 0x2c50:
-        probeIndex = 3;
-        tag = "settle_enter";
-        break;
-    case 0x2d4e:
-        probeIndex = 4;
-        tag = "settle_before_mp_add";
-        break;
-    case 0x2d90:
-        probeIndex = 5;
-        tag = "settle_before_role_mp_write";
-        break;
-    case 0x2ed2:
-    case 0x2ed6:
-        probeIndex = 8;
-        tag = "settle_exit";
-        break;
-    default:
-        return;
-    }
-
-    tick = SDL_GetTicks();
-    if (probeIndex < sizeof(lastPrintTick) / sizeof(lastPrintTick[0]) &&
-        lastPrintTick[probeIndex] != 0 &&
-        tick - lastPrintTick[probeIndex] < 100)
-    {
-        return;
-    }
-    if (probeIndex < sizeof(lastPrintTick) / sizeof(lastPrintTick[0]))
-        lastPrintTick[probeIndex] = tick;
-
-    if (uc_reg_read(MTK, UC_ARM_REG_R9, &regR9) == UC_ERR_OK &&
-        regR9 >= VM_Memory_Pool_ADDRESS &&
-        regR9 < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
-    {
-        cachedBattleR9 = regR9;
-    }
-    vm_note_battle_mp_state(tag, pc, cachedCodeBase, cachedBattleR9);
+    (void)pc;
 }
 
 static bool vm_battle_probe_write_overlaps(u32 address, u32 size,
@@ -4052,138 +3857,11 @@ static void vm_note_battle_mp_write(uc_engine *uc, uc_mem_type type,
                                     uint64_t address64, uint32_t size,
                                     int64_t value)
 {
-    static u32 cachedCodeBase = 0;
-    static u32 cachedBattleR9 = 0;
-    static u32 nextRefreshTick = 0;
-    u32 address = (u32)address64;
-    u32 screen = 0;
-    u32 codeBase = 0;
-    u32 battleR9 = 0;
-    u32 inferredR9 = 0;
-    u32 rolePtr = 0;
-    u32 pc = 0;
-    u32 lr = 0;
-    u32 regR9 = 0;
-    u32 tick = 0;
-    u32 off = 0;
-    u32 tmpMp = 0;
-    u32 roleMp = 0;
-    u32 unit0Mp = 0;
-    u32 unit0MpMax = 0;
-    u32 unit1Mp = 0;
-    u32 unit1MpMax = 0;
-    u32 unit2Mp = 0;
-    u32 unit2MpMax = 0;
-    u8 actionActive[2] = {0};
-    u8 actionType[2] = {0};
-    u8 actionActor[2] = {0};
-    u8 actionChildCount[2] = {0};
-    u8 actionChildConsumed[2] = {0};
-    u8 actionTarget[2] = {0};
-    u8 actionChildFlag[2] = {0};
-    u32 actionValueA[2] = {0};
-    u32 actionValueB[2] = {0};
-    u32 actionEffect[2] = {0};
-    u8 selected = 0;
-    const char *target = NULL;
-
-    if (type != UC_MEM_WRITE || size == 0 ||
-        (g_mockBattleOperateSessionArmed == 0 && g_mockBattleEnemyHpMax == 0))
-        return;
-    tick = SDL_GetTicks();
-    if (cachedBattleR9 == 0 || tick >= nextRefreshTick)
-    {
-        if (!vm_autotest_find_battle_screen(&screen, &codeBase,
-                                            &battleR9, &inferredR9))
-        {
-            return;
-        }
-        cachedCodeBase = codeBase;
-        cachedBattleR9 = battleR9;
-        nextRefreshTick = tick + 250;
-    }
-    else
-    {
-        codeBase = cachedCodeBase;
-        battleR9 = cachedBattleR9;
-    }
-    (void)screen;
-    (void)inferredR9;
-
-    (void)vm_battle_probe_read_u8(battleR9 + 10522, &selected);
-    (void)vm_battle_probe_read_u32(battleR9 + 10348, &rolePtr);
-
-    if (vm_battle_probe_write_overlaps(address, size, battleR9 + 15724, 4))
-    {
-        target = "tmpMp";
-    }
-    else if (rolePtr != 0 &&
-             vm_battle_probe_write_overlaps(address, size, rolePtr + 184, 4))
-    {
-        target = "roleMp";
-    }
-    else
-    {
-        for (u32 i = 0; i < 3; ++i)
-        {
-            u32 unitMp = battleR9 + 10520 + 1312 + i * 196 + 24;
-            if (vm_battle_probe_write_overlaps(address, size, unitMp, 4))
-            {
-                static char unitName[3][12] = {
-                    "unit0Mp", "unit1Mp", "unit2Mp"
-                };
-                target = unitName[i];
-                break;
-            }
-        }
-    }
-    if (target == NULL)
-        return;
-
-    (void)vm_battle_probe_read_u32(battleR9 + 15724, &tmpMp);
-    if (rolePtr != 0)
-        (void)vm_battle_probe_read_u32(rolePtr + 184, &roleMp);
-    (void)vm_battle_probe_read_u32(battleR9 + 10520 + 1312 + 0 * 196 + 24, &unit0Mp);
-    (void)vm_battle_probe_read_u32(battleR9 + 10520 + 1312 + 0 * 196 + 28, &unit0MpMax);
-    (void)vm_battle_probe_read_u32(battleR9 + 10520 + 1312 + 1 * 196 + 24, &unit1Mp);
-    (void)vm_battle_probe_read_u32(battleR9 + 10520 + 1312 + 1 * 196 + 28, &unit1MpMax);
-    (void)vm_battle_probe_read_u32(battleR9 + 10520 + 1312 + 2 * 196 + 24, &unit2Mp);
-    (void)vm_battle_probe_read_u32(battleR9 + 10520 + 1312 + 2 * 196 + 28, &unit2MpMax);
-    for (u32 i = 0; i < 2; ++i)
-    {
-        u32 slot = battleR9 + 10532 + i * 100;
-        (void)vm_battle_probe_read_u8(slot + 0, &actionActive[i]);
-        (void)vm_battle_probe_read_u8(slot + 1, &actionType[i]);
-        (void)vm_battle_probe_read_u8(slot + 2, &actionActor[i]);
-        (void)vm_battle_probe_read_u8(slot + 3, &actionChildCount[i]);
-        (void)vm_battle_probe_read_u8(slot + 20, &actionChildConsumed[i]);
-        (void)vm_battle_probe_read_u8(slot + 21, &actionTarget[i]);
-        (void)vm_battle_probe_read_u8(slot + 22, &actionChildFlag[i]);
-        (void)vm_battle_probe_read_u32(slot + 24, &actionValueA[i]);
-        (void)vm_battle_probe_read_u32(slot + 28, &actionValueB[i]);
-        (void)vm_battle_probe_read_u32(slot + 92, &actionEffect[i]);
-    }
-    (void)uc_reg_read(uc, UC_ARM_REG_PC, &pc);
-    (void)uc_reg_read(uc, UC_ARM_REG_LR, &lr);
-    (void)uc_reg_read(uc, UC_ARM_REG_R9, &regR9);
-    pc &= ~1u;
-    lr &= ~1u;
-    if (codeBase != 0 && pc >= codeBase && pc < codeBase + 0x14000u)
-        off = pc - codeBase;
-
-    printf("[info][battle] mp_write target=%s addr=%08x size=%u value=%d/0x%llx pc=%08x off=%04x lr=%08x r9=%08x battleR9=%08x selected=%u role=%08x tmpMp=%d roleMp=%d units=(%d/%u,%d/%u,%d/%u) act0=(%u/%u/%u/%u/%u/%u/%u/%d/%d/%u) act1=(%u/%u/%u/%u/%u/%u/%u/%d/%d/%u)\n",
-           target, address, size, (int32_t)value, (unsigned long long)value,
-           pc, off, lr, regR9, battleR9, selected, rolePtr,
-           (int32_t)tmpMp, (int32_t)roleMp,
-           (int32_t)unit0Mp, unit0MpMax,
-           (int32_t)unit1Mp, unit1MpMax,
-           (int32_t)unit2Mp, unit2MpMax,
-           actionActive[0], actionType[0], actionActor[0], actionChildCount[0],
-           actionChildConsumed[0], actionTarget[0], actionChildFlag[0],
-           (int32_t)actionValueA[0], (int32_t)actionValueB[0], actionEffect[0],
-           actionActive[1], actionType[1], actionActor[1], actionChildCount[1],
-           actionChildConsumed[1], actionTarget[1], actionChildFlag[1],
-           (int32_t)actionValueA[1], (int32_t)actionValueB[1], actionEffect[1]);
+    (void)uc;
+    (void)type;
+    (void)address64;
+    (void)size;
+    (void)value;
 }
 
 static void vm_autotest_save_screenshot(u32 elapsedMs)
@@ -4381,12 +4059,11 @@ void loop()
             }
         }
         vm_autotest_tick();
-        SDL_Delay(5);
+        SDL_Delay(16);
     }
     g_vmInputSdlTextInputWanted = 0;
     vm_input_sync_sdl_text_input();
     pthread_join(&EmuThread, &thread_ret);
-    pthread_join(&MainUpdareThread, &thread_ret);
     if (SD_File_Handle != NULL)
         fclose(SD_File_Handle);
     if (g_autotestStateFile != NULL)
@@ -4462,12 +4139,12 @@ u8 *SimpleRamMatch(u8 *start, u8 *end, u8 *matchStart, int matchLen)
 #define LOAD_CBE_PATH "CBE/鬼吹灯.CBE"
 #define LOAD_CBE_PATH "CBE/皇牌空战.CBE"
 #define LOAD_CBE_PATH "CBE/涂鸦跳跃.CBE"
-#define LOAD_CBE_PATH "CBE/江湖OL.CBE"
 #define LOAD_CBE_PATH "CBE/血剑Online.CBE"
 #define LOAD_CBE_PATH "CBE/愤怒的小鸟.CBE"
 #define LOAD_CBE_PATH "CBE/歪歪猫发条城历险记V100.CBE"
 #define LOAD_CBE_PATH "CBE/武林外传(新品).CBE"
 #define LOAD_CBE_PATH "CBE/众神之战.CBE"
+#define LOAD_CBE_PATH "CBE/江湖OL.CBE"
 
 
 static int vm_ascii_stricmp(const char *a, const char *b)
@@ -5056,7 +4733,7 @@ void RunArmProgram(void *param)
                     break;
             }
             vm_lcd_update_with_input_overlay();
-            SDL_Delay(100);
+            vm_frame_delay(50);
         }
         if (p != UC_ERR_OK)
             printf("native app loop异常:%s\n", uc_strerror(p));
@@ -5150,7 +4827,7 @@ void RunArmProgram(void *param)
                 if (p != UC_ERR_OK)
                     break;
                 vm_lcd_update_with_input_overlay();
-                SDL_Delay(100);
+                vm_frame_delay(50);
             }
         }
         while (p == UC_ERR_OK)
@@ -5181,7 +4858,7 @@ void RunArmProgram(void *param)
                     waitNet30 = vm_get_var(Global_R9 + 0x9588 + 0x30);
                     waitNextScreen = vm_get_var(VM_SCREEN_nextSubTScreen_ADDRESS);
                 }
-                SDL_Delay(100);
+                vm_frame_delay(50);
             }
             if (p != UC_ERR_OK)
                 break;
@@ -5239,6 +4916,7 @@ void RunArmProgram(void *param)
             }
             if (p == UC_ERR_OK)
             {
+                u32 _frameTick = SDL_GetTicks();
                 while (true)
                 {
                     p = scheduler_tick();
@@ -5387,7 +5065,11 @@ void RunArmProgram(void *param)
                             break;
                     }
                     vm_lcd_update_with_input_overlay();
-                    SDL_Delay(100);
+                    u32 _now = SDL_GetTicks();
+                    u32 _elapsed = _now - _frameTick;
+                    if (_elapsed < 100)
+                        SDL_Delay(100 - _elapsed);
+                    _frameTick = SDL_GetTicks();
                 }
                 uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
                 if (screenThisPtr)
@@ -5444,28 +5126,20 @@ void RunArmProgram(void *param)
 #endif
 }
 
-void MainUpdateTask()
-{
-    while (1)
-    {
-        currentTime = clock();
-
-#ifdef GDB_SERVER_SUPPORT
-        if (gdbTarget.running == 0)
-        {
-            usleep(1000);
-            continue;
-        }
-#endif
-        usleep(1000);
-    }
-}
-
+#ifdef __ANDROID__
+int SDL_main(int argc, char *args[])
+#else
 int main(int argc, char *args[])
+#endif
 {
 
     uc_err err;
     uc_hook hookHandle;
+#ifdef __ANDROID__
+    android_extract_assets();
+    if (android_get_data_dir()[0])
+        chdir(android_get_data_dir());
+#endif
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     vm_autotest_init(argc, args);
@@ -5597,7 +5271,6 @@ int main(int argc, char *args[])
         changeTmp1 = Program_ROM_Address;
 
         pthread_create(&EmuThread, NULL, RunArmProgram, changeTmp1);
-        pthread_create(&MainUpdareThread, NULL, MainUpdateTask, NULL);
 #ifdef GDB_SERVER_SUPPORT
         pthread_create(&gdb_server_mutex, NULL, gdb_server_main, NULL);
 #endif

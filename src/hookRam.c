@@ -7,6 +7,8 @@ bool hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_
 void handleLcdReg(uint64_t address, u32 data, uint64_t value);
 void handleTouchScreenReg(uint64_t address, u32 data, uint64_t value);
 
+extern u8 g_mockBattleOperateSessionArmed;
+
 #ifdef GDB_SERVER_SUPPORT
 /* 前向声明 - 这些在gdb_client.c中定义 */
 extern TargetSystem gdbTarget;
@@ -20,13 +22,9 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
 #ifdef GDB_SERVER_SUPPORT
     int wp_type = 0;
     if (type == UC_MEM_WRITE)
-    {
         wp_type = 1;
-    }
     else if (type == UC_MEM_READ)
-    {
         wp_type = 2;
-    }
 
     if (wp_type != 0 && check_watchpoints(address, size, wp_type))
     {
@@ -39,13 +37,8 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             ;
     }
 #endif
-    vm_note_battle_mp_write(uc, type, address, size, value);
-    // if (type == UC_MEM_WRITE && ((address == 0x10353C0)))
-    // {
-    //     printf("write[%x:", address);
-    //     printf("%x]", value);
-    //     printf(" at %x\n", lastAddress);
-    // }
+    if (type == UC_MEM_WRITE && g_mockBattleOperateSessionArmed)
+        vm_note_battle_mp_write(uc, type, address, size, value);
 }
 bool hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data)
 {

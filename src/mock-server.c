@@ -16682,6 +16682,8 @@ static u32 vm_net_mock_sync_response_to_vm(void)
     if (g_netMockResponseLen == 0)
         return 0;
 
+    if (g_netMockResponseVmPtr)
+        vm_free(g_netMockResponseVmPtr);
     g_netMockResponseVmPtr = vm_malloc(g_netMockResponseLen);
     if (g_netMockResponseVmPtr == 0)
         return 0;

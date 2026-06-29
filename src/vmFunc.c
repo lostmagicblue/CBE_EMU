@@ -846,7 +846,6 @@ int vm_cbfs_vm_file_write(int bufferPtr, int size, int fileHandle)
     void *buffer = SDL_malloc(size);
     uc_mem_read(MTK, bufferPtr, buffer, size);
     int r = fwrite(buffer, 1, size, openFileList[fileHandle]);
-    if (r > 0)
     SDL_free(buffer);
     return vm_set_call_result(r);
 }

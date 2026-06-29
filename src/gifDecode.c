@@ -380,6 +380,8 @@ int gifDecodeExt(uint8_t *data, GifOutput *output, int alloc_new, int *mallocSiz
 
             if (!LKV2_Prefix || !LKV2_Suffix || !LKV2_OutCode)
             {
+                if (alloc_new == 1)
+                    free_mem(pixel_buf);
                 ASSERT(0);
                 return 0;
             }
@@ -410,6 +412,11 @@ int gifDecodeExt(uint8_t *data, GifOutput *output, int alloc_new, int *mallocSiz
                         break;
                     if (prev_code > max_root_code)
                     {
+                        free_mem(LKV2_OutCode);
+                        free_mem(LKV2_Suffix);
+                        free_mem(LKV2_Prefix);
+                        if (alloc_new == 1)
+                            free_mem(pixel_buf);
                         GIF_FAIL("bad prev_code=%d max_root=%d", prev_code, max_root_code);
                     }
                     first_char = (uint8_t)prev_code;
@@ -432,6 +439,11 @@ int gifDecodeExt(uint8_t *data, GifOutput *output, int alloc_new, int *mallocSiz
                     {
                         if (prev_code < 0)
                         {
+                            free_mem(LKV2_OutCode);
+                            free_mem(LKV2_Suffix);
+                            free_mem(LKV2_Prefix);
+                            if (alloc_new == 1)
+                                free_mem(pixel_buf);
                             GIF_FAIL("bad kwkwk cur=%d next=%d prev=%d", cur_code, next_code, prev_code);
                         }
                         /* 固件在 cur_code >= next_code 时统一按 KwKwK 分支处理。 */
@@ -445,6 +457,11 @@ int gifDecodeExt(uint8_t *data, GifOutput *output, int alloc_new, int *mallocSiz
                     {
                         if (cur_code < 0 || cur_code >= dict_size || cur_code >= next_code || stack_idx >= dict_size)
                         {
+                            free_mem(LKV2_OutCode);
+                            free_mem(LKV2_Suffix);
+                            free_mem(LKV2_Prefix);
+                            if (alloc_new == 1)
+                                free_mem(pixel_buf);
                             GIF_FAIL("bad prefix cur=%d next=%d stack=%d dict=%d", cur_code, next_code, stack_idx, dict_size);
                         }
                         LKV2_OutCode[stack_idx] = LKV2_Suffix[cur_code];
@@ -453,6 +470,11 @@ int gifDecodeExt(uint8_t *data, GifOutput *output, int alloc_new, int *mallocSiz
                     }
                     if (cur_code < 0 || cur_code > max_root_code || stack_idx >= dict_size)
                     {
+                        free_mem(LKV2_OutCode);
+                        free_mem(LKV2_Suffix);
+                        free_mem(LKV2_Prefix);
+                        if (alloc_new == 1)
+                            free_mem(pixel_buf);
                         GIF_FAIL("bad root cur=%d max_root=%d stack=%d dict=%d", cur_code, max_root_code, stack_idx, dict_size);
                     }
 
