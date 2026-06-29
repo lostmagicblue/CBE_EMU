@@ -76,6 +76,13 @@ int vm_cbfs_vm_file_tell(int fileHandle);
 int vm_cbfs_vm_file_close(int fileHandle);
 int vm_cbfs_vm_file_rename(int disk, int oldNamePtr, int newNamePtr);
 void vm_initDFDataPackage(u32 a1, u32 a2);
+u32 vm_IMG_InitDataPage(u32 a1, u32 a2);
+u32 vm_IMG_InitInnerDataPageEx(u32 a1, u32 a2);
+u32 vm_IMG_InitDataPageEx(u32 a1, u32 a2, u32 dataPackage);
+u32 vm_IMG_ReleaseDataPage(void);
+u32 vm_IMG_InitDataPageTxt(u32 textId);
+u32 vm_IMG_CreateImageFormIdEx(u32 imageId, u32 dataPackage, u32 outImage);
+u32 vm_IMG_CreateImageFormResForVm(u32 imageId, u32 outImage);
 void vm_sprintf();
 void vm_DF_GetFormatString();
 void vm_DF_GetMemoryBlock();
@@ -1269,7 +1276,8 @@ int vm_DF_DataPackage_LoadFromTResource(int a1, int a2)
 {
     int n4, result = 0;
     int v22 = VM_Str_Tmp_ADDRESS;     // offset
-    int v17 = VM_Str_Tmp_ADDRESS + 4; // name ptr
+    int v17 = VM_Str_Tmp_ADDRESS + 4; // name ptr storage
+    int namePtr = 0;
     int v19, v20;
     int v18;
     int v27 = a2;
@@ -1300,10 +1308,15 @@ int vm_DF_DataPackage_LoadFromTResource(int a1, int a2)
         if (v18)
         {
             vm_DF_ReadStringEx(v17, v27, v22);
+            namePtr = vm_get_var(v17);
             v19 = vm_DF_ReadInt(v27, v22);
         }
+        else
+        {
+            namePtr = 0;
+        }
 
-        int entry = vm_DF_DataPackage_LocateDataPackage(a1, v17);
+        int entry = vm_DF_DataPackage_LocateDataPackage(a1, namePtr);
 
         if (entry)
         {
@@ -1317,9 +1330,14 @@ int vm_DF_DataPackage_LoadFromTResource(int a1, int a2)
                 int v23 = idx_base << 8;
 
                 int v21 = v19;
-                vm_DF_ReadInt(v27, v21);
-                int v24 = vm_DF_ReadInt(v27, v21);
-                int v7 = vm_DF_ReadInt(v27, v21);
+                u32 v21Ptr = vm_malloc_var();
+                vm_set_var(v21Ptr, v21);
+                vm_DF_ReadInt(v27, v21Ptr);
+                v21 = vm_get_var(v21Ptr);
+                int v24 = vm_DF_ReadInt(v27, v21Ptr);
+                v21 = vm_get_var(v21Ptr);
+                int v7 = vm_DF_ReadInt(v27, v21Ptr);
+                v21 = vm_get_var(v21Ptr);
 
                 u16 cnt16 = (u16)v7;
                 uc_mem_write(MTK, entry + 8, &cnt16, 2);
@@ -1328,7 +1346,7 @@ int vm_DF_DataPackage_LoadFromTResource(int a1, int a2)
 
                 if (v7)
                 {
-                    int pkg_id = vm_DF_DataPackage_GetPackageID(a1, v17);
+                    int pkg_id = vm_DF_DataPackage_GetPackageID(a1, namePtr);
 
                     if (pkg_id)
                     {
@@ -1370,14 +1388,16 @@ int vm_DF_DataPackage_LoadFromTResource(int a1, int a2)
 
                     for (int i = 0; i < v7; i = (i + 1))
                     {
-                        int val = vm_DF_ReadInt(v27, v21);
+                        int val = vm_DF_ReadInt(v27, v21Ptr);
+                        v21 = vm_get_var(v21Ptr);
                         uc_mem_write(MTK, int_arr + 4 * i, &val, 4);
                     }
 
                     for (int j = 0; j < v7; j = (j + 1))
                     {
                         int str_ptr = str_arr + 4 * j;
-                        vm_DF_ReadStringEx(str_ptr, v27, v21);
+                        vm_DF_ReadStringEx(str_ptr, v27, v21Ptr);
+                        v21 = vm_get_var(v21Ptr);
 
                         u16 idx = (u16)(v23++);
                         uc_mem_write(MTK, idx_arr + 2 * j, &idx, 2);
@@ -1389,7 +1409,7 @@ int vm_DF_DataPackage_LoadFromTResource(int a1, int a2)
                     int data_ptr = v27 + v21;
                     uc_mem_write(MTK, entry + 24, &data_ptr, 4);
 
-                    int id = vm_DF_DataPackage_GetPackageID(a1, v17);
+                    int id = vm_DF_DataPackage_GetPackageID(a1, namePtr);
                     if (id)
                     {
                         int base;
@@ -1406,15 +1426,16 @@ int vm_DF_DataPackage_LoadFromTResource(int a1, int a2)
                     }
                 }
 
+                vm_free_var(v21Ptr);
                 u8 one = 1;
                 uc_mem_write(MTK, entry, &one, 1);
             }
         }
 
-        if (v17)
+        if (namePtr)
         {
             vm_DF_Free(v17);
-            v17 = 0;
+            namePtr = 0;
         }
 
         result = (int16_t)(v18 + 1);
@@ -1725,8 +1746,6 @@ int VM_DF_DataPackage_DoLoading(int a1, int a2, int a3)
             uc_mem_read(MTK, VM_DF_DataPackage_In_File_Offset_ADDRESS, &a2, 4);
         }
     }
-
-    if (a2 == 0)
 
     // 默认走资源加载
     return vm_DF_DataPackage_LoadFromTResource(a1, a2);
@@ -2085,9 +2104,6 @@ u32 vm_DF_DataPackage_GetFileID(u32 a1, u32 namePtr)
     u32 v7 = 0;
     int result = -1;
     uc_engine *uc = MTK;
-    char fileName[128] = {0};
-    if (namePtr)
-        vm_readStringByPtr(namePtr, fileName);
     // count1 = *(int16 *)(a1 + 8)
     uc_mem_read(uc, a1 + 8, &count1, 2); // 应该是0x112
 
@@ -2984,6 +3000,151 @@ u32 vm_DF_GetDataPackage()
     uc_mem_read(MTK, VM_DreamFactory_DataPackage_ADDRESS, &tmp1, 4);
     return vm_set_call_result(tmp1);
 }
+
+static u32 g_vm_img_app_data_package = 0;
+static u32 g_vm_img_inner_data_package = 0;
+static u32 g_vm_img_current_data_package = 0;
+
+static u32 vm_IMG_ensureDataPackage(u32 *slot)
+{
+    if (*slot == 0)
+    {
+        *slot = vm_malloc(108);
+        if (*slot)
+            uc_mem_write(MTK, *slot, emptyBuff, 108);
+    }
+    return *slot;
+}
+
+static u32 vm_IMG_getappDataPackage(void)
+{
+    return vm_IMG_ensureDataPackage(&g_vm_img_app_data_package);
+}
+
+static u32 vm_IMG_getappInDataPackage(void)
+{
+    return vm_IMG_ensureDataPackage(&g_vm_img_inner_data_package);
+}
+
+u32 vm_IMG_InitDataPageEx(u32 a1, u32 a2, u32 dataPackage)
+{
+    if (dataPackage == 0)
+        return vm_set_call_result(0);
+
+    g_vm_img_current_data_package = dataPackage;
+    uc_mem_write(MTK, VM_DreamFactory_DataPackage_ADDRESS, &dataPackage, 4);
+
+    u16 count = 0;
+    uc_mem_read(MTK, dataPackage + 8, &count, 2);
+    if (count != 0)
+        return vm_set_call_result(count);
+
+    vm_initDFDataPackage(dataPackage, 5);
+    vm_DF_DataPackage_LoadPackage(dataPackage, 0);
+    return VM_DF_DataPackage_DoLoading(dataPackage, a1, a2);
+}
+
+u32 vm_IMG_InitDataPage(u32 a1, u32 a2)
+{
+    u32 dataPackage = vm_IMG_getappDataPackage();
+    return vm_IMG_InitDataPageEx(a1, a2, dataPackage);
+}
+
+u32 vm_IMG_InitInnerDataPageEx(u32 a1, u32 a2)
+{
+    u32 dataPackage = vm_IMG_getappInDataPackage();
+    return vm_IMG_InitDataPageEx(a1, 0, dataPackage);
+}
+
+u32 vm_IMG_ReleaseDataPage(void)
+{
+    if (g_vm_img_inner_data_package)
+    {
+        vm_free(g_vm_img_inner_data_package);
+        g_vm_img_inner_data_package = 0;
+    }
+    if (g_vm_img_app_data_package)
+    {
+        vm_free(g_vm_img_app_data_package);
+        g_vm_img_app_data_package = 0;
+    }
+    g_vm_img_current_data_package = 0;
+    u32 zero = 0;
+    uc_mem_write(MTK, VM_DreamFactory_DataPackage_ADDRESS, &zero, 4);
+    return vm_set_call_result(0);
+}
+
+u32 vm_IMG_InitDataPageTxt(u32 textId)
+{
+    u32 dataPackage;
+    if (textId >= 0xfff)
+    {
+        dataPackage = vm_IMG_getappInDataPackage();
+        textId -= 0xfff;
+    }
+    else
+    {
+        dataPackage = g_vm_img_current_data_package ? g_vm_img_current_data_package : vm_IMG_getappDataPackage();
+    }
+
+    if (dataPackage == 0)
+        return vm_set_call_result(0);
+    return vm_DF_DataPackage_InitTxt(dataPackage, textId);
+}
+
+u32 vm_IMG_CreateImageFormIdEx(u32 imageId, u32 dataPackage, u32 outImage)
+{
+    if (dataPackage == 0)
+        return vm_set_call_result(0);
+
+    u16 count = 0;
+    uc_mem_read(MTK, dataPackage + 8, &count, 2);
+    if (imageId >= count)
+        return vm_set_call_result(0);
+
+    u8 loadedFromFile = 0;
+    u32 data = 0;
+    uc_mem_read(MTK, dataPackage + 84, &loadedFromFile, 1);
+    if (loadedFromFile)
+    {
+        data = vm_DF_DataPackage_DoReadData(dataPackage, imageId);
+    }
+    else
+    {
+        u32 dataBase = 0;
+        u32 offsetBase = 0;
+        u32 offset = 0;
+        uc_mem_read(MTK, dataPackage + 16, &dataBase, 4);
+        uc_mem_read(MTK, dataPackage + 24, &offsetBase, 4);
+        if (dataBase == 0)
+            return vm_set_call_result(0);
+        uc_mem_read(MTK, dataBase + imageId * 4, &offset, 4);
+        data = offset + offsetBase;
+    }
+
+    if (data == 0)
+        return vm_set_call_result(0);
+    return vm_IMG_CreateImageFormStream(data, outImage);
+}
+
+u32 vm_IMG_CreateImageFormResForVm(u32 imageId, u32 outImage)
+{
+    u32 dataPackage;
+    u32 localId = imageId;
+    if (imageId >= 0xfff)
+    {
+        dataPackage = vm_IMG_getappInDataPackage();
+        localId -= 0xfff;
+    }
+    else
+    {
+        dataPackage = g_vm_img_current_data_package ? g_vm_img_current_data_package : vm_IMG_getappDataPackage();
+    }
+
+    vm_IMG_CreateImageFormIdEx(localId, dataPackage, outImage);
+    return vm_set_call_result(outImage);
+}
+
 void vm_IMG_CreateImageFormRes(u32 a1)
 {
     u32 tmp1 = 0;

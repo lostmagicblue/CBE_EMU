@@ -118,6 +118,7 @@ int simulateTouchY = 0;
 typedef enum
 {
     VM_AUTOTEST_ACTION_TAP,
+    VM_AUTOTEST_ACTION_WINDOW_TAP,
     VM_AUTOTEST_ACTION_KEY,
     VM_AUTOTEST_ACTION_HOLD_KEY
 } vm_autotest_action_type;
@@ -140,6 +141,7 @@ static u32 g_autotestShotIndex = 0;
 static vm_autotest_action g_autotestActions[64];
 static u32 g_autotestActionCount = 0;
 static int g_autotestTapReleasePending = 0;
+static int g_autotestTapReleaseWindow = 0;
 static u32 g_autotestTapReleaseMs = 0;
 static int g_autotestTapReleaseX = 0;
 static int g_autotestTapReleaseY = 0;
@@ -1422,14 +1424,25 @@ static void vm_input_update_sdl_text_rect(void)
 {
     if (!window)
         return;
-    int winW = LCD_WIDTH;
-    int winH = LCD_HEIGHT;
-    SDL_GetWindowSize(window, &winW, &winH);
+    int winW = LcdGetWindowWidth();
+    int winH = LcdGetWindowHeight();
+    int toolbarH = LcdGetToolbarHeight();
+    int baseW = LcdGetViewWidth();
+    int baseH = LcdGetViewHeight();
     SDL_Rect rect;
-    rect.x = g_vmInputOverlayX * winW / LCD_WIDTH;
-    rect.y = g_vmInputOverlayY * winH / LCD_HEIGHT;
-    rect.w = g_vmInputOverlayW * winW / LCD_WIDTH;
-    rect.h = g_vmInputOverlayH * winH / LCD_HEIGHT;
+    SDL_GetWindowSize(window, &winW, &winH);
+    LcdVmRectToWindowRect(g_vmInputOverlayX, g_vmInputOverlayY,
+                          g_vmInputOverlayW, g_vmInputOverlayH, &rect);
+    if (baseW > 0 && baseH > 0)
+    {
+        int viewH = winH - toolbarH;
+        if (viewH < 1)
+            viewH = 1;
+        rect.x = rect.x * winW / baseW;
+        rect.y = toolbarH + rect.y * viewH / baseH;
+        rect.w = rect.w * winW / baseW;
+        rect.h = rect.h * viewH / baseH;
+    }
     SDL_SetTextInputRect(&rect);
 }
 
@@ -1841,6 +1854,16 @@ void keyEvent(int type, int key)
     {
         dumpCpuInfo();
     }
+    if (key == SDLK_F12 && type == MR_KEY_PRESS)
+    {
+        LcdCycleRotation();
+        printf("[info][lcd] rotate=%s view=%dx%d window=%dx%d\n",
+               LcdRotationName(LcdGetRotation()),
+               LcdGetViewWidth(), LcdGetViewHeight(),
+               LcdGetWindowWidth(), LcdGetWindowHeight());
+        vm_lcd_update_with_input_overlay();
+        return;
+    }
     if (key >= 0x30 && key <= 0x39)
     { // 数字键盘1-9
         skey = key - 0x30;
@@ -1913,6 +1936,24 @@ void mouseEvent(int type, int x, int y)
     EnqueueVMEvent(VM_EVENT_TOUCHSCREEN, type, (y << 16) | x);
 }
 
+static void windowMouseEvent(int type, int windowX, int windowY)
+{
+    int x = windowX;
+    int y = windowY;
+    LcdWindowPointToVm(windowX, windowY, &x, &y);
+    mouseEvent(type, x, y);
+}
+
+static void vm_autotest_release_tap(void)
+{
+    if (g_autotestTapReleaseWindow)
+        windowMouseEvent(MR_MOUSE_UP, g_autotestTapReleaseX, g_autotestTapReleaseY);
+    else
+        mouseEvent(MR_MOUSE_UP, g_autotestTapReleaseX, g_autotestTapReleaseY);
+    g_autotestTapReleasePending = 0;
+    g_autotestTapReleaseWindow = 0;
+}
+
 static int vm_autotest_parse_u32(const char *text, u32 *value)
 {
     char *end = NULL;
@@ -1932,6 +1973,18 @@ static void vm_autotest_add_tap(u32 atMs, int x, int y)
         return;
     g_autotestActions[g_autotestActionCount].atMs = atMs;
     g_autotestActions[g_autotestActionCount].type = VM_AUTOTEST_ACTION_TAP;
+    g_autotestActions[g_autotestActionCount].a = x;
+    g_autotestActions[g_autotestActionCount].b = y;
+    g_autotestActions[g_autotestActionCount].fired = 0;
+    ++g_autotestActionCount;
+}
+
+static void vm_autotest_add_window_tap(u32 atMs, int x, int y)
+{
+    if (g_autotestActionCount >= sizeof(g_autotestActions) / sizeof(g_autotestActions[0]))
+        return;
+    g_autotestActions[g_autotestActionCount].atMs = atMs;
+    g_autotestActions[g_autotestActionCount].type = VM_AUTOTEST_ACTION_WINDOW_TAP;
     g_autotestActions[g_autotestActionCount].a = x;
     g_autotestActions[g_autotestActionCount].b = y;
     g_autotestActions[g_autotestActionCount].fired = 0;
@@ -2007,6 +2060,11 @@ static void vm_autotest_parse_actions(const char *script)
             strcmp(type, "tap") == 0)
         {
             vm_autotest_add_tap(atMs, a, b);
+        }
+        else if (sscanf(token, "%u:%15[^:]:%d:%d", &atMs, type, &a, &b) == 4 &&
+                 strcmp(type, "windowtap") == 0)
+        {
+            vm_autotest_add_window_tap(atMs, a, b);
         }
         else if (sscanf(token, "%u:%15[^:]:%31[^:]:%u", &atMs, type, keyName, &durationMs) == 4 &&
                  strcmp(type, "hold") == 0 &&
@@ -4120,8 +4178,7 @@ static void vm_autotest_tick(void)
 
     if (g_autotestTapReleasePending && elapsed >= g_autotestTapReleaseMs)
     {
-        mouseEvent(MR_MOUSE_UP, g_autotestTapReleaseX, g_autotestTapReleaseY);
-        g_autotestTapReleasePending = 0;
+        vm_autotest_release_tap();
     }
     if (g_autotestKeyReleasePending && elapsed >= g_autotestKeyReleaseMs)
     {
@@ -4139,6 +4196,23 @@ static void vm_autotest_tick(void)
         {
             mouseEvent(MR_MOUSE_DOWN, action->a, action->b);
             g_autotestTapReleasePending = 1;
+            g_autotestTapReleaseWindow = 0;
+            g_autotestTapReleaseMs = elapsed + 80;
+            g_autotestTapReleaseX = action->a;
+            g_autotestTapReleaseY = action->b;
+        }
+        else if (action->type == VM_AUTOTEST_ACTION_WINDOW_TAP)
+        {
+            int vmX = action->a;
+            int vmY = action->b;
+            LcdWindowPointToVm(action->a, action->b, &vmX, &vmY);
+            vm_autotest_note("autotest_windowtap window=(%d,%d) vm=(%d,%d) rotate=%s toolbar=%d\n",
+                             action->a, action->b, vmX, vmY,
+                             LcdRotationName(LcdGetRotation()),
+                             LcdGetToolbarHeight());
+            windowMouseEvent(MR_MOUSE_DOWN, action->a, action->b);
+            g_autotestTapReleasePending = 1;
+            g_autotestTapReleaseWindow = 1;
             g_autotestTapReleaseMs = elapsed + 80;
             g_autotestTapReleaseX = action->a;
             g_autotestTapReleaseY = action->b;
@@ -4219,16 +4293,33 @@ void loop()
             case SDL_MOUSEMOTION:
                 if (isMouseDown)
                 {
-                    mouseEvent(MR_MOUSE_MOVE, ev.motion.x, ev.motion.y);
+                    windowMouseEvent(MR_MOUSE_MOVE, ev.motion.x, ev.motion.y);
                 }
                 break;
             case SDL_MOUSEBUTTONDOWN:
+            {
+                int toolbarAction = LcdHandleToolbarMouseDown(ev.button.x, ev.button.y);
+                if (toolbarAction)
+                {
+                    isMouseDown = false;
+                    if (toolbarAction == 2)
+                    {
+                        printf("[info][lcd] rotate=%s view=%dx%d window=%dx%d\n",
+                               LcdRotationName(LcdGetRotation()),
+                               LcdGetViewWidth(), LcdGetViewHeight(),
+                               LcdGetWindowWidth(), LcdGetWindowHeight());
+                    }
+                    vm_lcd_update_with_input_overlay();
+                    break;
+                }
                 isMouseDown = true;
-                mouseEvent(MR_MOUSE_DOWN, ev.button.x, ev.button.y);
+                windowMouseEvent(MR_MOUSE_DOWN, ev.button.x, ev.button.y);
                 break;
+            }
             case SDL_MOUSEBUTTONUP:
+                if (isMouseDown)
+                    windowMouseEvent(MR_MOUSE_UP, ev.button.x, ev.button.y);
                 isMouseDown = false;
-                mouseEvent(MR_MOUSE_UP, ev.button.x, ev.button.y);
                 break;
             case SDL_TEXTINPUT:
                 if (g_vmInputOpen)
@@ -4317,7 +4408,6 @@ u8 *SimpleRamMatch(u8 *start, u8 *end, u8 *matchStart, int matchLen)
         return NULL;
 }
 
-#define LOAD_CBE_PATH "CBE/愤怒的小鸟.CBE"
 #define LOAD_CBE_PATH "CBE/众神之战.CBE"
 #define LOAD_CBE_PATH "CBE/钻石迷情3.CBE"
 #define LOAD_CBE_PATH "CBE/枪之荣誉.CBE"
@@ -4331,6 +4421,154 @@ u8 *SimpleRamMatch(u8 *start, u8 *end, u8 *matchStart, int matchLen)
 #define LOAD_CBE_PATH "CBE/皇牌空战.CBE"
 #define LOAD_CBE_PATH "CBE/涂鸦跳跃.CBE"
 #define LOAD_CBE_PATH "CBE/江湖OL.CBE"
+#define LOAD_CBE_PATH "CBE/血剑Online.CBE"
+#define LOAD_CBE_PATH "CBE/愤怒的小鸟.CBE"
+
+
+static int vm_ascii_stricmp(const char *a, const char *b)
+{
+    unsigned char ca;
+    unsigned char cb;
+    if (a == NULL || b == NULL)
+        return a == b ? 0 : (a ? 1 : -1);
+    while (*a && *b)
+    {
+        ca = (unsigned char)*a++;
+        cb = (unsigned char)*b++;
+        if (ca >= 'A' && ca <= 'Z')
+            ca = (unsigned char)(ca - 'A' + 'a');
+        if (cb >= 'A' && cb <= 'Z')
+            cb = (unsigned char)(cb - 'A' + 'a');
+        if (ca != cb)
+            return (int)ca - (int)cb;
+    }
+    return (int)(unsigned char)*a - (int)(unsigned char)*b;
+}
+
+static int vm_bytes_contains(const char *haystack, const unsigned char *needle, size_t needleLen)
+{
+    size_t hayLen;
+    if (haystack == NULL || needle == NULL || needleLen == 0)
+        return 0;
+    hayLen = strlen(haystack);
+    if (hayLen < needleLen)
+        return 0;
+    for (size_t i = 0; i + needleLen <= hayLen; ++i)
+    {
+        if (memcmp((const unsigned char *)haystack + i, needle, needleLen) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static vm_lcd_rotation vm_lcd_auto_rotation_for_current_cbe(void)
+{
+    static const unsigned char angryUtf8[] = {
+        0xe6, 0x84, 0xa4, 0xe6, 0x80, 0x92, 0xe7, 0x9a,
+        0x84, 0xe5, 0xb0, 0x8f, 0xe9, 0xb8, 0x9f
+    };
+    static const unsigned char angryGbk[] = {
+        0xb7, 0xdf, 0xc5, 0xad, 0xb5, 0xc4, 0xd0, 0xa1, 0xc4, 0xf1
+    };
+
+    if (vm_bytes_contains(LOAD_CBE_PATH, angryUtf8, sizeof(angryUtf8)) ||
+        vm_bytes_contains(LOAD_CBE_PATH, angryGbk, sizeof(angryGbk)) ||
+        strstr(LOAD_CBE_PATH, "Angry") != NULL ||
+        strstr(LOAD_CBE_PATH, "angry") != NULL)
+        return VM_LCD_ROTATE_90_CCW;
+    return VM_LCD_ROTATE_0;
+}
+
+static int vm_lcd_parse_rotation(const char *text, vm_lcd_rotation *rotation, int *isAuto)
+{
+    if (text == NULL || *text == 0)
+        return 0;
+    if (isAuto)
+        *isAuto = 0;
+
+    if (vm_ascii_stricmp(text, "auto") == 0)
+    {
+        if (rotation)
+            *rotation = vm_lcd_auto_rotation_for_current_cbe();
+        if (isAuto)
+            *isAuto = 1;
+        return 1;
+    }
+    if (vm_ascii_stricmp(text, "0") == 0 ||
+        vm_ascii_stricmp(text, "none") == 0 ||
+        vm_ascii_stricmp(text, "portrait") == 0)
+    {
+        if (rotation)
+            *rotation = VM_LCD_ROTATE_0;
+        return 1;
+    }
+    if (vm_ascii_stricmp(text, "right") == 0 ||
+        vm_ascii_stricmp(text, "cw") == 0 ||
+        vm_ascii_stricmp(text, "90") == 0)
+    {
+        if (rotation)
+            *rotation = VM_LCD_ROTATE_90_CW;
+        return 1;
+    }
+    if (vm_ascii_stricmp(text, "left") == 0 ||
+        vm_ascii_stricmp(text, "ccw") == 0 ||
+        vm_ascii_stricmp(text, "270") == 0 ||
+        vm_ascii_stricmp(text, "-90") == 0 ||
+        vm_ascii_stricmp(text, "landscape") == 0)
+    {
+        if (rotation)
+            *rotation = VM_LCD_ROTATE_90_CCW;
+        return 1;
+    }
+    if (vm_ascii_stricmp(text, "180") == 0 ||
+        vm_ascii_stricmp(text, "flip") == 0)
+    {
+        if (rotation)
+            *rotation = VM_LCD_ROTATE_180;
+        return 1;
+    }
+    return 0;
+}
+
+static void vm_lcd_init_rotation_config(int argc, char *args[])
+{
+    vm_lcd_rotation rotation = vm_lcd_auto_rotation_for_current_cbe();
+    const char *source = "auto";
+    const char *envRotate = getenv("CBE_LCD_ROTATE");
+    int isAuto = 0;
+
+    if (envRotate != NULL)
+    {
+        if (vm_lcd_parse_rotation(envRotate, &rotation, &isAuto))
+            source = isAuto ? "env:auto" : "env";
+        else
+            printf("[warn][lcd] invalid CBE_LCD_ROTATE=%s\n", envRotate);
+    }
+
+    for (int i = 1; i < argc; ++i)
+    {
+        const char *value = NULL;
+        if (strncmp(args[i], "--rotate=", 9) == 0)
+            value = args[i] + 9;
+        else if (strncmp(args[i], "--lcd-rotate=", 13) == 0)
+            value = args[i] + 13;
+
+        if (value != NULL)
+        {
+            if (vm_lcd_parse_rotation(value, &rotation, &isAuto))
+                source = isAuto ? "arg:auto" : "arg";
+            else
+                printf("[warn][lcd] invalid rotate option=%s\n", value);
+        }
+    }
+
+    LcdSetRotation(rotation);
+    printf("[info][lcd] rotate=%s source=%s view=%dx%d window=%dx%d\n",
+           LcdRotationName(LcdGetRotation()), source,
+           LcdGetViewWidth(), LcdGetViewHeight(),
+           LcdGetWindowWidth(), LcdGetWindowHeight());
+}
+
 
 static void vm_persist_ensure_dir(void)
 {
@@ -4392,6 +4630,76 @@ static u32 vm_persist_write_file(const char *path, const u8 *buffer, u32 size)
     size_t writeLen = fwrite(buffer, 1, size, fp);
     fclose(fp);
     return (u32)writeLen;
+}
+
+static void vm_storage_read_name(u32 namePtr, char *out, size_t outSize)
+{
+    size_t pos = 0;
+    if (outSize == 0)
+        return;
+    out[0] = 0;
+    if (namePtr == 0)
+        return;
+    while (pos + 1 < outSize)
+    {
+        u8 ch = 0;
+        if (uc_mem_read(MTK, namePtr + (u32)pos, &ch, 1) != UC_ERR_OK || ch == 0)
+            break;
+        out[pos++] = (char)ch;
+    }
+    out[pos] = 0;
+}
+
+static void vm_storage_date_build_path(char *path, size_t pathSize, u32 namePtr)
+{
+    char appName[96];
+    char rawName[96];
+    char storeName[96];
+    vm_persist_sanitize_name(LOAD_CBE_PATH, appName, sizeof(appName));
+    vm_storage_read_name(namePtr, rawName, sizeof(rawName));
+    if (rawName[0] == 0)
+        snprintf(rawName, sizeof(rawName), "ptr_%08x", namePtr);
+    vm_persist_sanitize_name(rawName, storeName, sizeof(storeName));
+    snprintf(path, pathSize, "nvram/%s_storage_%s.bin", appName, storeName);
+}
+
+static u32 vm_storage_date(u32 namePtr, u32 buffer, u32 len, u32 isRead)
+{
+    if (buffer == 0 || len == 0 || len > 0x100000)
+        return vm_set_call_result(0);
+
+    char path[224];
+    vm_storage_date_build_path(path, sizeof(path), namePtr);
+
+    u8 *tmp = SDL_malloc(len);
+    if (tmp == NULL)
+        return vm_set_call_result(0);
+
+    if (isRead)
+    {
+        u32 zeroOffset = 0;
+        while (zeroOffset < len)
+        {
+            u32 zeroLen = SDL_min(len - zeroOffset, (u32)sizeof(emptyBuff));
+            uc_mem_write(MTK, buffer + zeroOffset, emptyBuff, zeroLen);
+            zeroOffset += zeroLen;
+        }
+
+        u32 readLen = vm_persist_read_file(path, tmp, len);
+        if (readLen)
+            uc_mem_write(MTK, buffer, tmp, readLen);
+        SDL_free(tmp);
+        return vm_set_call_result(readLen ? 1 : 0);
+    }
+
+    if (uc_mem_read(MTK, buffer, tmp, len) != UC_ERR_OK)
+    {
+        SDL_free(tmp);
+        return vm_set_call_result(0);
+    }
+    u32 savedLen = vm_persist_write_file(path, tmp, len);
+    SDL_free(tmp);
+    return vm_set_call_result(savedLen == len ? 1 : 0);
 }
 
 
@@ -4932,6 +5240,7 @@ int main(int argc, char *args[])
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     vm_autotest_init(argc, args);
+    vm_lcd_init_rotation_config(argc, args);
 
     // SetConsoleOutputCP(CP_UTF8);
     // while(1);
@@ -4945,13 +5254,15 @@ int main(int argc, char *args[])
 #ifdef GDI_LAYER_DEBUG
     window = SDL_CreateWindow("moral i9 simulato", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, SCREEN_WIDTH * 5, SCREEN_HEIGHT, 0);
 #else
-    window = SDL_CreateWindow("Cbe Emulator", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 240, 400, 0);
+    window = SDL_CreateWindow("Cbe Emulator", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                              LcdGetWindowWidth(), LcdGetWindowHeight(), 0);
 #endif
     if (window == NULL)
     {
         printf("Window could not be created! SDL_Error: %s\n", SDL_GetError());
         return -1;
     }
+    LcdApplyWindowSize();
     SDL_Surface *startupSurface = SDL_GetWindowSurface(window);
     if (startupSurface)
     {
@@ -6694,13 +7005,21 @@ static bool hook_vm_manager_lcd_func(u32 address)
     }
     else if (idx == 23)
     {
-        printf("[call]vMCreateImage\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        if (tmp2 == 0)
+        {
+            vm_set_call_result(0);
+        }
+        else
+        {
+            vm_IMG_CreateImageFormResForVm(tmp1, tmp2);
+            vm_set_call_result(1);
+        }
     }
     else if (idx == 24)
     {
-        printf("[call]vMCreateImageFromInRes\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 25)
     {
@@ -6749,18 +7068,32 @@ static bool hook_vm_manager_lcd_func(u32 address)
     }
     else if (idx == 34)
     {
-        printf("[call]vMGetImageWidth\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        u16 width = 0;
+        if (tmp1)
+            uc_mem_read(MTK, tmp1 + 4, &width, 2);
+        vm_set_call_result(width);
     }
     else if (idx == 35)
     {
-        printf("[call]vMGetImageHeight\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        u16 height = 0;
+        if (tmp1)
+            uc_mem_read(MTK, tmp1 + 6, &height, 2);
+        vm_set_call_result(height);
     }
     else if (idx == 36)
     {
-        printf("[call]vMDestoryImage\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        if (tmp1 && vm_get_var(tmp1))
+        {
+            vm_IMG_Destory(tmp1);
+            vm_set_call_result(1);
+        }
+        else
+        {
+            vm_set_call_result(0);
+        }
     }
     else if (idx == 37)
     {
@@ -6836,28 +7169,33 @@ static bool hook_vm_manager_lcd_func(u32 address)
     }
     else if (idx == 45)
     {
-        printf("[call]IMG_InitDataPage\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_IMG_InitDataPage(tmp1, tmp2);
     }
     else if (idx == 46)
     {
-        printf("[call]IMG_InitInnerDataPageEx\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_IMG_InitInnerDataPageEx(tmp1, tmp2);
     }
     else if (idx == 47)
     {
-        printf("[call]IMG_ReleaseDataPage\n");
-        assert(0);
+        vm_IMG_ReleaseDataPage();
     }
     else if (idx == 48)
     {
-        printf("[call]IMG_InitDataPageEx\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        vm_IMG_InitDataPageEx(tmp1, tmp2, tmp3);
     }
     else if (idx == 49)
     {
-        printf("[call]IMG_CreateImageFormIdEx\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        vm_IMG_CreateImageFormIdEx(tmp1, tmp2, tmp3);
     }
     else if (idx == 50)
     {
@@ -6900,8 +7238,8 @@ static bool hook_vm_manager_lcd_func(u32 address)
     }
     else if (idx == 58)
     {
-        printf("[call]IMG_InitDataPageTxt\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_IMG_InitDataPageTxt(tmp1);
     }
     else if (idx == 59)
     {
@@ -7949,9 +8287,11 @@ static bool hook_vm_manager_game_util_func(u32 address)
     else if (idx == 38)
     {
         DEBUG_PRINT("[call]Storage_Date\n");
-        // todo
-        tmp1 = currentTime;
-        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+        vm_storage_date(tmp1, tmp2, tmp3, tmp4);
     }
     else if (idx == 39)
     {
@@ -8323,33 +8663,130 @@ static bool hook_vm_manager_ucs2_func(u32 address)
     }
     else if (idx == 6)
     {
-        assert(0);
-        printf("[call]vmutExpandStrncpy\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        if (tmp1 && tmp2)
+        {
+            for (u32 i = 0; i < tmp3; ++i)
+            {
+                u8 src = 0;
+                u16 dst = 0;
+                uc_mem_read(MTK, tmp2 + i, &src, 1);
+                if (src)
+                    dst = src;
+                uc_mem_write(MTK, tmp1 + i * 2, &dst, 2);
+                if (!src)
+                {
+                    for (++i; i < tmp3; ++i)
+                        uc_mem_write(MTK, tmp1 + i * 2, &dst, 2);
+                    break;
+                }
+            }
+        }
+        vm_set_call_result(tmp1);
     }
     else if (idx == 7)
     {
-        printf("[call]vmutExpandMemcpy\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        if (tmp1 && tmp2)
+        {
+            for (u32 i = 0; i < tmp3; ++i)
+            {
+                u8 src = 0;
+                u16 dst = 0;
+                uc_mem_read(MTK, tmp2 + i, &src, 1);
+                dst = src;
+                uc_mem_write(MTK, tmp1 + i * 2, &dst, 2);
+            }
+        }
+        vm_set_call_result(tmp1);
     }
     else if (idx == 8)
     {
-        printf("[call]vmutStrchrUcs2\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        tmp3 = 0;
+        if (tmp1)
+        {
+            for (u32 off = 0; off < 0x10000; off += 2)
+            {
+                u16 ch = 0;
+                uc_mem_read(MTK, tmp1 + off, &ch, 2);
+                if (ch == (u16)tmp2)
+                {
+                    tmp3 = tmp1 + off;
+                    break;
+                }
+                if (ch == 0)
+                    break;
+            }
+        }
+        vm_set_call_result(tmp3);
     }
     else if (idx == 9)
     {
-        printf("[call]vmutStrcmpUcs2\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        int result = 0;
+        if (tmp1 && tmp2)
+        {
+            for (u32 off = 0; off < 0x10000; off += 2)
+            {
+                u16 a = 0, b = 0;
+                uc_mem_read(MTK, tmp1 + off, &a, 2);
+                uc_mem_read(MTK, tmp2 + off, &b, 2);
+                result = (int)a - (int)b;
+                if (result || a == 0 || b == 0)
+                    break;
+            }
+        }
+        vm_set_call_result((u32)result);
     }
     else if (idx == 10)
     {
-        printf("[call]vmutStricmpUcs2\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        int result = 0;
+        if (tmp1 && tmp2)
+        {
+            for (u32 off = 0; off < 0x10000; off += 2)
+            {
+                u16 a = 0, b = 0;
+                uc_mem_read(MTK, tmp1 + off, &a, 2);
+                uc_mem_read(MTK, tmp2 + off, &b, 2);
+                if (a >= 'a' && a <= 'z')
+                    a = (u16)(a - 'a' + 'A');
+                if (b >= 'a' && b <= 'z')
+                    b = (u16)(b - 'a' + 'A');
+                result = (int)a - (int)b;
+                if (result || a == 0 || b == 0)
+                    break;
+            }
+        }
+        vm_set_call_result((u32)result);
     }
     else if (idx == 11)
     {
-        printf("[call]vmutStrncmpUcs2\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        int result = 0;
+        if (tmp1 && tmp2)
+        {
+            for (u32 i = 0; i < tmp3; ++i)
+            {
+                u16 a = 0, b = 0;
+                uc_mem_read(MTK, tmp1 + i * 2, &a, 2);
+                uc_mem_read(MTK, tmp2 + i * 2, &b, 2);
+                result = (int)a - (int)b;
+                if (result || a == 0 || b == 0)
+                    break;
+            }
+        }
+        vm_set_call_result((u32)result);
     }
     else
     {
