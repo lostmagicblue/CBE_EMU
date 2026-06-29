@@ -8166,10 +8166,9 @@ static bool hook_vm_manager_stdio_func(u32 address)
         if (tmp1 && tmp2)
         {
             int dstLen = vm_strlen(tmp1);
-            vm_readStringByPtr(tmp2, cbeTextString);
-            uc_mem_write(MTK, tmp1 + dstLen, cbeTextString, strlen(cbeTextString) + 1);
+            u32 copied = vm_guest_strcpy(tmp1 + dstLen, tmp2);
             vm_autotest_note_attr_value_write("stdio_strcat", tmp1 + dstLen,
-                                              (u32)strlen(cbeTextString) + 1);
+                                              copied + 1);
         }
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
     }
@@ -10001,13 +10000,19 @@ static bool hook_vm_manager_gameold_func(u32 address)
     }
     else if (idx == 96)
     {
-        printf("[call]DF_WriteShort\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        vm_DF_WriteShort(tmp1, tmp2, tmp3);
+        DEBUG_PRINT("[call]DF_WriteShort\n");
     }
     else if (idx == 97)
     {
-        printf("[call]DF_WriteInt\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        vm_DF_WriteInt(tmp1, tmp2, tmp3);
+        DEBUG_PRINT("[call]DF_WriteInt\n");
     }
     else if (idx == 98)
     {
@@ -10173,10 +10178,9 @@ static bool hook_vm_manager_gameold_func(u32 address)
         if (tmp1 && tmp2)
         {
             int dstLen = vm_strlen(tmp1);
-            vm_readStringByPtr(tmp2, cbeTextString);
-            uc_mem_write(MTK, tmp1 + dstLen, cbeTextString, strlen((char *)cbeTextString) + 1);
+            u32 copied = vm_guest_strcpy(tmp1 + dstLen, tmp2);
             vm_autotest_note_attr_value_write("gameold_strcat", tmp1 + dstLen,
-                                              (u32)strlen((char *)cbeTextString) + 1);
+                                              copied + 1);
         }
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
     }

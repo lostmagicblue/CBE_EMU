@@ -15,6 +15,28 @@ FILE *openFileList[16];
 static char openFileNames[16][256];
 
 static void vm_read_string_by_ptr_limited(u32 ptr, char *dst, size_t dstSize);
+
+#define VM_STRING_READ_FALLBACK_SIZE 1024u
+#if defined(__GNUC__)
+#define VM_STRING_READ_OBJECT_SIZE(dst) __builtin_object_size((dst), 0)
+#define VM_STRING_READ_SIZE(dst) \
+    (VM_STRING_READ_OBJECT_SIZE(dst) == (size_t)-1 ? VM_STRING_READ_FALLBACK_SIZE : VM_STRING_READ_OBJECT_SIZE(dst))
+#else
+#define VM_STRING_READ_SIZE(dst) VM_STRING_READ_FALLBACK_SIZE
+#endif
+
+static void vm_readStringByRegLimited(uc_arm_reg reg, u8 *dst, size_t dstSize);
+static void vm_readStringByPtrLimited(u32 ptr, u8 *dst, size_t dstSize);
+static void vm_readStringGbkByRegLimited(uc_arm_reg reg, u8 *dst, size_t dstSize);
+static void vm_readStringUCS2ByRegLimited(uc_arm_reg reg, u16 *dst, size_t dstBytes);
+
+#define vm_readStringByReg(reg, dst) vm_readStringByRegLimited((reg), (u8 *)(dst), VM_STRING_READ_SIZE(dst))
+#define vm_readStringByPtr(ptr, dst) vm_readStringByPtrLimited((ptr), (u8 *)(dst), VM_STRING_READ_SIZE(dst))
+#define vm_readStringGbkByReg(reg, dst) vm_readStringGbkByRegLimited((reg), (u8 *)(dst), VM_STRING_READ_SIZE(dst))
+#define vm_readStringUCS2ByReg(reg, dst) vm_readStringUCS2ByRegLimited((reg), (u16 *)(dst), VM_STRING_READ_SIZE(dst))
+
+#define VM_C_STRING_SCAN_MAX (64u * 1024u)
+
 static void vm_trim_mmorpg_tempdata_header(void)
 {
     FILE *fp = fopen("JHOnlineData/mmorpgTempdata", "rb");
@@ -194,12 +216,54 @@ inline u32 vm_set_call_result(u32 r)
     return r;
 }
 
+static u32 vm_guest_strlen(u32 addr)
+{
+    u32 len = 0;
+    while (len < VM_C_STRING_SCAN_MAX)
+    {
+        u8 ch = 0;
+        if (uc_mem_read(MTK, addr + len, &ch, 1) != UC_ERR_OK || ch == 0)
+            break;
+        ++len;
+    }
+    return len;
+}
+
+static u32 vm_guest_strcpy(u32 dst, u32 src)
+{
+    u32 copied = 0;
+    u8 chunk[128];
+
+    while (copied < VM_C_STRING_SCAN_MAX)
+    {
+        u32 count = 0;
+        while (count < sizeof(chunk) && copied + count < VM_C_STRING_SCAN_MAX)
+        {
+            u8 ch = 0;
+            if (uc_mem_read(MTK, src + copied + count, &ch, 1) != UC_ERR_OK)
+                ch = 0;
+            chunk[count++] = ch;
+            if (ch == 0)
+            {
+                uc_mem_write(MTK, dst + copied, chunk, count);
+                return copied + count - 1;
+            }
+        }
+        uc_mem_write(MTK, dst + copied, chunk, count);
+        copied += count;
+    }
+
+    {
+        u8 zero = 0;
+        uc_mem_write(MTK, dst + copied, &zero, 1);
+    }
+    return copied;
+}
+
 // ok
 int vm_strlen(int addr)
 {
-    char buff[1024];
-    vm_readStringByPtr(addr, buff);
-    int len = strlen(buff);
+    int len = (int)vm_guest_strlen((u32)addr);
     return vm_set_call_result(len);
 }
 // ok
@@ -2955,100 +3019,61 @@ int vm_pngDecodeStart(int pngBufferPtr, int resultPtr)
     return vm_set_call_result(resultPtr);
 }
 
-void vm_readStringByReg(uc_arm_reg reg, u8 *dst)
+static void vm_readStringByRegLimited(uc_arm_reg reg, u8 *dst, size_t dstSize)
 {
-    int ptr;
-    u8 tmp;
-    uc_reg_read(MTK, reg, &ptr);
-    while (true)
-    {
-        uc_mem_read(MTK, ptr, &tmp, 1);
-        if (tmp == 0)
-            break;
-        *dst++ = tmp;
-        ptr += 1;
-    }
-    *dst = 0;
-}
-
-static void vm_read_string_by_ptr_limited(u32 ptr, char *dst, size_t dstSize)
-{
+    u32 ptr;
     if (dstSize == 0)
         return;
+    dst[0] = 0;
+    uc_reg_read(MTK, reg, &ptr);
+    vm_readStringByPtrLimited(ptr, dst, dstSize);
+}
 
+static void vm_readStringByPtrLimited(u32 ptr, u8 *dst, size_t dstSize)
+{
     size_t pos = 0;
+    if (dstSize == 0)
+        return;
+    dst[0] = 0;
     while (pos + 1 < dstSize)
     {
-        u8 ch = 0;
-        if (uc_mem_read(MTK, ptr + (u32)pos, &ch, 1) != UC_ERR_OK || ch == 0)
+        u8 tmp = 0;
+        if (uc_mem_read(MTK, ptr + (u32)pos, &tmp, 1) != UC_ERR_OK || tmp == 0)
             break;
-        dst[pos++] = (char)ch;
+        dst[pos++] = tmp;
     }
     dst[pos] = 0;
 }
 
-void vm_readStringByPtr(u32 ptr, u8 *dst)
+static void vm_read_string_by_ptr_limited(u32 ptr, char *dst, size_t dstSize)
 {
-    u8 tmp;
-    while (true)
-    {
-        uc_mem_read(MTK, ptr, &tmp, 1);
-        if (tmp == 0)
-            break;
-        *dst++ = tmp;
-        ptr += 1;
-    }
-    *dst = 0;
+    vm_readStringByPtrLimited(ptr, (u8 *)dst, dstSize);
 }
 
-void vm_readStringGbkByReg(uc_arm_reg reg, u8 *dst2)
+static void vm_readStringGbkByRegLimited(uc_arm_reg reg, u8 *dst, size_t dstSize)
+{
+    vm_readStringByRegLimited(reg, dst, dstSize);
+}
+
+static void vm_readStringUCS2ByRegLimited(uc_arm_reg reg, u16 *dst, size_t dstBytes)
 {
     u32 ptr;
-    u8 tmp;
-    u8 b2;
-    u8 *dst = dst2;
+    size_t maxChars = dstBytes / sizeof(u16);
+    size_t pos = 0;
+    if (maxChars == 0)
+        return;
+    dst[0] = 0;
     uc_reg_read(MTK, reg, &ptr);
-    while (1)
+    while (pos + 1 < maxChars)
     {
-        uc_mem_read(MTK, ptr, dst2, 64);
-        break;
-        if (tmp < 0x80)
-        {
-            *dst++ = tmp;
-            ptr += 1;
-            if (tmp == 0)
-                break;
-        }
-        else if (tmp >= 0x81 && tmp <= 0xfe)
-        {
-            *dst++ = tmp;
-            uc_mem_read(MTK, ptr + 1, &b2, 1);
-            *dst++ = b2;
-            ptr += 2;
-        }
-        else
-        {
-            printf("[1]读取gbk字符串异常\n");
+        u16 tmp = 0;
+        if (uc_mem_read(MTK, ptr + (u32)(pos * sizeof(u16)), &tmp, sizeof(tmp)) != UC_ERR_OK || tmp == 0)
+            break;
+        dst[pos++] = tmp;
+    }
+    dst[pos] = 0;
+}
 
-            break;
-        }
-    }
-}
-void vm_readStringUCS2ByReg(uc_arm_reg reg, u16 *dst)
-{
-    int ptr;
-    u16 tmp;
-    uc_reg_read(MTK, reg, &ptr);
-    while (true)
-    {
-        uc_mem_read(MTK, ptr, &tmp, 2);
-        if (tmp == 0)
-            break;
-        *dst++ = tmp;
-        ptr += 2;
-    }
-    *dst = 0;
-}
 void vm_initManagerTable()
 {
     vm_configManagerTable(VM_MANAGER_TABLE_ADDRESS, VM_MANAGER_FUNC_LIST_ADDRESS);
@@ -3564,9 +3589,7 @@ u32 vm_MF_resetGmemoryBlock()
 
 void vm_strcpy(u32 dst, u32 src)
 {
-    u8 charBuffer[1024];
-    vm_readStringByPtr(src, charBuffer);
-    uc_mem_write(MTK, dst, charBuffer, strlen(charBuffer) + 1);
+    vm_guest_strcpy(dst, src);
 }
 
 int vm_DF_Sin(int deg)
