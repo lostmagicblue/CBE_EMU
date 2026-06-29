@@ -605,15 +605,18 @@ static bool vm_infer_battle_module_from_screen(u32 screen, u32 *codeBase, u32 *m
 
     if (screen == 0)
         return false;
-    if (uc_mem_read(MTK, screen, &init, 4) != UC_ERR_OK ||
-        uc_mem_read(MTK, screen + 4, &destroy, 4) != UC_ERR_OK ||
-        uc_mem_read(MTK, screen + 8, &logic, 4) != UC_ERR_OK ||
-        uc_mem_read(MTK, screen + 12, &render, 4) != UC_ERR_OK ||
-        uc_mem_read(MTK, screen + 16, &pause, 4) != UC_ERR_OK ||
-        uc_mem_read(MTK, screen + 20, &resume, 4) != UC_ERR_OK)
+    u8 probe = 0;
+    if (uc_mem_read(MTK, screen, &probe, 1) != UC_ERR_OK ||
+        uc_mem_read(MTK, screen + 20, &probe, 1) != UC_ERR_OK)
     {
         return false;
     }
+    init = vm_get_var(screen);
+    destroy = vm_get_var(screen + 4);
+    logic = vm_get_var(screen + 8);
+    render = vm_get_var(screen + 12);
+    pause = vm_get_var(screen + 16);
+    resume = vm_get_var(screen + 20);
 
     init &= ~1u;
     destroy &= ~1u;
@@ -1709,6 +1712,14 @@ static void vm_lcd_update_with_input_overlay(void)
     uc_mem_read(MTK, VM_screenImage_ADDRESS, Lcd_Cache_Buffer, LCD_WIDTH * LCD_HEIGHT * PIXEL_PER_BYTE);
     vm_input_draw_overlay();
     UpdateLcd();
+}
+
+static void vm_lcd_init_screen_image_struct(void)
+{
+    uc_mem_write(MTK, VM_screenImageStruct_ADDRESS, emptyBuff, 24);
+    vm_set_var(VM_screenImageStruct_ADDRESS, VM_screenImage_ADDRESS);
+    vm_set_var_short(VM_screenImageStruct_ADDRESS + 4, LCD_WIDTH);
+    vm_set_var_short(VM_screenImageStruct_ADDRESS + 6, LCD_HEIGHT);
 }
 
 static u32 vm_input_wcslen_limit(u32 addr, u32 maxLen)
@@ -4425,6 +4436,7 @@ u8 *SimpleRamMatch(u8 *start, u8 *end, u8 *matchStart, int matchLen)
 #define LOAD_CBE_PATH "CBE/江湖OL.CBE"
 #define LOAD_CBE_PATH "CBE/血剑Online.CBE"
 #define LOAD_CBE_PATH "CBE/愤怒的小鸟.CBE"
+#define LOAD_CBE_PATH "CBE/歪歪猫发条城历险记V100.CBE"
 
 
 static int vm_ascii_stricmp(const char *a, const char *b)
@@ -4970,24 +4982,16 @@ void RunArmProgram(void *param)
 #endif
     // 准备工作
     // 写入屏幕缓存数据
-    u8 screenImageHeader[24] = {0};
-    changeTmp1 = VM_screenImage_ADDRESS;
-    memcpy(screenImageHeader, &changeTmp1, 4);
-    u16 screenImageWidth = LCD_WIDTH;
-    u16 screenImageHeight = LCD_HEIGHT;
-    memcpy(screenImageHeader + 4, &screenImageWidth, 2);
-    memcpy(screenImageHeader + 6, &screenImageHeight, 2);
-    screenImageHeader[8] = 0;
-    uc_mem_write(MTK, VM_screenImageStruct_ADDRESS, screenImageHeader, sizeof(screenImageHeader));
+    vm_lcd_init_screen_image_struct();
     // DF_DataPackage_SetFullPaths()
     // 当前运行的文件名
     char nameBuff[64] = LOAD_CBE_PATH;
     utf8_to_gbk(nameBuff, cbeTextString, mySizeOf(cbeTextString));
     uc_mem_write(MTK, VM_DF_DataPackage_FilePath_ADDRESS, cbeTextString, 64);
     // DF_DataPackage_SetFileLens();
-    uc_mem_write(MTK, VM_DF_DataPackage_In_File_Length_ADDRESS, &g_cbeInfo.DF_DataPacakge_Size, 4);
+    vm_set_var(VM_DF_DataPackage_In_File_Length_ADDRESS, g_cbeInfo.DF_DataPacakge_Size);
     // DF_DataPackage_SetFileOffset()
-    uc_mem_write(MTK, VM_DF_DataPackage_In_File_Offset_ADDRESS, &g_cbeInfo.DF_Data_Pacakage_Offset, 4);
+    vm_set_var(VM_DF_DataPackage_In_File_Offset_ADDRESS, g_cbeInfo.DF_Data_Pacakage_Offset);
     changeTmp1 = 1;
     uc_mem_write(MTK, VM_DF_DataPackage_LoadType_ADDRESS, &changeTmp1, 1);
     // 第一次入口初始化
@@ -5002,7 +5006,7 @@ void RunArmProgram(void *param)
     // 第二次初始化
     if (p == UC_ERR_OK)
     {
-        uc_mem_read(MTK, VM_Manager_Table_ADDRESS, &startAddr, 4);
+        startAddr = vm_get_var(VM_Manager_Table_ADDRESS);
         uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
         p = vm_emu_start(startAddr, exitAddr);
     }
@@ -5028,7 +5032,7 @@ void RunArmProgram(void *param)
                     break;
                 if (tScreenInitedPtr != vmAddedScreen)
                 {
-                    uc_mem_read(MTK, vmAddedScreen, &tScreenInitEntry, 4);
+                    tScreenInitEntry = vm_get_var(vmAddedScreen);
                     if (tScreenInitEntry)
                     {
                         uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
@@ -5043,9 +5047,9 @@ void RunArmProgram(void *param)
                     tScreenInitedPtr = vmAddedScreen;
                 }
                 scheduler_normalize_startup_screen_state();
-                uc_mem_read(MTK, vmAddedScreen + 0x08, &tScreenEventEntry, 4);
-                uc_mem_read(MTK, vmAddedScreen + 0x0c, &tScreenRenderEntry, 4);
-                uc_mem_read(MTK, vmAddedScreen + 0x18, &tScreenResourceLoadEntry, 4);
+                tScreenEventEntry = vm_get_var(vmAddedScreen + 0x08);
+                tScreenRenderEntry = vm_get_var(vmAddedScreen + 0x0c);
+                tScreenResourceLoadEntry = vm_get_var(vmAddedScreen + 0x18);
                 if (tScreenRenderEntry == 0)
                 {
                     printf("TScreen未设置render入口\n");
@@ -5113,9 +5117,9 @@ void RunArmProgram(void *param)
                     u32 waitNet30 = 0;
                     u32 waitNextScreen = 0;
                     uc_mem_read(MTK, Global_R9 + 0x4cb6, &waitUpdateState, 1);
-                    uc_mem_read(MTK, Global_R9 + 0x9588 + 0x28, &waitNet28, 4);
-                    uc_mem_read(MTK, Global_R9 + 0x9588 + 0x30, &waitNet30, 4);
-                    uc_mem_read(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &waitNextScreen, 4);
+                    waitNet28 = vm_get_var(Global_R9 + 0x9588 + 0x28);
+                    waitNet30 = vm_get_var(Global_R9 + 0x9588 + 0x30);
+                    waitNextScreen = vm_get_var(VM_SCREEN_nextSubTScreen_ADDRESS);
                 }
                 SDL_Delay(100);
             }
@@ -5125,7 +5129,7 @@ void RunArmProgram(void *param)
                 continue;
             if (screenStructChange == 1)
             {
-                uc_mem_read(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &screenFuncPtr, 4); // 得到screen函数表地址的指针
+                screenFuncPtr = vm_get_var(VM_SCREEN_nextSubTScreen_ADDRESS); // 得到screen函数表地址的指针
                 u32 screenModuleBase = vm_screen_stack_lookup_module_base(screenFuncPtr);
                 if (screenFuncPtr >= Global_R9 && screenFuncPtr < ROM_ADDRESS + size_16mb)
                 {
@@ -5136,13 +5140,13 @@ void RunArmProgram(void *param)
                     screenThisPtr = screenFuncPtr - 0x18;
                     g_currentScreenModuleBase = screenModuleBase;
                 }
-                uc_mem_read(MTK, screenFuncPtr, &screenInitEntry, 4);
-                uc_mem_read(MTK, screenFuncPtr + 4, &screenDestoryEntry, 4);
-                uc_mem_read(MTK, screenFuncPtr + 8, &screenLogicEntry, 4);
-                uc_mem_read(MTK, screenFuncPtr + 12, &screenRenderEntry, 4);
-                uc_mem_read(MTK, screenFuncPtr + 16, &screenPauseEntry, 4);
-                uc_mem_read(MTK, screenFuncPtr + 20, &screenRemuseEntry, 4);
-                uc_mem_read(MTK, screenFuncPtr + 24, &screenResouceLoadEntry, 4);
+                screenInitEntry = vm_get_var(screenFuncPtr);
+                screenDestoryEntry = vm_get_var(screenFuncPtr + 4);
+                screenLogicEntry = vm_get_var(screenFuncPtr + 8);
+                screenRenderEntry = vm_get_var(screenFuncPtr + 12);
+                screenPauseEntry = vm_get_var(screenFuncPtr + 16);
+                screenRemuseEntry = vm_get_var(screenFuncPtr + 20);
+                screenResouceLoadEntry = vm_get_var(screenFuncPtr + 24);
                 printf("[SCR_FUNC](init:%x,destory:%x,logic:%x,render:%x,pause:%x,remuse:%x,resLoad:%x)\n", screenInitEntry, screenDestoryEntry, screenLogicEntry, screenRenderEntry, screenPauseEntry, screenRemuseEntry, screenResouceLoadEntry);
                 screenStructChange = 0;
                 g_activeScreenRemovedThisFrame = 0;
@@ -5512,11 +5516,11 @@ int main(int argc, char *args[])
         printf("Data In Rom Address:0x%x - 0x%x\n", ROM_ADDRESS + g_cbeInfo.headerInt2, ROM_ADDRESS + g_cbeInfo.headerInt2 + g_cbeInfo.headerInt4);
 
         changeTmp3 = VM_MANAGER_TABLE_ADDRESS;
-        uc_mem_write(MTK, VM_Manager_Table_ADDRESS + 8, &changeTmp3, 4); // vmManager函数表地址
+        vm_set_var(VM_Manager_Table_ADDRESS + 8, changeTmp3); // vmManager函数表地址
         changeTmp3 = VM_LOG_NOOP_ADDRESS;
-        uc_mem_write(MTK, VM_Manager_Table_ADDRESS + 12, &changeTmp3, 4);
+        vm_set_var(VM_Manager_Table_ADDRESS + 12, changeTmp3);
         changeTmp3 = VM_CURR_APP_INFO_ADDRESS;
-        uc_mem_write(MTK, VM_Manager_Table_ADDRESS + 16, &changeTmp3, 4); // vcurAppFileName全局变量地址
+        vm_set_var(VM_Manager_Table_ADDRESS + 16, changeTmp3); // vcurAppFileName全局变量地址
 
         vm_initManagerTable();
 
@@ -5625,7 +5629,7 @@ static bool hook_vm_manager_func(u32 address)
         for (tmp2 = 0; tmp2 < 27; tmp2++)
         {
             tmp3 = VM_MEMORY_MANAGER_FUNC_LIST_ADDRESS + tmp2 * 4;
-            uc_mem_write(MTK, tmp1 + tmp2 * 4, &tmp3, 4);
+            vm_set_var(tmp1 + tmp2 * 4, tmp3);
         }
     }
     else if (idx == 9)
@@ -5666,7 +5670,7 @@ static bool hook_vm_manager_func(u32 address)
             for (tmp2 = 0; tmp2 < 43; tmp2++)
             {
                 tmp3 = VM_MANAGER_NETWORK_FUNC_LIST_ADDRESS + tmp2 * 4;
-                uc_mem_write(MTK, tmp1 + tmp2 * 4, &tmp3, 4);
+                vm_set_var(tmp1 + tmp2 * 4, tmp3);
             }
         }
         vm_set_call_result(0);
@@ -5746,9 +5750,9 @@ static bool hook_vm_manager_func(u32 address)
         if (tmp1)
         {
             tmp3 = VM_MANAGER_DF_ENGINE_FUNC_LIST_ADDRESS + 8 * 4;
-            uc_mem_write(MTK, tmp1 + 8 * 4, &tmp3, 4);
+            vm_set_var(tmp1 + 8 * 4, tmp3);
             tmp3 = VM_MANAGER_DF_ENGINE_FUNC_LIST_ADDRESS + 10 * 4;
-            uc_mem_write(MTK, tmp1 + 10 * 4, &tmp3, 4);
+            vm_set_var(tmp1 + 10 * 4, tmp3);
         }
         vm_set_call_result(tmp1);
     }
@@ -5764,7 +5768,7 @@ static bool hook_vm_manager_func(u32 address)
         if (tmp1)
         {
             tmp3 = VM_MANAGER_NETAPP_FUNC_LIST_ADDRESS + 60 * 4;
-            uc_mem_write(MTK, tmp1 + 60 * 4, &tmp3, 4);
+            vm_set_var(tmp1 + 60 * 4, tmp3);
         }
         vm_set_call_result(0);
     }
@@ -5793,7 +5797,7 @@ static bool hook_vm_manager_func(u32 address)
         for (tmp2 = 0; tmp2 < 144; tmp2++)
         {
             tmp3 = VM_MANAGER_GAMEOLD_FUNC_LIST_ADDRESS + tmp2 * 4;
-            uc_mem_write(MTK, tmp1 + tmp2 * 4, &tmp3, 4);
+            vm_set_var(tmp1 + tmp2 * 4, tmp3);
         }
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
@@ -5814,7 +5818,7 @@ static bool hook_vm_manager_func(u32 address)
             for (tmp2 = 0; tmp2 < 40; tmp2++)
             {
                 tmp3 = VM_MANAGER_FUNC_LIST_ADDRESS + tmp2 * 4;
-                uc_mem_write(MTK, tmp1 + tmp2 * 4, &tmp3, 4);
+                vm_set_var(tmp1 + tmp2 * 4, tmp3);
             }
         }
         vm_set_call_result(0);
@@ -6061,14 +6065,14 @@ return 4;
     else if (idx == 17)
     {
         // DEBUG_PRINT("[call]Coolbar_GetCoolbarDirPath\n");
-        cbeTextString[0] = '.';
-        cbeTextString[1] = 0;
-        cbeTextString[2] = '/';
-        cbeTextString[3] = 0;
-        cbeTextString[4] = 0;
-        cbeTextString[5] = 0;
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        uc_mem_write(MTK, tmp1, cbeTextString, 6);
+        if (tmp1)
+        {
+            vm_set_var_short(tmp1, '.');
+            vm_set_var_short(tmp1 + 2, '/');
+            vm_set_var_short(tmp1 + 4, 0);
+        }
+        vm_set_call_result(4);
     }
     else if (idx == 18)
     {
@@ -6617,7 +6621,7 @@ static bool hook_vm_memory_manager_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         DEBUG_PRINT("[call]DF_Malloc_IN(%x,%x)\n", tmp1, tmp2);
         tmp3 = vm_malloc(tmp2);
-        uc_mem_write(MTK, tmp1, &tmp3, 4);
+        vm_set_var(tmp1, tmp3);
         tmp1 = 1;
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
     }
@@ -6625,10 +6629,10 @@ static bool hook_vm_memory_manager_func(u32 address)
     {
         DEBUG_PRINT("[call]DF_Free\n");
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        uc_mem_read(MTK, tmp1, &tmp2, 4);
+        tmp2 = vm_get_var(tmp1);
         vm_free(tmp2);
         tmp2 = 0;
-        uc_mem_write(MTK, tmp1, &tmp2, 4);
+        vm_set_var(tmp1, tmp2);
     }
     else if (idx == 4)
     {
@@ -6686,7 +6690,7 @@ static bool hook_vm_memory_manager_func(u32 address)
         DEBUG_PRINT("[call]MF_MallocGmemoryBlock\n");
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp3);
         tmp1 = VM_DreamFactory_MemoryBlock_ADDRESS;
-        uc_mem_read(MTK, tmp1, &tmp2, 4);
+        tmp2 = vm_get_var(tmp1);
         vm_MF_MemoryBlock_Malloc(tmp2, tmp3);
     }
     else if (idx == 13)
@@ -6838,7 +6842,7 @@ static bool hook_vm_manager_lcd_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
         uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
         u16 color;
-        uc_mem_read(MTK, tmp4, &color, 2);
+        color = vm_get_var_short(tmp4);
         vm_readStringGbkByReg(UC_ARM_REG_R1, cbeTextString);
 
         // gbk_to_utf8(cbeTextString, sprintfBuff, mySizeOf(sprintfBuff));
@@ -6854,51 +6858,94 @@ static bool hook_vm_manager_lcd_func(u32 address)
     }
     else if (idx == 12)
     {
-        u32 r0;
+        u32 r0 = 0, r1 = 0;
+        u8 firstChar = 0;
         uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
         uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
         uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
+        bool r0IsString = r0 && uc_mem_read(MTK, r0, &firstChar, 1) == UC_ERR_OK && firstChar != 0;
         u16 color = 0xffff;
-        uc_mem_read(MTK, tmp4 + 16, &color, 2);
-        vm_readStringGbkByReg(UC_ARM_REG_R1, cbeTextString);
-        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
-        int x = vm_lcd_coord_from_reg(tmp2);
-        int y = vm_lcd_coord_from_reg(tmp3);
+        int x = 0;
+        int y = 0;
+        if (r0IsString)
+        {
+            uc_reg_write(MTK, UC_ARM_REG_R0, &r0);
+            vm_readStringGbkByReg(UC_ARM_REG_R0, cbeTextString);
+            color = (u16)vm_get_var(tmp4 + 4);
+            x = vm_lcd_coord_from_reg(r1);
+            y = vm_lcd_coord_from_reg(tmp2);
+        }
+        else
+        {
+            color = vm_get_var_short(tmp4 + 16);
+            vm_readStringGbkByReg(UC_ARM_REG_R1, cbeTextString);
+            x = vm_lcd_coord_from_reg(tmp2);
+            y = vm_lcd_coord_from_reg(tmp3);
+        }
         vm_lcd_draw_current_string(cbeTextString, x, y, color);
         vm_lcd_sync_string_to_vm(cbeTextString, x, y);
         vm_set_call_result(1);
     }
     else if (idx == 13)
     {
-        u32 r0;
+        u32 r0 = 0, r1 = 0;
+        u8 firstChar = 0;
         uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
         uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
         uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
+        bool r0IsString = r0 && uc_mem_read(MTK, r0, &firstChar, 1) == UC_ERR_OK && firstChar != 0;
         u16 color = 0xffff;
-        uc_mem_read(MTK, tmp4 + 16, &color, 2);
-        vm_readStringGbkByReg(UC_ARM_REG_R1, cbeTextString);
-        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
-        int x = vm_lcd_coord_from_reg(tmp2);
-        int y = vm_lcd_coord_from_reg(tmp3);
+        int x = 0;
+        int y = 0;
+        if (r0IsString)
+        {
+            vm_readStringGbkByReg(UC_ARM_REG_R0, cbeTextString);
+            color = (u16)vm_get_var(tmp4 + 4);
+            x = vm_lcd_coord_from_reg(r1);
+            y = vm_lcd_coord_from_reg(tmp2);
+        }
+        else
+        {
+            color = vm_get_var_short(tmp4 + 16);
+            vm_readStringGbkByReg(UC_ARM_REG_R1, cbeTextString);
+            x = vm_lcd_coord_from_reg(tmp2);
+            y = vm_lcd_coord_from_reg(tmp3);
+        }
         vm_lcd_draw_current_string(cbeTextString, x, y, color);
         vm_lcd_sync_string_to_vm(cbeTextString, x, y);
         vm_set_call_result(1);
     }
     else if (idx == 14)
     {
-        u32 r0;
+        u32 r0 = 0, r1 = 0;
+        u8 firstChar = 0;
         uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
         uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
         uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
+        bool r0IsString = r0 && uc_mem_read(MTK, r0, &firstChar, 1) == UC_ERR_OK && firstChar != 0;
         u16 color = 0xffff;
-        uc_mem_read(MTK, tmp4 + 16, &color, 2);
-        vm_readStringGbkByReg(UC_ARM_REG_R1, cbeTextString);
-        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
-        int x = vm_lcd_coord_from_reg(tmp2);
-        int y = vm_lcd_coord_from_reg(tmp3);
+        int x = 0;
+        int y = 0;
+        if (r0IsString)
+        {
+            vm_readStringGbkByReg(UC_ARM_REG_R0, cbeTextString);
+            color = (u16)vm_get_var(tmp4 + 4);
+            x = vm_lcd_coord_from_reg(r1);
+            y = vm_lcd_coord_from_reg(tmp2);
+        }
+        else
+        {
+            color = vm_get_var_short(tmp4 + 16);
+            vm_readStringGbkByReg(UC_ARM_REG_R1, cbeTextString);
+            x = vm_lcd_coord_from_reg(tmp2);
+            y = vm_lcd_coord_from_reg(tmp3);
+        }
         vm_lcd_draw_current_string(cbeTextString, x, y, color);
         vm_lcd_sync_string_to_vm(cbeTextString, x, y);
         vm_set_call_result(1);
@@ -6911,7 +6958,7 @@ static bool hook_vm_manager_lcd_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
         uc_reg_read(MTK, UC_ARM_REG_SP, &tmp5);
         u16 color = 0xffff;
-        uc_mem_read(MTK, tmp5, &color, 2);
+        color = vm_get_var_short(tmp5);
         int x0 = vm_lcd_coord_from_reg(tmp1);
         int y0 = vm_lcd_coord_from_reg(tmp2);
         int x1 = vm_lcd_coord_from_reg(tmp3);
@@ -6957,8 +7004,8 @@ static bool hook_vm_manager_lcd_func(u32 address)
         }
         else
         {
-            uc_mem_read(MTK, tmp5, &rectH, 4);
-            uc_mem_read(MTK, tmp5 + 4, &rectColor, 4);
+            rectH = vm_get_var(tmp5);
+            rectColor = vm_get_var(tmp5 + 4);
             x = vm_lcd_coord_from_reg(tmp1);
             y = vm_lcd_coord_from_reg(tmp2);
             w = vm_lcd_coord_from_reg(tmp3);
@@ -7005,11 +7052,11 @@ static bool hook_vm_manager_lcd_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
         uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
         uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
-            uc_mem_read(MTK, tmp4, &rectH, 4);
-            uc_mem_read(MTK, tmp4 + 4, &rectColor, 4);
-        uc_mem_read(MTK, dstImage, &dstPixels, 4);
-        uc_mem_read(MTK, dstImage + 4, &dstW, 2);
-        uc_mem_read(MTK, dstImage + 6, &dstH, 2);
+            rectH = vm_get_var(tmp4);
+            rectColor = vm_get_var(tmp4 + 4);
+        dstPixels = vm_get_var(dstImage);
+        dstW = vm_get_var_short(dstImage + 4);
+        dstH = vm_get_var_short(dstImage + 6);
         if (dstImage == VM_screenImageStruct_ADDRESS || dstPixels == 0 || dstW == 0 || dstH == 0 || dstW > LCD_WIDTH || dstH > LCD_HEIGHT)
         {
             dstPixels = VM_screenImage_ADDRESS;
@@ -7071,8 +7118,8 @@ static bool hook_vm_manager_lcd_func(u32 address)
         }
         else
         {
-            uc_mem_read(MTK, tmp5, &fillH, 4);
-            uc_mem_read(MTK, tmp5 + 4, &fillColor, 4);
+            fillH = vm_get_var(tmp5);
+            fillColor = vm_get_var(tmp5 + 4);
             x = vm_lcd_coord_from_reg(tmp1);
             y = vm_lcd_coord_from_reg(tmp2);
             w = vm_lcd_coord_from_reg(tmp3);
@@ -7100,8 +7147,8 @@ static bool hook_vm_manager_lcd_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
         uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
         uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
-        uc_mem_read(MTK, tmp4, &fillH, 4);
-        uc_mem_read(MTK, tmp4 + 4, &fillColor, 4);
+        fillH = vm_get_var(tmp4);
+        fillColor = vm_get_var(tmp4 + 4);
 
         if (vm_lcd_looks_like_fillrect_compat(dstImage, tmp1, tmp2, tmp3))
         {
@@ -7126,9 +7173,9 @@ static bool hook_vm_manager_lcd_func(u32 address)
             return true;
         }
 
-        uc_mem_read(MTK, dstImage, &dstPixels, 4);
-        uc_mem_read(MTK, dstImage + 4, &dstW, 2);
-        uc_mem_read(MTK, dstImage + 6, &dstH, 2);
+        dstPixels = vm_get_var(dstImage);
+        dstW = vm_get_var_short(dstImage + 4);
+        dstH = vm_get_var_short(dstImage + 6);
         if (dstImage == VM_screenImageStruct_ADDRESS || dstPixels == 0 || dstW == 0 || dstH == 0 || dstW > LCD_WIDTH || dstH > LCD_HEIGHT)
         {
             dstPixels = VM_screenImage_ADDRESS;
@@ -7236,7 +7283,7 @@ static bool hook_vm_manager_lcd_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         u16 width = 0;
         if (tmp1)
-            uc_mem_read(MTK, tmp1 + 4, &width, 2);
+            width = vm_get_var_short(tmp1 + 4);
         vm_set_call_result(width);
     }
     else if (idx == 35)
@@ -7244,7 +7291,7 @@ static bool hook_vm_manager_lcd_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         u16 height = 0;
         if (tmp1)
-            uc_mem_read(MTK, tmp1 + 6, &height, 2);
+            height = vm_get_var_short(tmp1 + 6);
         vm_set_call_result(height);
     }
     else if (idx == 36)
@@ -7610,6 +7657,24 @@ static bool hook_vm_manager_fileio_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
+    u32 rel = address - VM_MANAGER_FILEIO_FUNC_LIST_ADDRESS;
+    if (rel == 0x80 || rel == 0x11c || rel == 0x11e)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+
+        if (tmp2 && tmp3)
+        {
+            u32 clearLen = tmp3 > 0x260 ? 0x260 : tmp3;
+            uc_mem_write(MTK, tmp2, emptyBuff, clearLen);
+            vm_set_var(tmp2 + 4, 0xfedb1234);
+        }
+        vm_set_call_result(0);
+    }
+    else
+    {
     u32 idx = (address - VM_MANAGER_FILEIO_FUNC_LIST_ADDRESS) / 4;
     idx += 1;
     if (idx == 1)
@@ -7785,11 +7850,11 @@ static bool hook_vm_manager_fileio_func(u32 address)
         printf("[call]vm_get_fullname\n");
         assert(0);
     }
-
     else
     {
         printf("[impl]vmFileIoManager调用位置:%d\n", idx);
         assert(0);
+    }
     }
     // bx lr实现
     uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
@@ -8272,8 +8337,8 @@ static bool hook_vm_manager_game_util_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
         uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
         uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
-        uc_mem_read(MTK, sp + 0x0, &tmp5, 4);
-        uc_mem_read(MTK, sp + 0x4, &sp, 4);
+        tmp5 = vm_get_var(sp + 0x0);
+        sp = vm_get_var(sp + 0x4);
         vm_set_call_result(vm_cd_rect_point(tmp1, tmp2, tmp3, tmp4, tmp5, sp));
     }
     else if (idx == 9)
@@ -8284,12 +8349,12 @@ static bool hook_vm_manager_game_util_func(u32 address)
     else if (idx == 10)
     {
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        uc_mem_write(MTK, VM_DreamFactory_DataPackage_ADDRESS, &tmp1, 4);
+        vm_set_var(VM_DreamFactory_DataPackage_ADDRESS, tmp1);
         vm_set_call_result(0);
     }
     else if (idx == 11)
     {
-        uc_mem_read(MTK, VM_DreamFactory_DataPackage_ADDRESS, &tmp1, 4);
+        tmp1 = vm_get_var(VM_DreamFactory_DataPackage_ADDRESS);
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
     }
     else if (idx == 12)
@@ -8494,10 +8559,9 @@ static bool hook_vm_manager_df_engine_func(u32 address)
     u32 idx = (address - VM_MANAGER_DF_ENGINE_FUNC_LIST_ADDRESS) / 4;
     if (idx == 8)
     {
-        tmp1 = 0;
-        uc_mem_write(MTK, VM_DreamFactory_DataPackage_ADDRESS, &tmp1, 4);
+        vm_set_var(VM_DreamFactory_DataPackage_ADDRESS, 0);
         tmp1 = VM_MemoryBlock_PTR_ADDRESS;
-        uc_mem_write(MTK, VM_DreamFactory_MemoryBlock_ADDRESS, &tmp1, 4);
+        vm_set_var(VM_DreamFactory_MemoryBlock_ADDRESS, tmp1);
         vm_set_call_result(0);
     }
     else if (idx == 10)
@@ -8980,9 +9044,9 @@ static bool hook_vm_manager_screen_func(u32 address)
     if (idx == 0)
     {
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        uc_mem_write(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &tmp1, 4);
+        vm_set_var(VM_SCREEN_nextSubTScreen_ADDRESS, tmp1);
         tmp2 = 0;
-        uc_mem_write(MTK, VM_SCREEN_isInQuit_ADDRESS, &tmp2, 4);
+        vm_set_var(VM_SCREEN_isInQuit_ADDRESS, tmp2);
         screenStructChange = 1;
         g_screenRemovedWithoutNext = 0;
         vm_set_call_result(VM_SCREEN_isInQuit_ADDRESS);
@@ -8997,9 +9061,9 @@ static bool hook_vm_manager_screen_func(u32 address)
         {
             vm_autotest_note("screen_mgr idx=2 type=replace caller=%08x screen=%08x added=%08x r1=%08x r2=%08x r3=%08x\n",
                              lastAddress, tmp1, vmAddedScreen, tmp2, tmp3, tmp4);
-            uc_mem_write(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &tmp1, 4);
+            vm_set_var(VM_SCREEN_nextSubTScreen_ADDRESS, tmp1);
             tmp2 = 0;
-            uc_mem_write(MTK, VM_SCREEN_isInQuit_ADDRESS, &tmp2, 4);
+            vm_set_var(VM_SCREEN_isInQuit_ADDRESS, tmp2);
             screenStructChange = 1;
             g_screenRemovedWithoutNext = 0;
         }
@@ -9057,9 +9121,9 @@ static bool hook_vm_manager_screen_func(u32 address)
                     }
                     vm_autotest_note("screen_mgr idx=2 type=same caller=%08x screen=%08x added=%08x r1=%08x r2=%08x r3=%08x\n",
                                      lastAddress, tmp1, vmAddedScreen, tmp2, tmp3, tmp4);
-                    uc_mem_write(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &tmp1, 4);
+                    vm_set_var(VM_SCREEN_nextSubTScreen_ADDRESS, tmp1);
                     tmp2 = 0;
-                    uc_mem_write(MTK, VM_SCREEN_isInQuit_ADDRESS, &tmp2, 4);
+                    vm_set_var(VM_SCREEN_isInQuit_ADDRESS, tmp2);
                     screenStructChange = 1;
                     g_screenRemovedWithoutNext = 0;
                 }
@@ -9090,7 +9154,7 @@ static bool hook_vm_manager_screen_func(u32 address)
             g_currentScreenModuleBase = moduleBase;
         }
         u32 startupObj = 0;
-        uc_mem_read(MTK, Global_R9 + 0x9928 + 0x10, &startupObj, 4);
+        startupObj = vm_get_var(Global_R9 + 0x9928 + 0x10);
         if (startupObj == 0 && tmp1 != 0 && g_lastStartupScreenState != 0xff)
         {
             /* Firmware's screen manager maintains a focused screen stack.  The
@@ -9098,8 +9162,8 @@ static bool hook_vm_manager_screen_func(u32 address)
              * vmAddScreen promotes the newly added screen to the active slot.
              */
             tmp2 = 0;
-            uc_mem_write(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &tmp1, 4);
-            uc_mem_write(MTK, VM_SCREEN_isInQuit_ADDRESS, &tmp2, 4);
+            vm_set_var(VM_SCREEN_nextSubTScreen_ADDRESS, tmp1);
+            vm_set_var(VM_SCREEN_isInQuit_ADDRESS, tmp2);
             screenStructChange = 1;
             g_screenRemovedWithoutNext = 0;
         }
@@ -9137,8 +9201,8 @@ static bool hook_vm_manager_screen_func(u32 address)
             g_currentScreenThis = tmp3 - 0x18;
             g_currentScreenModuleBase = tmp5;
             u32 isInQuit = 0;
-            uc_mem_write(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &tmp3, 4);
-            uc_mem_write(MTK, VM_SCREEN_isInQuit_ADDRESS, &isInQuit, 4);
+            vm_set_var(VM_SCREEN_nextSubTScreen_ADDRESS, tmp3);
+            vm_set_var(VM_SCREEN_isInQuit_ADDRESS, isInQuit);
             screenStructChange = 1;
             g_screenRemovedWithoutNext = 0;
         }
@@ -9566,8 +9630,8 @@ static bool hook_vm_manager_gameold_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
         uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
         uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
-        uc_mem_read(MTK, sp + 0x0, &tmp5, 4);
-        uc_mem_read(MTK, sp + 0x4, &sp, 4);
+        tmp5 = vm_get_var(sp + 0x0);
+        sp = vm_get_var(sp + 0x4);
         vm_set_call_result(vm_cd_rect_point(tmp1, tmp2, tmp3, tmp4, tmp5, sp));
     }
     else if (idx == 58)
@@ -9597,12 +9661,12 @@ static bool hook_vm_manager_gameold_func(u32 address)
         // MEMORY:016E4394 DCD 0x16C4D3B Remuse
         // MEMORY:016E4398 DCD 0x16C4D2D LoadResource
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        uc_mem_write(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &tmp1, 4);
-        uc_mem_read(MTK, tmp1 + 8, &tmp2, 4);
+        vm_set_var(VM_SCREEN_nextSubTScreen_ADDRESS, tmp1);
+        tmp2 = vm_get_var(tmp1 + 8);
         DEBUG_PRINT("[call]SCREEN_ChangeScreen(%x)\n", tmp1);
         tmp1 = VM_SCREEN_isInQuit_ADDRESS;
         tmp2 = 0;
-        uc_mem_write(MTK, VM_SCREEN_isInQuit_ADDRESS, &tmp2, 4);
+        vm_set_var(VM_SCREEN_isInQuit_ADDRESS, tmp2);
         screenStructChange = 1;
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
     }
@@ -9614,13 +9678,13 @@ static bool hook_vm_manager_gameold_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
         if (screenPtr)
         {
-            uc_mem_read(MTK, screenPtr + 0x00, &entry0, 4);
-            uc_mem_read(MTK, screenPtr + 0x04, &entry4, 4);
-            uc_mem_read(MTK, screenPtr + 0x08, &entry8, 4);
-            uc_mem_read(MTK, screenPtr + 0x0c, &entry12, 4);
-            uc_mem_read(MTK, screenPtr + 0x10, &entry16, 4);
-            uc_mem_read(MTK, screenPtr + 0x14, &entry20, 4);
-            uc_mem_read(MTK, screenPtr + 0x18, &entry24, 4);
+            entry0 = vm_get_var(screenPtr + 0x00);
+            entry4 = vm_get_var(screenPtr + 0x04);
+            entry8 = vm_get_var(screenPtr + 0x08);
+            entry12 = vm_get_var(screenPtr + 0x0c);
+            entry16 = vm_get_var(screenPtr + 0x10);
+            entry20 = vm_get_var(screenPtr + 0x14);
+            entry24 = vm_get_var(screenPtr + 0x18);
         }
         screenStructNotifyLoadRes = 1;
         DEBUG_PRINT("[call]SCREEN_NotifyLoadResource(entry:0x%x)\n", tmp2);
@@ -9671,23 +9735,23 @@ static bool hook_vm_manager_gameold_func(u32 address)
     {
         // DreamFactory_DataPackage = 0;
         tmp1 = 0;
-        uc_mem_write(MTK, VM_DreamFactory_DataPackage_ADDRESS, &tmp1, 4);
+        vm_set_var(VM_DreamFactory_DataPackage_ADDRESS, tmp1);
         // MemoryBlockPtr = (int (*)())getMemoryBlockPtr();
         // DreamFactory_MemoryBlock = MemoryBlockPtr;
         tmp1 = VM_MemoryBlock_PTR_ADDRESS;
-        uc_mem_write(MTK, VM_DreamFactory_MemoryBlock_ADDRESS, &tmp1, 4);
+        vm_set_var(VM_DreamFactory_MemoryBlock_ADDRESS, tmp1);
         DEBUG_PRINT("[call]initDreamFactoryEngine\n");
     }
     else if (idx == 82)
     {
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        uc_mem_write(MTK, VM_DreamFactory_DataPackage_ADDRESS, &tmp1, 4);
+        vm_set_var(VM_DreamFactory_DataPackage_ADDRESS, tmp1);
         DEBUG_PRINT("[call]DF_SetDataPackage(%x)\n", tmp1);
     }
     else if (idx == 83)
     {
         DEBUG_PRINT("[call]DF_GetDataPackage\n");
-        uc_mem_read(MTK, VM_DreamFactory_DataPackage_ADDRESS, &tmp1, 4);
+        tmp1 = vm_get_var(VM_DreamFactory_DataPackage_ADDRESS);
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
     }
     else if (idx == 84)

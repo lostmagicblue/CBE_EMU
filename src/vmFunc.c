@@ -116,8 +116,13 @@ inline u32 vm_malloc_var()
 
 inline u32 vm_get_var(u32 addr)
 {
+    u8 b[4];
     u32 a;
-    uc_mem_read(MTK, addr, &a, 4);
+    uc_mem_read(MTK, addr, b, 4);
+    if (g_cbeInfo.isBiggianProgram)
+        a = ((u32)b[0] << 24) | ((u32)b[1] << 16) | ((u32)b[2] << 8) | (u32)b[3];
+    else
+        a = ((u32)b[3] << 24) | ((u32)b[2] << 16) | ((u32)b[1] << 8) | (u32)b[0];
     return a;
 }
 inline u8 vm_get_var_byte(u32 addr)
@@ -133,18 +138,49 @@ inline void vm_set_var_byte(u32 addr, u8 v)
 
 inline void vm_set_var(u32 addr, u32 v)
 {
-    uc_mem_write(MTK, addr, &v, 4);
+    u8 b[4];
+    if (g_cbeInfo.isBiggianProgram)
+    {
+        b[0] = (u8)(v >> 24);
+        b[1] = (u8)(v >> 16);
+        b[2] = (u8)(v >> 8);
+        b[3] = (u8)v;
+    }
+    else
+    {
+        b[0] = (u8)v;
+        b[1] = (u8)(v >> 8);
+        b[2] = (u8)(v >> 16);
+        b[3] = (u8)(v >> 24);
+    }
+    uc_mem_write(MTK, addr, b, 4);
 }
 inline u16 vm_get_var_short(u32 addr)
 {
+    u8 b[2];
     u16 a;
-    uc_mem_read(MTK, addr, &a, 2);
+    uc_mem_read(MTK, addr, b, 2);
+    if (g_cbeInfo.isBiggianProgram)
+        a = (u16)(((u16)b[0] << 8) | b[1]);
+    else
+        a = (u16)(((u16)b[1] << 8) | b[0]);
     return a;
 }
 
 inline void vm_set_var_short(u32 addr, u16 v)
 {
-    uc_mem_write(MTK, addr, &v, 2);
+    u8 b[2];
+    if (g_cbeInfo.isBiggianProgram)
+    {
+        b[0] = (u8)(v >> 8);
+        b[1] = (u8)v;
+    }
+    else
+    {
+        b[0] = (u8)v;
+        b[1] = (u8)(v >> 8);
+    }
+    uc_mem_write(MTK, addr, b, 2);
 }
 
 inline void vm_free_var(u32 addr)
@@ -701,7 +737,9 @@ int vm_cbfs_vm_file_read(int bufferPtr, int size, int handle)
     u32 r1 = 0;
     u32 r2 = 0;
     u32 r3 = 0;
-    if (handle < 0 || handle >= 16 || openFileList[handle] == NULL || size <= 0)
+    if (size <= 0)
+        return vm_set_call_result(0);
+    if (handle < 0 || handle >= 16 || openFileList[handle] == NULL)
         return vm_set_call_result(-1);
     if (openFileList[handle] == VM_PSEUDO_DIR_HANDLE)
         return vm_set_call_result(0);
@@ -1872,6 +1910,7 @@ void vm_sprintf_return_buffer()
     int i, paramPos, needConvert, tmp4, currParam, inBufferPtr, strCount, strCnt2;
     u8 charBuffer[1024];
     u8 spBuffer[1024];
+    u8 outBuffer[1024];
     uc_reg_read(MTK, UC_ARM_REG_R0, &inBufferPtr);
     vm_readStringByReg(UC_ARM_REG_R1, charBuffer);
     strCount = strlen(charBuffer);
@@ -1896,44 +1935,76 @@ void vm_sprintf_return_buffer()
         {
             if (needConvert)
             {
-                if (paramPos < 2)
+                char fmtBuffer[32];
+                int fmtLen = 0;
+                char spec = 0;
+                fmtBuffer[fmtLen++] = '%';
+                while (c)
                 {
-                    uc_reg_read(MTK, UC_ARM_REG_R2 + paramPos, &currParam);
+                    if (fmtLen < (int)sizeof(fmtBuffer) - 1)
+                        fmtBuffer[fmtLen++] = (char)c;
+                    if (strchr("diuoxXcsp%", c))
+                    {
+                        spec = (char)c;
+                        break;
+                    }
+                    if (!(c == '0' || c == '-' || c == '+' || c == ' ' || c == '#' ||
+                          c == '.' || c == 'l' || c == 'h' || (c >= '1' && c <= '9')))
+                    {
+                        spec = (char)c;
+                        break;
+                    }
+                    c = charBuffer[i++];
                 }
-                else
-                { // 从栈顶读取参数
-                    uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
-                    uc_mem_read(MTK, tmp4 + (paramPos - 2) * 4, &currParam, 4);
-                }
+                fmtBuffer[fmtLen] = 0;
 
-                if (c == 's')
+                if (spec == '%')
                 {
-                    vm_readStringByPtr(currParam, spBuffer);
-                    strCnt2 = strlen(spBuffer);
-                    uc_mem_write(MTK, inBufferPtr, spBuffer, strCnt2);
-                    inBufferPtr += strCnt2;
-                }
-                else if (c == 'x')
-                {
-                    sprintf(spBuffer, "%x", currParam);
-                    strCnt2 = strlen(spBuffer);
-                    uc_mem_write(MTK, inBufferPtr, spBuffer, strCnt2);
-                    inBufferPtr += strCnt2;
-                }
-                else if (c == 'd')
-                {
-                    sprintf(spBuffer, "%d", currParam);
-                    strCnt2 = strlen(spBuffer);
-                    uc_mem_write(MTK, inBufferPtr, spBuffer, strCnt2);
-                    inBufferPtr += strCnt2;
+                    outBuffer[0] = '%';
+                    strCnt2 = 1;
                 }
                 else
                 {
-                    printf("未处理的格式化：%%%c\n", c);
-                    assert(0);
+                    if (paramPos < 2)
+                    {
+                        uc_reg_read(MTK, UC_ARM_REG_R2 + paramPos, &currParam);
+                    }
+                    else
+                    { // 从栈顶读取参数
+                        uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
+                        currParam = vm_get_var(tmp4 + (paramPos - 2) * 4);
+                    }
+
+                    if (spec == 's')
+                    {
+                        vm_readStringByPtr(currParam, spBuffer);
+                        strCnt2 = snprintf((char *)outBuffer, sizeof(outBuffer), fmtBuffer, spBuffer);
+                    }
+                    else if (spec == 'x' || spec == 'X' || spec == 'u' || spec == 'o' || spec == 'p')
+                    {
+                        strCnt2 = snprintf((char *)outBuffer, sizeof(outBuffer), fmtBuffer, (u32)currParam);
+                    }
+                    else if (spec == 'd')
+                    {
+                        strCnt2 = snprintf((char *)outBuffer, sizeof(outBuffer), fmtBuffer, (int)currParam);
+                    }
+                    else if (spec == 'c')
+                    {
+                        strCnt2 = snprintf((char *)outBuffer, sizeof(outBuffer), fmtBuffer, currParam & 0xff);
+                    }
+                    else
+                    {
+                        strCnt2 = snprintf((char *)outBuffer, sizeof(outBuffer), "%%%c", spec ? spec : c);
+                    }
+                    paramPos++;
                 }
+                if (strCnt2 < 0)
+                    strCnt2 = 0;
+                if (strCnt2 >= (int)sizeof(outBuffer))
+                    strCnt2 = sizeof(outBuffer) - 1;
+                uc_mem_write(MTK, inBufferPtr, outBuffer, strCnt2);
+                inBufferPtr += strCnt2;
                 needConvert = 0;
-                paramPos++;
             }
             else
             {
@@ -1951,6 +2022,7 @@ void vm_DF_GetFormatString()
     int i, paramPos, needConvert, tmp4, currParam, strCount, strCnt2;
     u8 charBuffer[1024];
     u8 spBuffer[1024];
+    u8 outBuffer[1024];
     vm_readStringByReg(UC_ARM_REG_R0, charBuffer);
     strCount = strlen(charBuffer);
     i = 0;
@@ -1975,44 +2047,76 @@ void vm_DF_GetFormatString()
         {
             if (needConvert)
             {
-                if (paramPos < 3)
+                char fmtBuffer[32];
+                int fmtLen = 0;
+                char spec = 0;
+                fmtBuffer[fmtLen++] = '%';
+                while (c)
                 {
-                    uc_reg_read(MTK, UC_ARM_REG_R1 + paramPos, &currParam);
+                    if (fmtLen < (int)sizeof(fmtBuffer) - 1)
+                        fmtBuffer[fmtLen++] = (char)c;
+                    if (strchr("diuoxXcsp%", c))
+                    {
+                        spec = (char)c;
+                        break;
+                    }
+                    if (!(c == '0' || c == '-' || c == '+' || c == ' ' || c == '#' ||
+                          c == '.' || c == 'l' || c == 'h' || (c >= '1' && c <= '9')))
+                    {
+                        spec = (char)c;
+                        break;
+                    }
+                    c = charBuffer[i++];
                 }
-                else
-                { // 从栈顶读取参数
-                    uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
-                    uc_mem_read(MTK, tmp4 + (paramPos - 2) * 4, &currParam, 4);
-                }
+                fmtBuffer[fmtLen] = 0;
 
-                if (c == 's')
+                if (spec == '%')
                 {
-                    vm_readStringByPtr(currParam, spBuffer);
-                    strCnt2 = strlen(spBuffer);
-                    uc_mem_write(MTK, inBufferPtr, spBuffer, strCnt2);
-                    inBufferPtr += strCnt2;
-                }
-                else if (c == 'x')
-                {
-                    sprintf(spBuffer, "%x", currParam);
-                    strCnt2 = strlen(spBuffer);
-                    uc_mem_write(MTK, inBufferPtr, spBuffer, strCnt2);
-                    inBufferPtr += strCnt2;
-                }
-                else if (c == 'd')
-                {
-                    sprintf(spBuffer, "%d", currParam);
-                    strCnt2 = strlen(spBuffer);
-                    uc_mem_write(MTK, inBufferPtr, spBuffer, strCnt2);
-                    inBufferPtr += strCnt2;
+                    outBuffer[0] = '%';
+                    strCnt2 = 1;
                 }
                 else
                 {
-                    printf("未处理的格式化：%%%c\n", c);
-                    assert(0);
+                    if (paramPos < 3)
+                    {
+                        uc_reg_read(MTK, UC_ARM_REG_R1 + paramPos, &currParam);
+                    }
+                    else
+                    { // 从栈顶读取参数
+                        uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
+                        currParam = vm_get_var(tmp4 + (paramPos - 3) * 4);
+                    }
+
+                    if (spec == 's')
+                    {
+                        vm_readStringByPtr(currParam, spBuffer);
+                        strCnt2 = snprintf((char *)outBuffer, sizeof(outBuffer), fmtBuffer, spBuffer);
+                    }
+                    else if (spec == 'x' || spec == 'X' || spec == 'u' || spec == 'o' || spec == 'p')
+                    {
+                        strCnt2 = snprintf((char *)outBuffer, sizeof(outBuffer), fmtBuffer, (u32)currParam);
+                    }
+                    else if (spec == 'd')
+                    {
+                        strCnt2 = snprintf((char *)outBuffer, sizeof(outBuffer), fmtBuffer, (int)currParam);
+                    }
+                    else if (spec == 'c')
+                    {
+                        strCnt2 = snprintf((char *)outBuffer, sizeof(outBuffer), fmtBuffer, currParam & 0xff);
+                    }
+                    else
+                    {
+                        strCnt2 = snprintf((char *)outBuffer, sizeof(outBuffer), "%%%c", spec ? spec : c);
+                    }
+                    paramPos++;
                 }
+                if (strCnt2 < 0)
+                    strCnt2 = 0;
+                if (strCnt2 >= (int)sizeof(outBuffer))
+                    strCnt2 = sizeof(outBuffer) - 1;
+                uc_mem_write(MTK, inBufferPtr, outBuffer, strCnt2);
+                inBufferPtr += strCnt2;
                 needConvert = 0;
-                paramPos++;
             }
             else
             {
@@ -2030,7 +2134,7 @@ void vm_DF_GetFormatString()
 void vm_DF_GetMemoryBlock()
 {
     u32 tmp1;
-    uc_mem_read(MTK, VM_DreamFactory_MemoryBlock_ADDRESS, &tmp1, 4);
+    tmp1 = vm_get_var(VM_DreamFactory_MemoryBlock_ADDRESS);
     return vm_set_call_result(tmp1);
 }
 // ok
@@ -2040,19 +2144,19 @@ void vm_initMemoryBlock(p_g_memoryBlock, size)
     // p_g_memoryBlock[0] = 新的内存块地址。全局块使用固定池；其它块需要独立
     // backing storage，避免多个 MemoryBlock 互相覆盖 actor/资源解析结果。
     tmp1 = (p_g_memoryBlock == VM_MemoryBlock_PTR_ADDRESS) ? VM_MF_MemoryBlock_POOL_ADDRESS : vm_malloc(size);
-    uc_mem_write(MTK, p_g_memoryBlock, &tmp1, 4);
+    vm_set_var(p_g_memoryBlock, tmp1);
     // p_g_memoryBlock[1] = offset
     tmp1 = 0;
-    uc_mem_write(MTK, p_g_memoryBlock + 4, &tmp1, 4);
+    vm_set_var(p_g_memoryBlock + 4, tmp1);
     // p_g_memoryBlock[2] = size
-    uc_mem_write(MTK, p_g_memoryBlock + 8, &size, 4);
+    vm_set_var(p_g_memoryBlock + 8, size);
     // p_g_memoryBlock[3] = MF_MemoryBlock_Malloc;
     // p_g_memoryBlock[4] = MF_MemoryBlock_Reset;
     // p_g_memoryBlock[5] = MF_MemoryBlock_Release;
     for (tmp3 = 3; tmp3 < 6; tmp3++)
     {
         tmp4 = VM_MF_MemoryBlock_FUNC_LIST_ADDRESS + (tmp3 - 3) * 4;
-        uc_mem_write(MTK, p_g_memoryBlock + tmp3 * 4, &tmp4, 4);
+        vm_set_var(p_g_memoryBlock + tmp3 * 4, tmp4);
     }
 }
 // ok
@@ -2061,9 +2165,9 @@ u32 vm_MF_MemoryBlock_Malloc(int a1, int a2)
 {
     u32 baseAddr, offset, size, oldOffset;
     // mpcmdFreeShareMemIn
-    uc_mem_read(MTK, a1, &baseAddr, 4);      //->base
-    uc_mem_read(MTK, a1 + 4, &oldOffset, 4); //->offset
-    uc_mem_read(MTK, a1 + 8, &size, 4);      //->offset
+    baseAddr = vm_get_var(a1);      //->base
+    oldOffset = vm_get_var(a1 + 4); //->offset
+    size = vm_get_var(a1 + 8);      //->offset
     u32 alignedSize = (a2 + 3) & ~3;
     offset = oldOffset + alignedSize;
     if (offset > size)
@@ -2072,7 +2176,7 @@ u32 vm_MF_MemoryBlock_Malloc(int a1, int a2)
         dumpCpuInfo();
         assert(0);
     }
-    uc_mem_write(MTK, a1 + 4, &offset, 4);
+    vm_set_var(a1 + 4, offset);
     return vm_set_call_result(baseAddr + oldOffset);
     // printf("[call]MF_MemoryBlock_Malloc(%x,%x)(%x)\n", baseAddr, a2, oldOffset);
 }
@@ -2080,7 +2184,7 @@ u32 vm_MF_MemoryBlock_Malloc(int a1, int a2)
 void vm_MF_MemoryBlock_Reset(int a1)
 {
     u32 v = 0;
-    uc_mem_write(MTK, a1 + 4, &v, 4); // offset重置为0
+    vm_set_var(a1 + 4, v); // offset重置为0
     return vm_set_call_result(v);
 }
 void vm_MF_MemoryBlock_Release(int a1)
@@ -2351,7 +2455,7 @@ int vm_DF_DataPackage_GetFileNameByID(int a1, int a2)
 u32 vm_DF_GetResourceIDByFileName(int a1)
 {
     u32 tmp1;
-    uc_mem_read(MTK, VM_DreamFactory_DataPackage_ADDRESS, &tmp1, 4);
+    tmp1 = vm_get_var(VM_DreamFactory_DataPackage_ADDRESS);
     if (tmp1)
         return vm_DF_DataPackage_GetFileID(tmp1, a1);
     else
@@ -2361,7 +2465,7 @@ u32 vm_DF_GetResourceIDByFileName(int a1)
 int vm_DF_GetResourceByFileName(int a1)
 {
     int tmp1;
-    uc_mem_read(MTK, VM_DreamFactory_DataPackage_ADDRESS, &tmp1, 4);
+    tmp1 = vm_get_var(VM_DreamFactory_DataPackage_ADDRESS);
     if (tmp1)
         return vm_DF_DataPackage_GetFile(tmp1, a1);
     else
@@ -2371,7 +2475,7 @@ int vm_DF_GetResourceByFileName(int a1)
 int vm_DF_GetResourceByResourceID(int a1)
 {
     int tmp1;
-    uc_mem_read(MTK, VM_DreamFactory_DataPackage_ADDRESS, &tmp1, 4);
+    tmp1 = vm_get_var(VM_DreamFactory_DataPackage_ADDRESS);
     if (tmp1)
         return vm_DF_DataPackage_GetFileByID(tmp1, a1);
     else
@@ -2381,7 +2485,7 @@ int vm_DF_GetResourceByResourceID(int a1)
 void vm_DF_GetResourceNameByID(int a1)
 {
     int tmp1;
-    uc_mem_read(MTK, VM_DreamFactory_DataPackage_ADDRESS, &tmp1, 4);
+    tmp1 = vm_get_var(VM_DreamFactory_DataPackage_ADDRESS);
     if (tmp1)
         return vm_DF_DataPackage_GetFileNameByID(tmp1, a1);
     else
@@ -2392,7 +2496,7 @@ int vm_DF_GetTResource(int a1)
     u32 DreamFactoryResourceBuffer; // r0
     // todo DF_FactoryCharB_Init();
     DreamFactoryResourceBuffer = vm_DF_GetResourceByFileName(a1);
-    uc_mem_write(MTK, VM_DreamFactoryResourceBuffer_ADDRESS, &DreamFactoryResourceBuffer, 4);
+    vm_set_var(VM_DreamFactoryResourceBuffer_ADDRESS, DreamFactoryResourceBuffer);
     return DreamFactoryResourceBuffer;
 }
 
@@ -2401,14 +2505,13 @@ int vm_IMG_Destory(u32 a1)
     u32 n3 = 0;
     u32 ptr = 0;
     u32 zero = 0;
-    uc_engine *uc = MTK;
     // n3 = *(uint8 *)(a1 + 8)
-    uc_mem_read(uc, a1 + 8, &n3, 1);
+    n3 = vm_get_var_byte(a1 + 8);
 
     if (n3 == 1 || n3 == 3 || n3 == 4)
     {
         // ptr = *(uint32 *)a1
-        uc_mem_read(uc, a1, &ptr, 4);
+        ptr = vm_get_var(a1);
 
         if (ptr)
         {
@@ -2416,7 +2519,7 @@ int vm_IMG_Destory(u32 a1)
         }
 
         // *(uint32 *)a1 = 0
-        uc_mem_write(uc, a1, &zero, 4);
+        vm_set_var(a1, zero);
 
         if (!a1)
         {
@@ -2427,9 +2530,7 @@ int vm_IMG_Destory(u32 a1)
         n3 = 0;
 
         // 清空结构
-        uc_mem_write(uc, a1, &zero, 4);
-        uc_mem_write(uc, a1 + 4, &zero, 4);
-        uc_mem_write(uc, a1 + 8, &zero, 4);
+        uc_mem_write(MTK, a1, emptyBuff, 12);
     }
     return vm_set_call_result(n3);
 }
@@ -2441,6 +2542,17 @@ typedef struct {
     u16 height;   // at offset +6
 } ImageHeader;
 */
+static void vm_IMG_WriteResult(u32 resultPtr, u32 pixelsPtr, u16 width, u16 height, u8 needFree)
+{
+    if (!resultPtr)
+        return;
+    uc_mem_write(MTK, resultPtr, emptyBuff, 12);
+    vm_set_var(resultPtr, pixelsPtr);
+    vm_set_var_short(resultPtr + 4, width);
+    vm_set_var_short(resultPtr + 6, height);
+    vm_set_var_byte(resultPtr + 8, needFree);
+}
+
 void vM_DrawImageWithClipEx()
 {
     int dstInfo, srcInfo, srcX, srcY, w, h, dstX, dstY, sp, dstPtr, srcPtr;
@@ -2450,16 +2562,16 @@ void vM_DrawImageWithClipEx()
     uc_reg_read(MTK, UC_ARM_REG_R2, &srcX);
     uc_reg_read(MTK, UC_ARM_REG_R3, &srcY);
     uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
-    uc_mem_read(MTK, sp, &w, 4);
-    uc_mem_read(MTK, sp + 4, &h, 4);
-    uc_mem_read(MTK, sp + 8, &dstX, 4);
-    uc_mem_read(MTK, sp + 12, &dstY, 4);
-    uc_mem_read(MTK, srcInfo, &srcPtr, 4);
-    uc_mem_read(MTK, srcInfo + 4, &src_w, 2);
-    uc_mem_read(MTK, srcInfo + 6, &src_h, 2);
-    uc_mem_read(MTK, dstInfo, &dstPtr, 4);
-    uc_mem_read(MTK, dstInfo + 4, &dst_w, 2);
-    uc_mem_read(MTK, dstInfo + 6, &dst_h, 2);
+    w = (int)vm_get_var(sp);
+    h = (int)vm_get_var(sp + 4);
+    dstX = (int)vm_get_var(sp + 8);
+    dstY = (int)vm_get_var(sp + 12);
+    srcPtr = (int)vm_get_var(srcInfo);
+    src_w = vm_get_var_short(srcInfo + 4);
+    src_h = vm_get_var_short(srcInfo + 6);
+    dstPtr = (int)vm_get_var(dstInfo);
+    dst_w = vm_get_var_short(dstInfo + 4);
+    dst_h = vm_get_var_short(dstInfo + 6);
     if (dstInfo == VM_screenImageStruct_ADDRESS || dstPtr == 0 || dst_w == 0 || dst_h == 0 || dst_w > LCD_WIDTH || dst_h > LCD_HEIGHT)
     {
         dstPtr = VM_screenImage_ADDRESS;
@@ -2560,16 +2672,16 @@ void vm_vMDrawImageClipAndAlphaEx()
     uc_reg_read(MTK, UC_ARM_REG_R2, &srcX);
     uc_reg_read(MTK, UC_ARM_REG_R3, &srcY);
     uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
-    uc_mem_read(MTK, sp, &w, 4);
-    uc_mem_read(MTK, sp + 4, &h, 4);
-    uc_mem_read(MTK, sp + 8, &dstX, 4);
-    uc_mem_read(MTK, sp + 12, &dstY, 4);
-    uc_mem_read(MTK, srcInfo, &srcPtr, 4);
-    uc_mem_read(MTK, srcInfo + 4, &src_w, 2);
-    uc_mem_read(MTK, srcInfo + 6, &src_h, 2);
-    uc_mem_read(MTK, dstInfo, &dstPtr, 4);
-    uc_mem_read(MTK, dstInfo + 4, &dst_w, 2);
-    uc_mem_read(MTK, dstInfo + 6, &dst_h, 2);
+    w = (int)vm_get_var(sp);
+    h = (int)vm_get_var(sp + 4);
+    dstX = (int)vm_get_var(sp + 8);
+    dstY = (int)vm_get_var(sp + 12);
+    srcPtr = (int)vm_get_var(srcInfo);
+    src_w = vm_get_var_short(srcInfo + 4);
+    src_h = vm_get_var_short(srcInfo + 6);
+    dstPtr = (int)vm_get_var(dstInfo);
+    dst_w = vm_get_var_short(dstInfo + 4);
+    dst_h = vm_get_var_short(dstInfo + 6);
     if (dstInfo == VM_screenImageStruct_ADDRESS || dstPtr == 0 || dst_w == 0 || dst_h == 0 || dst_w > LCD_WIDTH || dst_h > LCD_HEIGHT)
     {
         dstPtr = VM_screenImage_ADDRESS;
@@ -2696,7 +2808,7 @@ int vm_IMG_CreateImageFormStream(u32 a1, u32 a2)
 
     if (!v3)
     {
-        uc_mem_read(MTK, VM_DreamFactory_MemoryBlock_ADDRESS, &tmp32, 4);
+        tmp32 = vm_get_var(VM_DreamFactory_MemoryBlock_ADDRESS);
         v3 = vm_MF_MemoryBlock_Malloc(tmp32, 12);
     }
 
@@ -2739,17 +2851,7 @@ int vm_IMG_CreateImageFormStream(u32 a1, u32 a2)
 
         // *(uint32 *)v3 = a1 + 8
         tmp32 = a1 + 8;
-        uc_mem_write(uc, v3, &tmp32, 4);
-
-        // *(uint16 *)(v3 + 4) = v5
-        uc_mem_write(uc, v3 + 4, &v5, 2);
-
-        // *(uint16 *)(v3 + 6) = v6
-        uc_mem_write(uc, v3 + 6, &v6, 2);
-
-        // *(uint8 *)(v3 + 8) = 0
-        tmp8 = 0;
-        uc_mem_write(uc, v3 + 8, &tmp8, 1);
+        vm_IMG_WriteResult(v3, tmp32, v5, v6, 0);
     }
     return vm_set_call_result(v3);
 }
@@ -2770,29 +2872,17 @@ int vm_gifDecode(int gifBufferPtr, int resultPtr)
         u16 transparent = 0;
         int vmPtr = vm_malloc(sizeof(transparent));
         uc_mem_write(MTK, vmPtr, &transparent, sizeof(transparent));
-        vm_img_result *vr = (vm_img_result *)ret;
-        memset(ret, 0, sizeof(ret));
-        vr->pixelsPtr = vmPtr;
-        vr->width = 1;
-        vr->height = 1;
-        vr->need_free = 1;
         if (p.pixels)
             free_mem(p.pixels);
-        uc_mem_write(MTK, resultPtr, ret, sizeof(vm_img_result));
+        vm_IMG_WriteResult(resultPtr, vmPtr, 1, 1, 1);
         return vm_set_call_result(resultPtr);
     }
 
-    int retSize = sizeof(vm_img_result);
     int vmPtr = vm_malloc(mallocSize);
 
     uc_mem_write(MTK, vmPtr, p.pixels, mallocSize);
-    vm_img_result *vr = (vm_img_result *)ret;
-    vr->height = p.height;
-    vr->pixelsPtr = vmPtr;
-    vr->width = p.width;
-    vr->need_free = 1;
     free_mem(p.pixels);
-    uc_mem_write(MTK, resultPtr, ret, retSize);
+    vm_IMG_WriteResult(resultPtr, vmPtr, (u16)p.width, (u16)p.height, 1);
     return vm_set_call_result(resultPtr);
 }
 
@@ -2861,13 +2951,7 @@ int vm_pngDecodeStart(int pngBufferPtr, int resultPtr)
     SDL_free(rgb565);
     stbi_image_free(rgba);
 
-    vm_img_result ret;
-    memset(&ret, 0, sizeof(ret));
-    ret.pixelsPtr = vmPtr;
-    ret.width = (short)w;
-    ret.height = (short)h;
-    ret.need_free = 1;
-    uc_mem_write(MTK, resultPtr, &ret, sizeof(ret));
+    vm_IMG_WriteResult(resultPtr, vmPtr, (u16)w, (u16)h, 1);
     return vm_set_call_result(resultPtr);
 }
 
@@ -2997,7 +3081,7 @@ void vm_initManagerTable()
 u32 vm_DF_GetDataPackage()
 {
     u32 tmp1;
-    uc_mem_read(MTK, VM_DreamFactory_DataPackage_ADDRESS, &tmp1, 4);
+    tmp1 = vm_get_var(VM_DreamFactory_DataPackage_ADDRESS);
     return vm_set_call_result(tmp1);
 }
 
@@ -3032,10 +3116,9 @@ u32 vm_IMG_InitDataPageEx(u32 a1, u32 a2, u32 dataPackage)
         return vm_set_call_result(0);
 
     g_vm_img_current_data_package = dataPackage;
-    uc_mem_write(MTK, VM_DreamFactory_DataPackage_ADDRESS, &dataPackage, 4);
+    vm_set_var(VM_DreamFactory_DataPackage_ADDRESS, dataPackage);
 
-    u16 count = 0;
-    uc_mem_read(MTK, dataPackage + 8, &count, 2);
+    u16 count = vm_get_var_short(dataPackage + 8);
     if (count != 0)
         return vm_set_call_result(count);
 
@@ -3069,8 +3152,7 @@ u32 vm_IMG_ReleaseDataPage(void)
         g_vm_img_app_data_package = 0;
     }
     g_vm_img_current_data_package = 0;
-    u32 zero = 0;
-    uc_mem_write(MTK, VM_DreamFactory_DataPackage_ADDRESS, &zero, 4);
+    vm_set_var(VM_DreamFactory_DataPackage_ADDRESS, 0);
     return vm_set_call_result(0);
 }
 
@@ -3097,8 +3179,7 @@ u32 vm_IMG_CreateImageFormIdEx(u32 imageId, u32 dataPackage, u32 outImage)
     if (dataPackage == 0)
         return vm_set_call_result(0);
 
-    u16 count = 0;
-    uc_mem_read(MTK, dataPackage + 8, &count, 2);
+    u16 count = vm_get_var_short(dataPackage + 8);
     if (imageId >= count)
         return vm_set_call_result(0);
 
@@ -3114,11 +3195,11 @@ u32 vm_IMG_CreateImageFormIdEx(u32 imageId, u32 dataPackage, u32 outImage)
         u32 dataBase = 0;
         u32 offsetBase = 0;
         u32 offset = 0;
-        uc_mem_read(MTK, dataPackage + 16, &dataBase, 4);
-        uc_mem_read(MTK, dataPackage + 24, &offsetBase, 4);
+        dataBase = vm_get_var(dataPackage + 16);
+        offsetBase = vm_get_var(dataPackage + 24);
         if (dataBase == 0)
             return vm_set_call_result(0);
-        uc_mem_read(MTK, dataBase + imageId * 4, &offset, 4);
+        offset = vm_get_var(dataBase + imageId * 4);
         data = offset + offsetBase;
     }
 
@@ -3162,9 +3243,9 @@ void vm_IMG_CreateImageFormRes(u32 a1)
         {
             u32 dataBase = 0;
             u32 offsetBase = 0;
-            uc_mem_read(MTK, DataPackage + 16, &dataBase, 4);
-            uc_mem_read(MTK, DataPackage + 24, &offsetBase, 4);
-            uc_mem_read(MTK, dataBase + 4 * a1, &tmp1, 4);
+            dataBase = vm_get_var(DataPackage + 16);
+            offsetBase = vm_get_var(DataPackage + 24);
+            tmp1 = vm_get_var(dataBase + 4 * a1);
             Data = tmp1 + offsetBase;
         }
         return vm_IMG_CreateImageFormStream(Data, 0);
@@ -3184,7 +3265,7 @@ int vm_DF_ReadString(u32 a1, u32 a2)
     uc_engine *uc = MTK;
     // idx = *a2
     // uc_mem_read(MTK, a1, cbeTextString, 64);//debug
-    uc_mem_read(uc, a2, &idx, 4);
+    idx = vm_get_var(a2);
     startIdx = idx;
 
     // len = *(uint8 *)(a1 + idx)
@@ -3193,14 +3274,14 @@ int vm_DF_ReadString(u32 a1, u32 a2)
     idx++;
 
     // *a2 = idx
-    uc_mem_write(uc, a2, &idx, 4);
-    uc_mem_read(MTK, VM_DreamFactory_MemoryBlock_ADDRESS, &result, 4);
+    vm_set_var(a2, idx);
+    result = vm_get_var(VM_DreamFactory_MemoryBlock_ADDRESS);
     result = vm_MF_MemoryBlock_Malloc(result, len + 1);
 
     for (i = 0; i < len; i++)
     {
         // idx = *a2
-        uc_mem_read(uc, a2, &idx, 4);
+        idx = vm_get_var(a2);
 
         // ch = *(uint8 *)(a1 + idx)
         uc_mem_read(uc, a1 + idx, &ch, 1);
@@ -3208,7 +3289,7 @@ int vm_DF_ReadString(u32 a1, u32 a2)
         idx++;
 
         // *a2 = idx
-        uc_mem_write(uc, a2, &idx, 4);
+        vm_set_var(a2, idx);
 
         // *(uint8 *)(result + i) = ch
         uc_err e = uc_mem_write(uc, result + i, &ch, 1);
@@ -3471,7 +3552,7 @@ u32 vm_DF_GetStreamTResource(int a1)
 {
     u32 DreamFactoryResourceBuffer; // r0
     DreamFactoryResourceBuffer = vm_DF_GetResourceByFileName(a1);
-    uc_mem_write(MTK, VM_DreamFactoryResourceBuffer_ADDRESS, &DreamFactoryResourceBuffer, 4);
+    vm_set_var(VM_DreamFactoryResourceBuffer_ADDRESS, DreamFactoryResourceBuffer);
     return DreamFactoryResourceBuffer;
 }
 
@@ -3504,7 +3585,7 @@ void vm_configManagerTable(u32 tableAddr, u32 funcAddr)
     for (i = 0; i < (VM_MANAGER_FUNC_LIST_SIZE / 4); i++)
     {
         tmp = funcAddr + i * 4;
-        uc_mem_write(MTK, tableAddr + i * 4, &tmp, 4);
+        vm_set_var(tableAddr + i * 4, tmp);
     }
 }
 
@@ -3516,7 +3597,7 @@ void vm_configManagerTableCount(u32 tableAddr, u32 funcAddr, u32 count)
     for (i = 0; i < count; i++)
     {
         tmp = funcAddr + i * 4;
-        uc_mem_write(MTK, tableAddr + i * 4, &tmp, 4);
+        vm_set_var(tableAddr + i * 4, tmp);
     }
 }
 void vm_InitDlLoadManager(u32 tmp1)

@@ -1,5 +1,66 @@
 #include "fileIoEngine.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#include <wchar.h>
+#endif
+
+#ifdef _WIN32
+static FILE *vm_wfopen_codepage(const char *filename, const char *mode, UINT codepage)
+{
+    int nameLen = MultiByteToWideChar(codepage, MB_ERR_INVALID_CHARS, filename, -1, NULL, 0);
+    int modeLen = MultiByteToWideChar(codepage, MB_ERR_INVALID_CHARS, mode, -1, NULL, 0);
+    if (nameLen > 0 && modeLen > 0)
+    {
+        wchar_t *wideName = (wchar_t *)SDL_malloc(nameLen * sizeof(wchar_t));
+        wchar_t *wideMode = (wchar_t *)SDL_malloc(modeLen * sizeof(wchar_t));
+        if (wideName && wideMode)
+        {
+            MultiByteToWideChar(codepage, MB_ERR_INVALID_CHARS, filename, -1, wideName, nameLen);
+            MultiByteToWideChar(codepage, MB_ERR_INVALID_CHARS, mode, -1, wideMode, modeLen);
+            FILE *file = _wfopen(wideName, wideMode);
+            SDL_free(wideName);
+            SDL_free(wideMode);
+            if (file)
+                return file;
+        }
+        else
+        {
+            if (wideName)
+                SDL_free(wideName);
+            if (wideMode)
+                SDL_free(wideMode);
+        }
+    }
+    return NULL;
+}
+#endif
+
+static FILE *vm_fopen_host_path(const char *filename, const char *mode)
+{
+#ifdef _WIN32
+    FILE *file = vm_wfopen_codepage(filename, mode, CP_UTF8);
+    if (file)
+        return file;
+
+    UINT acp = GetACP();
+    if (acp != CP_UTF8)
+    {
+        file = vm_wfopen_codepage(filename, mode, acp);
+        if (file)
+            return file;
+    }
+
+    if (acp != 936)
+    {
+        file = vm_wfopen_codepage(filename, mode, 936);
+        if (file)
+            return file;
+    }
+#endif
+    return fopen(filename, mode);
+}
+
 int dirExists(char *path)
 {
     struct stat info;
@@ -20,7 +81,7 @@ u8 *readFile(const char *filename, u32 *size)
     long file_size;
     u8 flag;
     // 打开文件 a.txt
-    file = fopen(filename, "rb");
+    file = vm_fopen_host_path(filename, "rb");
     if (file == NULL)
     {
         printf("Failed to open file:%s\n", filename);
@@ -60,10 +121,9 @@ int writeFile(const char *filename, void *buff, u32 size)
     u8 *tmp;
     u8 flag;
     // 打开文件 a.txt
-    file = fopen(filename, "wb");
+    file = vm_fopen_host_path(filename, "wb");
     if (file == NULL)
     {
-        fclose(file);
         return 0;
     }
     // 移动文件指针到文件末尾，获取文件大小

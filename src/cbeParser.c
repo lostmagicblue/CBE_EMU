@@ -162,7 +162,7 @@ int parseCbeHeader(u8 *cbeFileBuffer, u32 size)
         assert(0);
     }
 
-    printf("[cbeParser]是否大端序 %d\n", g_cbeInfo.isBiggianProgram);
+    printf("[cbeParser]is_big_endian %d\n", g_cbeInfo.isBiggianProgram);
 
     printf("[cbeParser]codeOffset %x\n", g_cbeInfo.codeOffset);
     printf("[cbeParser]codeLen %x\n", g_cbeInfo.codeLen);
