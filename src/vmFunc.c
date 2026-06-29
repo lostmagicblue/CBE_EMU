@@ -15,6 +15,7 @@ FILE *openFileList[16];
 static char openFileNames[16][256];
 
 static void vm_read_string_by_ptr_limited(u32 ptr, char *dst, size_t dstSize);
+static void vm_read_path_string(u32 namePtr, char *out, size_t outSize);
 
 #define VM_STRING_READ_FALLBACK_SIZE 1024u
 #if defined(__GNUC__)
@@ -73,6 +74,7 @@ int vm_memcpy(int dstAddr, int srcAddr, int len);
 u8 vm_DF_DataPackage_GetPackageIndex(int a1);
 int vm_DF_DataPackage_LoadPackage(int a1, int a2);
 int vm_DF_DataPackage_InitTxt(int a1, int a2);
+int vm_DF_DataPackage_ReleasePackage(int a1, int a2);
 
 u16 vm_DF_ReadShort(u32 bufPtr, u32 offsetPtr);
 void vm_DF_WriteShort(bufPtr, offsetPtr, value);
@@ -306,11 +308,27 @@ static void vm_file_normalize_host_path(const char *src, char *dst, size_t dstSi
     dst[pos] = 0;
 }
 
+static int vm_path_looks_like_ascii_c_string(const u8 *raw, size_t rawSize)
+{
+    size_t len = 0;
+    if (raw == NULL || rawSize == 0)
+        return 0;
+    while (len < rawSize && raw[len] != 0)
+    {
+        if (raw[len] < 0x20 || raw[len] > 0x7e)
+            return 0;
+        len++;
+    }
+    return len >= 2 && len < rawSize;
+}
+
 static int vm_path_looks_like_ucs2_le(const u8 *raw, size_t rawSize, u32 *ucs2LenOut)
 {
     if (ucs2LenOut)
         *ucs2LenOut = 0;
     if (raw == NULL || rawSize < 4)
+        return 0;
+    if (vm_path_looks_like_ascii_c_string(raw, rawSize))
         return 0;
 
     u32 pos = 0;
@@ -481,6 +499,231 @@ static int vm_file_is_bare_dsh_resource(const char *path)
         return 0;
     ext = strrchr(path, '.');
     return ext != NULL && _stricmp(ext, ".dsh") == 0;
+}
+
+#define VM_RELEASED_RESOURCE_MAX 1024
+#define VM_RELEASED_RESOURCE_ID_BASE 0x7000u
+
+typedef struct
+{
+    char name[128];
+    char path[256];
+    u32 id;
+} VmReleasedResource;
+
+static VmReleasedResource g_releasedResources[VM_RELEASED_RESOURCE_MAX];
+static u32 g_releasedResourceCount = 0;
+
+static int vm_resource_name_matches(const char *storedName, const char *queryName)
+{
+    char stored[128];
+    char query[128];
+    if (storedName == NULL || queryName == NULL || storedName[0] == 0 || queryName[0] == 0)
+        return 0;
+    vm_file_normalize_host_path(storedName, stored, sizeof(stored));
+    vm_file_normalize_host_path(queryName, query, sizeof(query));
+    if (_stricmp(stored, query) == 0)
+        return 1;
+    if (!vm_path_has_separator(query))
+        return _stricmp(vm_path_basename(stored), query) == 0;
+    return _stricmp(vm_path_basename(stored), vm_path_basename(query)) == 0;
+}
+
+static VmReleasedResource *vm_resource_cache_find_by_name(const char *name)
+{
+    for (u32 i = 0; i < g_releasedResourceCount; i++)
+    {
+        if (vm_resource_name_matches(g_releasedResources[i].name, name) ||
+            (g_releasedResources[i].path[0] &&
+             vm_resource_name_matches(g_releasedResources[i].path, name)))
+        {
+            return &g_releasedResources[i];
+        }
+    }
+    return NULL;
+}
+
+static VmReleasedResource *vm_resource_cache_find_by_id(u32 id)
+{
+    for (u32 i = 0; i < g_releasedResourceCount; i++)
+    {
+        if (g_releasedResources[i].id == id)
+            return &g_releasedResources[i];
+    }
+    return NULL;
+}
+
+static VmReleasedResource *vm_resource_cache_note_name(const char *name)
+{
+    char normalized[128];
+    VmReleasedResource *entry;
+    if (name == NULL || name[0] == 0)
+        return NULL;
+
+    entry = vm_resource_cache_find_by_name(name);
+    if (entry)
+        return entry;
+
+    if (g_releasedResourceCount >= VM_RELEASED_RESOURCE_MAX)
+        return NULL;
+
+    entry = &g_releasedResources[g_releasedResourceCount];
+    memset(entry, 0, sizeof(*entry));
+    vm_file_normalize_host_path(name, normalized, sizeof(normalized));
+    snprintf(entry->name, sizeof(entry->name), "%s", normalized[0] ? normalized : name);
+    entry->id = VM_RELEASED_RESOURCE_ID_BASE + g_releasedResourceCount;
+    g_releasedResourceCount++;
+    return entry;
+}
+
+static void vm_resource_cache_note_path(const char *path)
+{
+    VmReleasedResource *entry;
+    const char *baseName;
+    char normalized[256];
+    if (path == NULL || path[0] == 0 || !vm_file_has_extension(path))
+        return;
+
+    vm_file_normalize_host_path(path, normalized, sizeof(normalized));
+    baseName = vm_path_basename(normalized);
+    if (baseName[0] == 0)
+        return;
+
+    entry = vm_resource_cache_note_name(baseName);
+    if (entry)
+        snprintf(entry->path, sizeof(entry->path), "%s", normalized);
+}
+
+static int vm_resource_host_file_exists(const char *path)
+{
+    FILE *fp;
+    if (path == NULL || path[0] == 0)
+        return 0;
+    fp = fopen(path, "rb");
+    if (fp == NULL)
+        return 0;
+    fclose(fp);
+    return 1;
+}
+
+static u32 vm_resource_cache_lookup_id(const char *name)
+{
+    VmReleasedResource *entry = vm_resource_cache_find_by_name(name);
+    if (entry)
+        return entry->id;
+    if (vm_resource_host_file_exists(name))
+    {
+        entry = vm_resource_cache_note_name(name);
+        if (entry)
+        {
+            snprintf(entry->path, sizeof(entry->path), "%s", name);
+            return entry->id;
+        }
+    }
+    return (u32)-1;
+}
+
+static u32 vm_resource_cache_load_file(const char *path)
+{
+    FILE *fp;
+    long fileSize;
+    u8 header[4] = {0};
+    u32 declaredLen;
+    u32 payloadOffset = 0;
+    u32 payloadLen;
+    u8 *hostBuf;
+    u32 vmBuf;
+
+    if (path == NULL || path[0] == 0)
+        return 0;
+
+    fp = fopen(path, "rb");
+    if (fp == NULL)
+        return 0;
+
+    if (fseek(fp, 0, SEEK_END) != 0)
+    {
+        fclose(fp);
+        return 0;
+    }
+    fileSize = ftell(fp);
+    if (fileSize <= 0 || fileSize > 16 * 1024 * 1024)
+    {
+        fclose(fp);
+        return 0;
+    }
+    fseek(fp, 0, SEEK_SET);
+
+    payloadLen = (u32)fileSize;
+    if (fileSize >= 4 && fread(header, 1, sizeof(header), fp) == sizeof(header))
+    {
+        declaredLen = (u32)header[0] |
+                      ((u32)header[1] << 8) |
+                      ((u32)header[2] << 16) |
+                      ((u32)header[3] << 24);
+        if (declaredLen > 0 && declaredLen <= (u32)fileSize - 4)
+        {
+            payloadOffset = 4;
+            payloadLen = declaredLen;
+        }
+    }
+
+    hostBuf = SDL_malloc(payloadLen);
+    if (hostBuf == NULL)
+    {
+        fclose(fp);
+        return 0;
+    }
+    fseek(fp, payloadOffset, SEEK_SET);
+    if (fread(hostBuf, 1, payloadLen, fp) != payloadLen)
+    {
+        SDL_free(hostBuf);
+        fclose(fp);
+        return 0;
+    }
+    fclose(fp);
+
+    vmBuf = vm_malloc(payloadLen);
+    uc_mem_write(MTK, vmBuf, hostBuf, payloadLen);
+    SDL_free(hostBuf);
+    return vmBuf;
+}
+
+static u32 vm_resource_cache_load_by_name(const char *name)
+{
+    VmReleasedResource *entry = vm_resource_cache_find_by_name(name);
+    if (entry && entry->path[0])
+        return vm_resource_cache_load_file(entry->path);
+    if (name && vm_resource_host_file_exists(name))
+        return vm_resource_cache_load_file(name);
+    return 0;
+}
+
+static u32 vm_resource_cache_load_by_id(u32 id)
+{
+    VmReleasedResource *entry = vm_resource_cache_find_by_id(id);
+    if (entry == NULL)
+        return 0;
+    return vm_resource_cache_load_by_name(entry->name);
+}
+
+static void vm_resource_cache_note_package(u32 dataPackage)
+{
+    u16 count;
+    u32 nameTable;
+    if (dataPackage == 0)
+        return;
+    count = vm_get_var_short(dataPackage + 8);
+    nameTable = vm_get_var(dataPackage + 12);
+    for (u32 i = 0; nameTable && i < count; i++)
+    {
+        u32 namePtr = vm_get_var(nameTable + 4 * i);
+        char name[128];
+        if (namePtr == 0)
+            continue;
+        vm_read_path_string(namePtr, name, sizeof(name));
+        vm_resource_cache_note_name(name);
+    }
 }
 
 static int vm_path_has_high_byte(const char *path)
@@ -730,6 +973,8 @@ int vm_get_file_handle(char *nameBuf, const char *mode)
             }
             openFileList[i] = f;
             snprintf(openFileNames[i], sizeof(openFileNames[i]), "%s", normalizedName);
+            if (vm_file_has_extension(normalizedName))
+                vm_resource_cache_note_path(normalizedName);
             return i;
         }
     }
@@ -973,9 +1218,11 @@ int vm_cbfs_vm_file_getfilesize(int fileHandle)
     if (openFileList[fileHandle] == VM_PSEUDO_DIR_HANDLE)
         return vm_set_call_result(0);
     FILE *f = openFileList[fileHandle];
+    long pos = ftell(f);
     fseek(f, 0, SEEK_END);
     int r = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    if (pos >= 0)
+        fseek(f, pos, SEEK_SET);
     return vm_set_call_result(r);
 }
 // ok
@@ -1023,6 +1270,73 @@ LABEL_8:
         }
     }
     return (u8)v1;
+}
+
+int vm_DF_DataPackage_ReleasePackage(int a1, int namePtr)
+{
+    if (a1 == 0)
+        return vm_set_call_result(0);
+
+    u16 childCount = vm_get_var_short(a1 + 10);
+    u32 childTable = vm_get_var(a1 + 28);
+
+    for (int i = 0; childTable && i < childCount; i++)
+    {
+        u32 slotAddr = childTable + 4 * i;
+        u32 child = vm_get_var(slotAddr);
+        int matched = namePtr == 0;
+
+        if (child == 0)
+            continue;
+        if (!matched)
+        {
+            u32 childName = vm_get_var(child + 4);
+            matched = childName && vm_DF_String_Equal(namePtr, childName);
+        }
+        if (!matched)
+            continue;
+
+        vm_resource_cache_note_package(child);
+
+        u16 resCount = vm_get_var_short(child + 8);
+        u32 stringTable = vm_get_var(child + 12);
+        for (int j = 0; stringTable && j < resCount; j++)
+            vm_DF_Free(stringTable + 4 * j);
+
+        vm_DF_Free(child + 4);
+        vm_DF_Free(child + 12);
+        vm_DF_Free(child + 16);
+        vm_DF_Free(child + 20);
+        vm_DF_Free(slotAddr);
+        vm_set_var(slotAddr, 0);
+    }
+
+    if (namePtr == 0)
+    {
+        u16 resCount = vm_get_var_short(a1 + 8);
+        u32 stringTable = vm_get_var(a1 + 12);
+        for (int i = 0; stringTable && i < resCount; i++)
+            vm_DF_Free(stringTable + 4 * i);
+
+        vm_DF_Free(a1 + 12);
+        vm_DF_Free(a1 + 16);
+        vm_DF_Free(a1 + 20);
+        vm_DF_Free(a1 + 28);
+
+        int fileHandle = (int)vm_get_var(a1 + 92);
+        if (fileHandle >= 0)
+        {
+            vm_cbfs_vm_file_close(fileHandle);
+            vm_set_var(a1 + 92, (u32)-1);
+        }
+        if (vm_get_var(a1 + 100))
+            vm_DF_Free(a1 + 100);
+
+        uc_mem_write(MTK, a1, emptyBuff, 108);
+        return vm_set_call_result(0);
+    }
+
+    return vm_set_call_result(childCount);
 }
 
 int vm_DF_DataPackage_LoadPackage(int a1, int srcPtr)
@@ -2544,41 +2858,66 @@ int vm_DF_DataPackage_GetFileNameByID(int a1, int a2)
 u32 vm_DF_GetResourceIDByFileName(int a1)
 {
     u32 tmp1;
+    char name[128] = {0};
     tmp1 = vm_get_var(VM_DreamFactory_DataPackage_ADDRESS);
-    if (tmp1)
-        return vm_DF_DataPackage_GetFileID(tmp1, a1);
-    else
-        return vm_set_call_result(-1);
+    int result = tmp1 ? (int)vm_DF_DataPackage_GetFileID(tmp1, a1) : -1;
+    if (result < 0 && a1)
+    {
+        vm_read_path_string(a1, name, sizeof(name));
+        result = (int)vm_resource_cache_lookup_id(name);
+    }
+    return vm_set_call_result((u32)result);
 }
 // ok
 int vm_DF_GetResourceByFileName(int a1)
 {
     int tmp1;
+    int result = 0;
     tmp1 = vm_get_var(VM_DreamFactory_DataPackage_ADDRESS);
     if (tmp1)
-        return vm_DF_DataPackage_GetFile(tmp1, a1);
-    else
-        return vm_set_call_result(-1);
+        result = vm_DF_DataPackage_GetFile(tmp1, a1);
+    if (result == 0 && a1)
+    {
+        char name[128];
+        vm_read_path_string(a1, name, sizeof(name));
+        result = (int)vm_resource_cache_load_by_name(name);
+    }
+    return vm_set_call_result((u32)result);
 }
 // ok
 int vm_DF_GetResourceByResourceID(int a1)
 {
     int tmp1;
+    int result = 0;
     tmp1 = vm_get_var(VM_DreamFactory_DataPackage_ADDRESS);
     if (tmp1)
-        return vm_DF_DataPackage_GetFileByID(tmp1, a1);
-    else
-        return vm_set_call_result(-1);
+        result = vm_DF_DataPackage_GetFileByID(tmp1, a1);
+    if (result == 0)
+        result = (int)vm_resource_cache_load_by_id((u32)a1);
+    return vm_set_call_result((u32)result);
 }
 // ok
 void vm_DF_GetResourceNameByID(int a1)
 {
     int tmp1;
+    VmReleasedResource *entry;
     tmp1 = vm_get_var(VM_DreamFactory_DataPackage_ADDRESS);
     if (tmp1)
-        return vm_DF_DataPackage_GetFileNameByID(tmp1, a1);
-    else
-        return vm_set_call_result(-1);
+    {
+        u32 result = vm_DF_DataPackage_GetFileNameByID(tmp1, a1);
+        if (result)
+            return;
+    }
+    entry = vm_resource_cache_find_by_id((u32)a1);
+    if (entry)
+    {
+        u32 len = (u32)strlen(entry->name);
+        u32 ptr = vm_malloc(len + 1);
+        uc_mem_write(MTK, ptr, entry->name, len + 1);
+        vm_set_call_result(ptr);
+        return;
+    }
+    vm_set_call_result((u32)-1);
 }
 int vm_DF_GetTResource(int a1)
 {
@@ -2909,8 +3248,6 @@ int vm_IMG_CreateImageFormStream(u32 a1, u32 a2)
     // n3 = *a1
     uc_mem_read(uc, a1, &n3, 1);
     // uc_mem_read(uc, a1, cbeTextString, 32); // debug
-    u8 imageHead[8] = {0};
-    uc_mem_read(uc, a1, imageHead, sizeof(imageHead));
 
     if (n3)
     {

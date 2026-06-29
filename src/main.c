@@ -117,6 +117,45 @@ int simulateTouchUp = 0;
 int simulateTouchDrag = 0;
 int simulateTouchX = 0;
 int simulateTouchY = 0;
+static u32 g_curKeyDownState = 0;
+static u32 g_curKeyState = 0;
+
+static u32 vm_key_mask_from_code(int key)
+{
+    return (key >= 0 && key < 31) ? (1u << key) : 0;
+}
+
+static void vm_clear_key_down_state(void)
+{
+    g_curKeyDownState = 0;
+}
+
+static void vm_note_key_state_event(int key, int isPress)
+{
+    u32 mask = vm_key_mask_from_code(key);
+    if (mask == 0)
+        return;
+
+    if (isPress)
+    {
+        g_curKeyDownState |= mask;
+        g_curKeyState |= mask;
+    }
+    else
+    {
+        g_curKeyState &= ~mask;
+    }
+}
+
+static u32 vm_fileio_sdcard_status(void)
+{
+    return 1;
+}
+
+static u32 vm_fileio_free_space(void)
+{
+    return 0x10000000u;
+}
 typedef enum
 {
     VM_AUTOTEST_ACTION_TAP,
@@ -1390,6 +1429,7 @@ static uc_err scheduler_dispatch_tscreen_event(u32 tScreenEventEntry, u32 screen
 {
     simulateKey = 0;
     simulatePress = 0;
+    vm_clear_key_down_state();
     simulateTouchDown = 0;
     simulateTouchUp = 0;
     simulateTouchDrag = 0;
@@ -1405,12 +1445,12 @@ static uc_err scheduler_dispatch_tscreen_event(u32 tScreenEventEntry, u32 screen
     {
         simulateKey = evt->r0;
         simulatePress = evt->r1;
+        vm_note_key_state_event(evt->r0, evt->r1);
         if (tScreenEventEntry == 0)
             return UC_ERR_OK;
 
         u32 keyMask = 0;
-        if (evt->r0 < 31)
-            keyMask = 1u << evt->r0;
+        keyMask = vm_key_mask_from_code(evt->r0);
         u32 keyPtr = vm_malloc_var();
         vm_set_var(keyPtr, keyMask);
         uc_err err = vm_call4(tScreenEventEntry, screenPtr, evt->r1 ? 0 : 1, keyPtr, 0);
@@ -4451,23 +4491,23 @@ u8 *SimpleRamMatch(u8 *start, u8 *end, u8 *matchStart, int matchLen)
         return NULL;
 }
 
+#define LOAD_CBE_PATH "CBE/僵尸先生.CBE"//这个加载太慢了
 #define LOAD_CBE_PATH "CBE/钻石迷情3.CBE"
-#define LOAD_CBE_PATH "CBE/枪之荣誉.CBE"
-#define LOAD_CBE_PATH "CBE/僵尸先生.CBE"
 #define LOAD_CBE_PATH "CBE/捕鱼猎人.CBE"
+#define LOAD_CBE_PATH "CBE/枪之荣誉.CBE"
+#define LOAD_CBE_PATH "CBE/鬼吹灯.CBE"
 #define LOAD_CBE_PATH "CBE/战争机器.CBE"
+#define LOAD_CBE_PATH "CBE/涂鸦跳跃.CBE"
 #define LOAD_CBE_PATH "CBE/魔塔.CBE"
 #define LOAD_CBE_PATH "CBE/孤岛.CBE"
-#define LOAD_CBE_PATH "CBE/鬼吹灯.CBE"
-#define LOAD_CBE_PATH "CBE/皇牌空战.CBE"
-#define LOAD_CBE_PATH "CBE/涂鸦跳跃.CBE"
-#define LOAD_CBE_PATH "CBE/江湖OL.CBE"
 #define LOAD_CBE_PATH "CBE/血剑Online.CBE"
 #define LOAD_CBE_PATH "CBE/愤怒的小鸟.CBE"
 #define LOAD_CBE_PATH "CBE/歪歪猫发条城历险记V100.CBE"
 #define LOAD_CBE_PATH "CBE/武林外传(新品).CBE"
 #define LOAD_CBE_PATH "CBE/众神之战.CBE"
+#define LOAD_CBE_PATH "CBE/皇牌空战.CBE"
 #define LOAD_CBE_PATH "CBE/恶魔城.CBE"
+#define LOAD_CBE_PATH "CBE/江湖OL.CBE"
 
 
 static int vm_ascii_stricmp(const char *a, const char *b)
@@ -4678,11 +4718,19 @@ static vm_lcd_rotation vm_lcd_auto_rotation_for_current_cbe(void)
     static const unsigned char angryGbk[] = {
         0xb7, 0xdf, 0xc5, 0xad, 0xb5, 0xc4, 0xd0, 0xa1, 0xc4, 0xf1
     };
+    static const unsigned char zombieUtf8[] = {
+        0xe5, 0x83, 0xb5, 0xe5, 0xb0, 0xb8, 0xe5, 0x85, 0x88, 0xe7, 0x94, 0x9f
+    };
+    static const unsigned char zombieGbk[] = {
+        0xbd, 0xa9, 0xca, 0xac, 0xcf, 0xc8, 0xc9, 0xfa
+    };
 
     if (vm_bytes_contains(LOAD_CBE_PATH, angryUtf8, sizeof(angryUtf8)) ||
         vm_bytes_contains(LOAD_CBE_PATH, angryGbk, sizeof(angryGbk)) ||
         strstr(LOAD_CBE_PATH, "Angry") != NULL ||
-        strstr(LOAD_CBE_PATH, "angry") != NULL)
+        strstr(LOAD_CBE_PATH, "angry") != NULL ||
+        vm_bytes_contains(LOAD_CBE_PATH, zombieUtf8, sizeof(zombieUtf8)) ||
+        vm_bytes_contains(LOAD_CBE_PATH, zombieGbk, sizeof(zombieGbk)))
         return VM_LCD_ROTATE_90_CCW;
     return VM_LCD_ROTATE_0;
 }
@@ -5274,6 +5322,7 @@ void RunArmProgram(void *param)
                         break;
                     simulateKey = 0;
                     simulatePress = 0;
+                    vm_clear_key_down_state();
                     simulateTouchDown = 0;
                     simulateTouchUp = 0;
                     simulateTouchDrag = 0;
@@ -5295,6 +5344,7 @@ void RunArmProgram(void *param)
                             {
                                 simulateKey = evt->r0;
                                 simulatePress = evt->r1;
+                                vm_note_key_state_event(evt->r0, evt->r1);
                             }
                             if (evt->event == VM_EVENT_TOUCHSCREEN)
                             {
@@ -5311,7 +5361,7 @@ void RunArmProgram(void *param)
                                 u32 eventArg = 0;
                                 if (evt->event == VM_EVENT_KEYBOARD)
                                 {
-                                    u32 keyMask = evt->r0 < 31 ? (1u << evt->r0) : 0;
+                                    u32 keyMask = vm_key_mask_from_code(evt->r0);
                                     eventType = evt->r1 ? 0 : 1;
                                     eventArg = vm_malloc_var();
                                     vm_set_var(eventArg, keyMask);
@@ -7964,13 +8014,11 @@ static bool hook_vm_manager_fileio_func(u32 address)
     }
     else if (idx == 17)
     {
-        printf("[call]vm_get_freespace\n");
-        assert(0);
+        vm_set_call_result(vm_fileio_free_space());
     }
     else if (idx == 18)
     {
-        printf("[call]vm_get_sdcardStatus\n");
-        assert(0);
+        vm_set_call_result(vm_fileio_sdcard_status());
     }
     else if (idx == 19)
     {
@@ -8017,13 +8065,11 @@ static bool hook_vm_manager_fileio_func(u32 address)
     }
     else if (idx == 28)
     {
-        printf("[call]vm_get_freespace_ex\n");
-        assert(0);
+        vm_set_call_result(vm_fileio_free_space());
     }
     else if (idx == 29)
     {
-        printf("[call]vm_get_sdcardStatusEx\n");
-        assert(0);
+        vm_set_call_result(vm_fileio_sdcard_status());
     }
     else if (idx == 30)
     {
@@ -9518,13 +9564,13 @@ static bool hook_vm_manager_audio_func(u32 address)
     }
     else if (idx == 2)
     {
-        printf("[call]vMAudioPlayByData\n");
-        assert(0);
+        DEBUG_PRINT("[call]vMAudioPlayByData\n");
+        vm_set_call_result(0);
     }
     else if (idx == 3)
     {
-        printf("[call]vMAudioPlayWithDataPackage\n");
-        assert(0);
+        DEBUG_PRINT("[call]vMAudioPlayWithDataPackage\n");
+        vm_set_call_result(0);
     }
     else if (idx == 4)
     {
@@ -9534,18 +9580,18 @@ static bool hook_vm_manager_audio_func(u32 address)
     }
     else if (idx == 5)
     {
-        printf("[call]vMAudioPlayForApp\n");
-        assert(0);
+        DEBUG_PRINT("[call]vMAudioPlayForApp\n");
+        vm_set_call_result(0);
     }
     else if (idx == 6)
     {
-        printf("[call]vMAudioPause\n");
-        assert(0);
+        DEBUG_PRINT("[call]vMAudioPause\n");
+        vm_set_call_result(0);
     }
     else if (idx == 7)
     {
-        printf("[call]vMAudioResume\n");
-        assert(0);
+        DEBUG_PRINT("[call]vMAudioResume\n");
+        vm_set_call_result(0);
     }
     else if (idx == 8)
     {
@@ -9563,113 +9609,113 @@ static bool hook_vm_manager_audio_func(u32 address)
     }
     else if (idx == 10)
     {
-        printf("[call]vm_mp3PlayBystream\n");
-        assert(0);
+        DEBUG_PRINT("[call]vm_mp3PlayBystream\n");
+        vm_set_call_result(0);
     }
     else if (idx == 11)
     {
-        printf("[call]vm_mp3PauseByStream\n");
-        assert(0);
+        DEBUG_PRINT("[call]vm_mp3PauseByStream\n");
+        vm_set_call_result(0);
     }
     else if (idx == 12)
     {
-        printf("[call]vm_mp3ResumeByStream\n");
-        assert(0);
+        DEBUG_PRINT("[call]vm_mp3ResumeByStream\n");
+        vm_set_call_result(0);
     }
     else if (idx == 13)
     {
-        printf("[call]vm_mp3StopBystream\n");
-        assert(0);
+        DEBUG_PRINT("[call]vm_mp3StopBystream\n");
+        vm_set_call_result(0);
     }
     else if (idx == 14)
     {
-        printf("[call]vm_mp3PlayByFile\n");
-        assert(0);
+        DEBUG_PRINT("[call]vm_mp3PlayByFile\n");
+        vm_set_call_result(0);
     }
     else if (idx == 15)
     {
-        printf("[call]vm_mp3PauseByFile\n");
-        assert(0);
+        DEBUG_PRINT("[call]vm_mp3PauseByFile\n");
+        vm_set_call_result(0);
     }
     else if (idx == 16)
     {
-        printf("[call]vm_mp3ResumeByFile\n");
-        assert(0);
+        DEBUG_PRINT("[call]vm_mp3ResumeByFile\n");
+        vm_set_call_result(0);
     }
     else if (idx == 17)
     {
-        printf("[call]vm_mp3StopByFile\n");
-        assert(0);
+        DEBUG_PRINT("[call]vm_mp3StopByFile\n");
+        vm_set_call_result(0);
     }
     else if (idx == 18)
     {
-        printf("[call]vMAudioget_progress_time\n");
-        assert(0);
+        DEBUG_PRINT("[call]vMAudioget_progress_time\n");
+        vm_set_call_result(0);
     }
     else if (idx == 19)
     {
-        printf("[call]vmMp3StreamInit\n");
-        assert(0);
+        DEBUG_PRINT("[call]vmMp3StreamInit\n");
+        vm_set_call_result(0);
     }
     else if (idx == 20)
     {
-        printf("[call]CB_AUD_StartPlay_Init\n");
-        assert(0);
+        DEBUG_PRINT("[call]CB_AUD_StartPlay_Init\n");
+        vm_set_call_result(0);
     }
     else if (idx == 21)
     {
-        printf("[call]CB_AUD_StopPlay\n");
-        assert(0);
+        DEBUG_PRINT("[call]CB_AUD_StopPlay\n");
+        vm_set_call_result(0);
     }
     else if (idx == 22)
     {
-        printf("[call]CB_AUD_WriteVoiceData\n");
-        assert(0);
+        DEBUG_PRINT("[call]CB_AUD_WriteVoiceData\n");
+        vm_set_call_result(0);
     }
     else if (idx == 23)
     {
-        printf("[call]vMStartAudioRecord_async\n");
-        assert(0);
+        DEBUG_PRINT("[call]vMStartAudioRecord_async\n");
+        vm_set_call_result(0);
     }
     else if (idx == 24)
     {
-        printf("[call]vMStopAudioRecord_async\n");
-        assert(0);
+        DEBUG_PRINT("[call]vMStopAudioRecord_async\n");
+        vm_set_call_result(0);
     }
     else if (idx == 25)
     {
-        printf("[call]vMSetAmrRecBS\n");
-        assert(0);
+        DEBUG_PRINT("[call]vMSetAmrRecBS\n");
+        vm_set_call_result(0);
     }
     else if (idx == 26)
     {
-        printf("[call]vm_mp3PlayByFileEx\n");
-        assert(0);
+        DEBUG_PRINT("[call]vm_mp3PlayByFileEx\n");
+        vm_set_call_result(0);
     }
     else if (idx == 27)
     {
-        printf("[call]vMStartAudioRecordEx\n");
-        assert(0);
+        DEBUG_PRINT("[call]vMStartAudioRecordEx\n");
+        vm_set_call_result(0);
     }
     else if (idx == 28)
     {
-        printf("[call]vMStopAudioRecordEx\n");
-        assert(0);
+        DEBUG_PRINT("[call]vMStopAudioRecordEx\n");
+        vm_set_call_result(0);
     }
     else if (idx == 29)
     {
-        printf("[call]CB_AUD_StartPlay_InitEx\n");
-        assert(0);
+        DEBUG_PRINT("[call]CB_AUD_StartPlay_InitEx\n");
+        vm_set_call_result(0);
     }
     else if (idx == 30)
     {
-        printf("[call]CB_AUD_StartPlayEx\n");
-        assert(0);
+        DEBUG_PRINT("[call]CB_AUD_StartPlayEx\n");
+        vm_set_call_result(0);
     }
     else if (idx == 31)
     {
-        printf("[call]CB_AUD_StopPlayEx\n");
-        assert(0);
+        DEBUG_PRINT("[call]CB_AUD_StopPlayEx\n");
+        vm_set_call_result(0);
     }
     else
     {
@@ -9783,16 +9829,15 @@ static bool hook_vm_manager_gameold_func(u32 address)
         tmp2 = 0;
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         // DEBUG_PRINT("[call]GAME_isKeyDown(%d)\n", tmp1);
-        if (simulatePress == 1)
-        {
-            tmp2 = (tmp1 & (1 << simulateKey)) != 0; // 0按下
-        }
+        tmp2 = (g_curKeyDownState & tmp1) != 0;
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp2);
     }
     else if (idx == 13)
     {
         // printf("[call]GAME_isKeyHold\n");
-        vm_set_call_result(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        tmp2 = (g_curKeyState & tmp1) != 0;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp2);
     }
     else if (idx == 24)
     {
@@ -9908,8 +9953,7 @@ static bool hook_vm_manager_gameold_func(u32 address)
     }
     else if (idx == 69)
     {
-        printf("[call]Get_CurKeyDownState\n");
-        assert(0);
+        uc_reg_write(MTK, UC_ARM_REG_R0, &g_curKeyDownState);
     }
 
     else if (idx == 81)
@@ -10295,7 +10339,9 @@ static bool hook_vm_df_datapackage_func(u32 address)
     }
     else if (idx == 2)
     {
-        vm_set_call_result(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_DF_DataPackage_ReleasePackage(tmp1, tmp2);
     }
     else if (idx == 3)
     {
@@ -10324,7 +10370,7 @@ static bool hook_vm_df_datapackage_func(u32 address)
     }
     else if (idx == 7)
     {
-        printf("[call]DF_DataPackage_GetFile\n");
+        DEBUG_PRINT("[call]DF_DataPackage_GetFile\n");
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         vm_DF_DataPackage_GetFile(tmp1, tmp2);
