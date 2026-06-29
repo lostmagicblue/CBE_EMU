@@ -63,6 +63,7 @@ void vm_set_var(u32 addr, u32 v);
 u16 vm_get_var_short(u32 addr);
 void vm_set_var_short(u32 addr, u16 v);
 void vm_free_var(u32 addr);
+u32 vm_MF_MemoryBlock_Malloc(int a1, int a2);
 
 u32 vm_malloc(u32 size);
 void vm_free(u32 addr);
@@ -79,6 +80,7 @@ int vm_DF_ReadInt(int a1, int a2);
 void vm_DF_WriteInt(bufPtr, offsetPtr, value);
 
 int vm_DF_Malloc_IN(int a1, int a2);
+int vm_DF_ReadString2(u32 bufferPtr, u32 offsetPtr);
 int vm_DF_ReadStringEx(int a1, int a2, int a3);
 bool vm_DF_String_Equal(int a1, int a2);
 int vm_DF_DataPackage_LocateDataPackage(int a1, int a2);
@@ -1014,8 +1016,9 @@ LABEL_8:
         uc_mem_read(MTK, tmp + 4 * i, &v3, 4);
         if (v3)
         {
-            uc_mem_read(MTK, v3 + 1, &tmp, 1);
-            if (tmp == v1)
+            u8 pkgIndex = 0;
+            uc_mem_read(MTK, v3 + 1, &pkgIndex, 1);
+            if (pkgIndex == v1)
                 goto LABEL_8;
         }
     }
@@ -1246,6 +1249,25 @@ int vm_DF_ReadStringEx(int a1, int a2, int a3)
     uc_mem_write(MTK, buf_ptr + len, &zero, 1);
 
     return vm_set_call_result(0);
+}
+
+int vm_DF_ReadString2(u32 bufferPtr, u32 offsetPtr)
+{
+    u32 len = (u32)vm_DF_ReadInt(bufferPtr, offsetPtr);
+    u32 offset = vm_get_var(offsetPtr);
+    u32 memoryBlock = vm_get_var(VM_DreamFactory_MemoryBlock_ADDRESS);
+    u32 result = vm_MF_MemoryBlock_Malloc(memoryBlock, len + 1);
+
+    if (len)
+        vm_memcpy(result, bufferPtr + offset, len);
+    offset += len;
+    vm_set_var(offsetPtr, offset);
+
+    {
+        u8 zero = 0;
+        uc_mem_write(MTK, result + len, &zero, 1);
+    }
+    return vm_set_call_result(result);
 }
 
 bool vm_DF_String_Equal(int a1, int a2)
@@ -2253,11 +2275,14 @@ void vm_MF_MemoryBlock_Reset(int a1)
 }
 void vm_MF_MemoryBlock_Release(int a1)
 {
-    u32 v = 0;
-    uc_reg_read(MTK, UC_ARM_REG_R0, &a1);
-    // Game_Image_free(a1) = mpcmdFreeShareMemIn(a1)
-    vm_free(a1);
-    return vm_set_call_result(v);
+    u32 base = vm_get_var(a1);
+    u32 size = vm_get_var(a1 + 8);
+    u32 zero = 0;
+
+    if (size > 0 && base != 0 && vm_malloc_user_size(base) > 0)
+        vm_free(base);
+    vm_set_var(a1 + 8, zero);
+    return vm_set_call_result(zero);
 }
 u32 vm_DF_DataPackage_GetFileID(u32 a1, u32 namePtr)
 {
@@ -3545,7 +3570,10 @@ u32 vm_GetStreamDataFormRes(u32 a1, u32 a2, u32 a3, u32 a4)
     uc_mem_read(uc, a1 + 7, &b7, 1);
     uc_mem_read(uc, a1 + 8, &b8, 1);
 
-    v8 = (u32)b8 | ((u32)b7 << 8) | ((u32)b6 << 16) | ((u32)b5 << 24);
+    u32 rawOutLen = (u32)b8 | ((u32)b7 << 8) | ((u32)b6 << 16) | ((u32)b5 << 24);
+    /* Some CBE resources set the high bit as a stream flag; the firmware
+       allocator accepts it, but the emulator heap needs a real byte count. */
+    v8 = rawOutLen & 0x7fffffffu;
 
     // printf("GetStreamDataFormRes data=%x bufInSize=%d,bufOutSize=%d", a1, v5, v8);
     dest = vm_malloc(v8);

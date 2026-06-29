@@ -4458,7 +4458,6 @@ u8 *SimpleRamMatch(u8 *start, u8 *end, u8 *matchStart, int matchLen)
 #define LOAD_CBE_PATH "CBE/战争机器.CBE"
 #define LOAD_CBE_PATH "CBE/魔塔.CBE"
 #define LOAD_CBE_PATH "CBE/孤岛.CBE"
-#define LOAD_CBE_PATH "CBE/恶魔城.CBE"
 #define LOAD_CBE_PATH "CBE/鬼吹灯.CBE"
 #define LOAD_CBE_PATH "CBE/皇牌空战.CBE"
 #define LOAD_CBE_PATH "CBE/涂鸦跳跃.CBE"
@@ -4468,6 +4467,7 @@ u8 *SimpleRamMatch(u8 *start, u8 *end, u8 *matchStart, int matchLen)
 #define LOAD_CBE_PATH "CBE/歪歪猫发条城历险记V100.CBE"
 #define LOAD_CBE_PATH "CBE/武林外传(新品).CBE"
 #define LOAD_CBE_PATH "CBE/众神之战.CBE"
+#define LOAD_CBE_PATH "CBE/恶魔城.CBE"
 
 
 static int vm_ascii_stricmp(const char *a, const char *b)
@@ -6893,8 +6893,9 @@ static bool hook_vm_memory_manager_func(u32 address)
     }
     else if (idx == 16)
     {
-        printf("[call]MF_MemoryBlock_Release\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_MF_MemoryBlock_Release(tmp1);
+        DEBUG_PRINT("[call]MF_MemoryBlock_Release\n");
     }
     else if (idx == 17)
     {
@@ -8641,8 +8642,10 @@ static bool hook_vm_manager_game_util_func(u32 address)
     }
     else if (idx == 30)
     {
-        printf("[call]DF_ReadString2\n");
-        assert(0);
+        DEBUG_PRINT("[call]DF_ReadString2\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_DF_ReadString2(tmp1, tmp2);
     }
     else if (idx == 31)
     {
@@ -10038,8 +10041,10 @@ static bool hook_vm_manager_gameold_func(u32 address)
     }
     else if (idx == 102)
     {
-        printf("[call]DF_ReadString2\n");
-        assert(0);
+        DEBUG_PRINT("[call]DF_ReadString2\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_DF_ReadString2(tmp1, tmp2);
     }
     else if (idx == 103)
     {
