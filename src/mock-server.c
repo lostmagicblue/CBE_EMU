@@ -1143,17 +1143,17 @@ static bool vm_net_mock_has_installed_update(void)
 {
     long installedSize = vm_net_mock_file_size("JHOnlineData/MMORPGTempcbm");
     long gameSize = vm_net_mock_file_size("JHOnlineData/mmGameMstarWqvga.cbm");
-    if (installedSize < 41 || gameSize < 41 ||
-        installedSize != gameSize ||
-        !vm_net_mock_file_has_min_size("JHOnlineData/mmorpg_updateversioncbm", 40))
-    {
+    if (!vm_net_mock_file_has_min_size("JHOnlineData/mmorpg_updateversioncbm", 40))
         return false;
-    }
 
-    u32 installedHash = vm_net_mock_file_checksum("JHOnlineData/MMORPGTempcbm");
-    u32 gameHash = vm_net_mock_file_checksum("JHOnlineData/mmGameMstarWqvga.cbm");
-    bool ok = installedHash == gameHash;
-    return ok;
+    /*
+     * A clean resource release writes the real mmGame module but does not create
+     * the network-update temp name. Treat that as installed; otherwise the
+     * version response advertises an update and the client loops on WT 18/6.
+     */
+    if (gameSize >= 1024)
+        return true;
+    return installedSize >= 1024;
 }
 
 static bool vm_net_mock_buffer_has_nonzero(const u8 *data, u32 len)
@@ -2297,7 +2297,11 @@ static u32 vm_net_mock_build_version_response(u8 *out, u32 outCap)
     return pos;
 }
 
-static u32 vm_net_mock_build_update_chunk_response(const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+static u32 vm_net_mock_build_update_chunk_response_for_subtype(const u8 *request,
+                                                               u32 requestLen,
+                                                               u8 responseSubtype,
+                                                               u8 *out,
+                                                               u32 outCap)
 {
     u32 pos = 11;
     if (outCap < pos)
@@ -2307,9 +2311,11 @@ static u32 vm_net_mock_build_update_chunk_response(const u8 *request, u32 reques
     char requestName[256];
     requestName[0] = 0;
     bool haveRequestName = vm_net_mock_get_object_string_field(request, requestLen, "name", requestName, sizeof(requestName)) &&
-                           requestName[0] != 0;
+                            requestName[0] != 0;
     u8 requestType = 0;
     bool haveRequestType = vm_net_mock_get_object_u8_field(request, requestLen, "type", &requestType);
+    u16 requestVersion = 1;
+    u8 versionBytes[2];
     const char *payloadName = NULL;
     u32 updateLen = vm_net_mock_load_resource_update_payload(request,
                                                              requestLen,
@@ -2330,28 +2336,88 @@ static u32 vm_net_mock_build_update_chunk_response(const u8 *request, u32 reques
         chunkLen = 0x1000;
     u32 crc = vm_net_mock_signed_byte_sum(updateData, start + chunkLen);
 
-    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
+    (void)vm_net_mock_get_object_u16_field(request, requestLen, "version", &requestVersion);
+    if (requestVersion == 0)
+        requestVersion = 1;
+    versionBytes[0] = (u8)(requestVersion >> 8);
+    versionBytes[1] = (u8)requestVersion;
+
+    if (responseSubtype == 7 &&
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
+    {
         return 0;
+    }
     if (!vm_net_mock_put_object_u32(out, outCap, &pos, "totalsize", updateLen))
         return 0;
     if (!vm_net_mock_put_object_u32(out, outCap, &pos, "crc", crc))
         return 0;
-    if (!vm_net_mock_put_object_entry(out, outCap, &pos, "version", (const u8 *)"\x00\x01", 2))
+    if (!vm_net_mock_put_object_entry(out, outCap, &pos, "version", versionBytes, sizeof(versionBytes)))
         return 0;
-    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "type", haveRequestType ? requestType : 0))
-        return 0;
-    if (!vm_net_mock_put_object_string(out, outCap, &pos, "name", payloadName ? payloadName : "MMORPGTempcbm"))
-        return 0;
+    if (responseSubtype == 7)
+    {
+        if (!vm_net_mock_put_object_u8(out, outCap, &pos, "type", haveRequestType ? requestType : 0))
+            return 0;
+        if (!vm_net_mock_put_object_string(out, outCap, &pos, "name", payloadName ? payloadName : "MMORPGTempcbm"))
+            return 0;
+    }
     if (!vm_net_mock_put_object_blob(out, outCap, &pos, "data", updateData + start, (u16)chunkLen))
         return 0;
 
     vm_net_mock_finish_wt_packet(out, pos, 1);
     out[5] = 1;
     out[6] = 0x12;
-    out[7] = 7;
+    out[7] = responseSubtype;
     out[8] = 0;
     vm_net_mock_finish_wt_object(out, 5, pos);
+    printf("[info][network] mock_update_chunk subtype=%u start=%u chunk=%u total=%u crc=%u version=%u source=%s resp=%u\n",
+           responseSubtype,
+           start,
+           chunkLen,
+           updateLen,
+           crc,
+           requestVersion,
+           payloadName ? payloadName : "MMORPGTempcbm",
+           pos);
     return pos;
+}
+
+static u32 vm_net_mock_build_update_chunk_response(const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    return vm_net_mock_build_update_chunk_response_for_subtype(request, requestLen, 7, out, outCap);
+}
+
+static u32 vm_net_mock_build_update_manifest_chunk_response(const u8 *request, u32 requestLen,
+                                                            u8 *out, u32 outCap)
+{
+    return vm_net_mock_build_update_chunk_response_for_subtype(request, requestLen, 6, out, outCap);
+}
+
+static bool vm_net_mock_is_update_chunk_request(const u8 *request, u32 requestLen)
+{
+    u8 kind = 0;
+    u8 subtype = 0;
+
+    if (!vm_net_mock_get_wt_header_kind_subtype(request, requestLen, &kind, &subtype))
+        return false;
+    if (kind != 0x12 || subtype != 7)
+        return false;
+    return vm_net_mock_request_contains(request, requestLen, "start") &&
+           (vm_net_mock_request_contains(request, requestLen, "id") ||
+            vm_net_mock_request_contains(request, requestLen, "name"));
+}
+
+static bool vm_net_mock_is_update_manifest_chunk_request(const u8 *request, u32 requestLen)
+{
+    u8 kind = 0;
+    u8 subtype = 0;
+
+    if (!vm_net_mock_get_wt_header_kind_subtype(request, requestLen, &kind, &subtype))
+        return false;
+    return kind == 0x12 &&
+           subtype == 6 &&
+           vm_net_mock_request_contains(request, requestLen, "start") &&
+           vm_net_mock_request_contains(request, requestLen, "version") &&
+           vm_net_mock_request_contains(request, requestLen, "client");
 }
 
 static bool vm_net_mock_seq_put_u32(u8 *out, u32 outCap, u32 *pos, u32 value)
@@ -10401,6 +10467,37 @@ static u32 vm_net_mock_build_teleport_stone_direct_enter_default_ack_response(co
     return len;
 }
 
+static bool vm_net_mock_is_compact_scene_resource_followup_request(const u8 *request, u32 requestLen)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+
+    if (request == NULL || requestLen != 19 ||
+        request[0] != 'W' || request[1] != 'T')
+    {
+        return false;
+    }
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        object.major != 1 || object.kind != 0x0c || object.subtype != 1 ||
+        object.payloadLen != 0)
+    {
+        return false;
+    }
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        object.major != 1 || object.kind != 7 || object.subtype != 42 ||
+        object.payloadLen != 0)
+    {
+        return false;
+    }
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        object.major != 1 || object.kind != 0x19 || object.subtype != 5 ||
+        object.payloadLen != 0)
+    {
+        return false;
+    }
+    return !vm_net_mock_next_request_object(request, requestLen, &offset, &object);
+}
+
 static bool vm_net_mock_is_scene_resource_followup_request(const u8 *request, u32 requestLen)
 {
     u8 typeValue = 0;
@@ -14266,6 +14363,28 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     return pos;
 }
 
+static u32 vm_net_mock_build_compact_scene_skill_default_response(const u8 *request, u32 requestLen,
+                                                                  u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u8 objectCount = 0;
+
+    if (outCap < pos || !vm_net_mock_is_compact_scene_resource_followup_request(request, requestLen))
+        return 0;
+    if (!vm_net_mock_append_login_tail_skill_objects(out, outCap, &pos, &objectCount))
+        return 0;
+    if (!vm_net_mock_append_info_banner_result5_object(out, outCap, &pos))
+        return 0;
+    objectCount += 1;
+
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    printf("[info][network] mock_scene_compact_skill_default objects=%u resp=%u\n",
+           objectCount, pos);
+    vm_autotest_note("mock_scene_compact_skill_default objects=%u response=12/1+7/42+17/1+25/5 evidence=runtime:wt12/1-len19-12/1+7/42+25/5\n",
+                     objectCount);
+    return pos;
+}
+
 static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *request, u32 requestLen,
                                                                  u8 *out, u32 outCap)
 {
@@ -16152,9 +16271,17 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
      */
     u32 hookedLen = 0;
 
-    if (vm_net_mock_request_contains(request, requestLen, "start") &&
-        (vm_net_mock_request_contains(request, requestLen, "id") ||
-         vm_net_mock_request_contains(request, requestLen, "name")))
+    if (vm_net_mock_is_update_manifest_chunk_request(request, requestLen))
+    {
+        hookedLen = vm_net_mock_build_update_manifest_chunk_response(request, requestLen, out, outCap);
+        if (hookedLen)
+        {
+            vm_net_log_handled_packet("builtin-update-manifest-chunk", request, requestLen, hookedLen);
+            return hookedLen;
+        }
+    }
+
+    if (vm_net_mock_is_update_chunk_request(request, requestLen))
     {
         hookedLen = vm_net_mock_build_update_chunk_response(request, requestLen, out, outCap);
         if (hookedLen)
@@ -16446,6 +16573,13 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
             vm_net_log_handled_packet("builtin-scene-task-subset-followup-current-scene", request, requestLen, hookedLen);
             return hookedLen;
         }
+    }
+
+    hookedLen = vm_net_mock_build_compact_scene_skill_default_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-scene-compact-skill-default", request, requestLen, hookedLen);
+        return hookedLen;
     }
 
     hookedLen = vm_net_mock_build_scene_resource_followup_response(request, requestLen, out, outCap);

@@ -5521,7 +5521,7 @@ int main(int argc, char *args[])
     vm_autotest_init(argc, args);
     vm_lcd_init_rotation_config(argc, args);
 
-    // SetConsoleOutputCP(CP_UTF8);
+    SetConsoleOutputCP(CP_UTF8);
     // while(1);
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) < 0)
