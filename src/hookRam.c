@@ -65,7 +65,7 @@ bool hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_
     {
         u32 ptr = 0;
         uc_reg_read(MTK, regs[i], &ptr);
-        if ((ptr >= ROM_ADDRESS && ptr < ROM_ADDRESS + 0x1000000) ||
+        if ((ptr >= Program_ROM_Address && ptr < Program_ROM_Address + Program_ROM_Mapped_Size) ||
             (ptr >= VM_Memory_Pool_ADDRESS && ptr < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE))
         {
             printf("------------\nr%u object dump at %08x\n", i, ptr);
@@ -122,7 +122,7 @@ void hookCpuIntr(uc_engine *uc, uint32_t intno, void *user_data)
         dumpVirtMemory(sp, 128);
     u32 r5;
     uc_reg_read(MTK, UC_ARM_REG_R5, &r5);
-    if (r5 >= ROM_ADDRESS && r5 < ROM_ADDRESS + 0x1000000)
+    if (r5 >= Program_ROM_Address && r5 < Program_ROM_Address + Program_ROM_Mapped_Size)
     {
         vm_readStringByReg(UC_ARM_REG_R5, cbeTextString);
         printf("%s", cbeTextString);

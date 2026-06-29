@@ -707,6 +707,32 @@ u32 size_4mb = 1024 * 1024 * 4;
 u32 size_1mb = 1024 * 1024;
 u32 size_2kb = 1024 * 2;
 
+static u32 vm_round_up_page(u32 value)
+{
+    return (value + 0xfff) & ~0xfffu;
+}
+
+static void vm_config_program_mapping(void)
+{
+    Program_ROM_Address = g_cbeInfo.headerInt1 ? g_cbeInfo.headerInt1 : ROM_ADDRESS;
+    Program_Data_Address = g_cbeInfo.headerInt1 ? g_cbeInfo.headerInt3 : Program_ROM_Address + g_cbeInfo.headerInt2;
+
+    if (g_cbeInfo.headerInt1 == 0)
+    {
+        Program_ROM_Mapped_Size = size_16mb;
+        return;
+    }
+
+    u32 imageEnd = Program_Data_Address + g_cbeInfo.headerInt4;
+    u32 codeEnd = Program_ROM_Address + g_cbeInfo.headerInt2;
+    if (imageEnd < codeEnd)
+        imageEnd = codeEnd;
+    if (imageEnd <= Program_ROM_Address)
+        Program_ROM_Mapped_Size = size_16mb;
+    else
+        Program_ROM_Mapped_Size = vm_round_up_page(imageEnd - Program_ROM_Address);
+}
+
 /* initMtkSimalator 里 IDA XRAM 后备缓冲首址，供 Find* 在映像溢出段扫 magic */
 static u8 *s_ida_xram_host = NULL;
 
@@ -742,6 +768,10 @@ void vm_bx(u32 addr)
 }
 
 static u32 g_currentEmuEntry = 0;
+static u32 g_nativeAppInitEntry = 0;
+static u32 g_nativeAppParserEntry = 0;
+static u32 g_nativeSystemInfoPtr = 0;
+static u32 g_nativePropertyInfoPtr = 0;
 
 static void normalize_program_exit_pc(u32 fallbackPc)
 {
@@ -816,7 +846,7 @@ static void vm_restore_main_r9_for_rom_code(u32 pc)
     u32 currentR9 = 0;
     u32 normalizedPc = pc & ~1u;
 
-    if (!Global_R9 || normalizedPc < ROM_ADDRESS || normalizedPc >= ROM_ADDRESS + size_16mb)
+    if (!Global_R9 || normalizedPc < Program_ROM_Address || normalizedPc >= Program_ROM_Address + Program_ROM_Mapped_Size)
         return;
     uc_reg_read(MTK, UC_ARM_REG_R9, &currentR9);
     if (currentR9 == Global_R9)
@@ -4421,7 +4451,6 @@ u8 *SimpleRamMatch(u8 *start, u8 *end, u8 *matchStart, int matchLen)
         return NULL;
 }
 
-#define LOAD_CBE_PATH "CBE/众神之战.CBE"
 #define LOAD_CBE_PATH "CBE/钻石迷情3.CBE"
 #define LOAD_CBE_PATH "CBE/枪之荣誉.CBE"
 #define LOAD_CBE_PATH "CBE/僵尸先生.CBE"
@@ -4437,6 +4466,8 @@ u8 *SimpleRamMatch(u8 *start, u8 *end, u8 *matchStart, int matchLen)
 #define LOAD_CBE_PATH "CBE/血剑Online.CBE"
 #define LOAD_CBE_PATH "CBE/愤怒的小鸟.CBE"
 #define LOAD_CBE_PATH "CBE/歪歪猫发条城历险记V100.CBE"
+#define LOAD_CBE_PATH "CBE/武林外传(新品).CBE"
+#define LOAD_CBE_PATH "CBE/众神之战.CBE"
 
 
 static int vm_ascii_stricmp(const char *a, const char *b)
@@ -4995,13 +5026,42 @@ void RunArmProgram(void *param)
     changeTmp1 = 1;
     uc_mem_write(MTK, VM_DF_DataPackage_LoadType_ADDRESS, &changeTmp1, 1);
     // 第一次入口初始化
-    changeTmp1 = VM_Manager_Table_ADDRESS;
+    changeTmp1 = g_cbeInfo.headerInt1 ? (VM_NATIVE_DISPATCH_ADDRESS | 1) : VM_Manager_Table_ADDRESS;
     uc_reg_write(MTK, UC_ARM_REG_R0, &changeTmp1); // 传入Manager函数表指针地址
 
     u32 exitAddr = PROGRAM_EXIT_ADDR;
     u32 thumbExitAddr = PROGRAM_EXIT_ADDR | 1;
     uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr); // 程序退出点
     p = vm_emu_start(startAddr + 1, exitAddr);        // thumb模式
+
+    if (p == UC_ERR_OK && g_cbeInfo.headerInt1)
+    {
+        if (g_nativeAppInitEntry)
+        {
+            changeTmp1 = 0;
+            uc_reg_write(MTK, UC_ARM_REG_R0, &changeTmp1);
+            uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
+            p = vm_emu_start(g_nativeAppInitEntry, exitAddr);
+        }
+        while (p == UC_ERR_OK)
+        {
+            p = scheduler_tick();
+            if (p != UC_ERR_OK)
+                break;
+            if (g_nativeAppParserEntry)
+            {
+                uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
+                p = vm_emu_start(g_nativeAppParserEntry, exitAddr);
+                if (p != UC_ERR_OK)
+                    break;
+            }
+            vm_lcd_update_with_input_overlay();
+            SDL_Delay(100);
+        }
+        if (p != UC_ERR_OK)
+            printf("native app loop异常:%s\n", uc_strerror(p));
+        return;
+    }
 
     // 第二次初始化
     if (p == UC_ERR_OK)
@@ -5131,7 +5191,7 @@ void RunArmProgram(void *param)
             {
                 screenFuncPtr = vm_get_var(VM_SCREEN_nextSubTScreen_ADDRESS); // 得到screen函数表地址的指针
                 u32 screenModuleBase = vm_screen_stack_lookup_module_base(screenFuncPtr);
-                if (screenFuncPtr >= Global_R9 && screenFuncPtr < ROM_ADDRESS + size_16mb)
+                if (screenFuncPtr >= Global_R9 && screenFuncPtr < Program_ROM_Address + Program_ROM_Mapped_Size)
                 {
                     screenThisPtr = screenFuncPtr - 0x18;
                 }
@@ -5448,6 +5508,7 @@ int main(int argc, char *args[])
     g_cbeFileSize = changeTmp1;
     // 分析前150字节
     parseCbeHeader(fileBuffer, changeTmp1);
+    vm_config_program_mapping();
 
     if (g_cbeInfo.isBiggianProgram)
         err = uc_open(UC_ARCH_ARM, UC_MODE_ARM | UC_MODE_BIG_ENDIAN, &MTK);
@@ -5460,12 +5521,14 @@ int main(int argc, char *args[])
         return NULL;
     }
 
-    ROM_MEMPOOL = SDL_malloc(size_16mb);
+    ROM_MEMPOOL = SDL_malloc(Program_ROM_Mapped_Size);
     STACK_MEMPOOL = SDL_malloc(size_4mb);
     PRAM_MEMPOOL = SDL_malloc(size_1mb);
     RAM_MEMPOOL = SDL_malloc(VM_MEMPOOL_TOTAL_SIZE);
+    if (ROM_MEMPOOL)
+        memset(ROM_MEMPOOL, 0, Program_ROM_Mapped_Size);
 
-    err = uc_mem_map_ptr(MTK, ROM_ADDRESS, size_16mb, UC_PROT_ALL, ROM_MEMPOOL);
+    err = uc_mem_map_ptr(MTK, Program_ROM_Address, Program_ROM_Mapped_Size, UC_PROT_ALL, ROM_MEMPOOL);
     err = uc_mem_map_ptr(MTK, STACK_ADDRESS, size_1mb, UC_PROT_ALL, STACK_MEMPOOL);
     err = uc_mem_map_ptr(MTK, VM_Manager_Table_ADDRESS, size_1mb, UC_PROT_ALL, PRAM_MEMPOOL);
     err = uc_mem_map_ptr(MTK, VM_FUNC_HK_TABLE_ADDRESS, size_1mb, UC_PROT_ALL, SDL_malloc(size_1mb));
@@ -5507,13 +5570,13 @@ int main(int argc, char *args[])
     if (MTK != NULL)
     {
         // 写入code段
-        uc_mem_write(MTK, ROM_ADDRESS, fileBuffer + g_cbeInfo.codeOffset, g_cbeInfo.codeLen);
+        uc_mem_write(MTK, Program_ROM_Address, fileBuffer + g_cbeInfo.codeOffset, g_cbeInfo.codeLen);
 
-        printf("File Entry Point:0x%x\n", g_cbeInfo.codeOffset);
+        printf("File Entry Point:0x%x loadBase:0x%x\n", g_cbeInfo.codeOffset, Program_ROM_Address);
         // 数据段起始位置放这里
         // codeSize = headerInt2 + headerInt4
-        uc_mem_write(MTK, ROM_ADDRESS + g_cbeInfo.headerInt2, fileBuffer + g_cbeInfo.BssDataOffset, g_cbeInfo.BssDataLen);
-        printf("Data In Rom Address:0x%x - 0x%x\n", ROM_ADDRESS + g_cbeInfo.headerInt2, ROM_ADDRESS + g_cbeInfo.headerInt2 + g_cbeInfo.headerInt4);
+        uc_mem_write(MTK, Program_Data_Address, fileBuffer + g_cbeInfo.BssDataOffset, g_cbeInfo.BssDataLen);
+        printf("Data In Rom Address:0x%x - 0x%x\n", Program_Data_Address, Program_Data_Address + g_cbeInfo.headerInt4);
 
         changeTmp3 = VM_MANAGER_TABLE_ADDRESS;
         vm_set_var(VM_Manager_Table_ADDRESS + 8, changeTmp3); // vmManager函数表地址
@@ -5524,14 +5587,14 @@ int main(int argc, char *args[])
 
         vm_initManagerTable();
 
-        Global_R9 = ROM_ADDRESS + g_cbeInfo.headerInt2;
+        Global_R9 = Program_Data_Address;
         uc_reg_write(MTK, UC_ARM_REG_R9, &Global_R9); // r9写入数据段地址
 
         changeTmp2 = STACK_ADDRESS + size_1mb; // 映射栈内存
         uc_reg_write(MTK, UC_ARM_REG_SP, &changeTmp2);
 
         // 启动emu线程
-        changeTmp1 = ROM_ADDRESS;
+        changeTmp1 = Program_ROM_Address;
 
         pthread_create(&EmuThread, NULL, RunArmProgram, changeTmp1);
         pthread_create(&MainUpdareThread, NULL, MainUpdateTask, NULL);
@@ -5915,6 +5978,124 @@ static bool hook_vm_manager_func(u32 address)
     return true;
 }
 
+static bool hook_vm_native_dispatch_func(u32 address)
+{
+    if (((u32)address & ~1u) != VM_NATIVE_DISPATCH_ADDRESS)
+        return false;
+
+    u32 id = 0;
+    u32 arg = 0;
+    u32 lr = 0;
+    uc_reg_read(MTK, UC_ARM_REG_R0, &id);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &arg);
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+
+    if ((id >= Program_ROM_Address && id < Program_ROM_Address + Program_ROM_Mapped_Size) ||
+        (id >= Program_Data_Address && id < Program_Data_Address + g_cbeInfo.headerInt4) ||
+        (id >= VM_Memory_Pool_ADDRESS && id < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE))
+    {
+        vm_set_call_result(0);
+    }
+    else if (id == 0x79e)
+    {
+        if (arg)
+        {
+            g_nativeAppInitEntry = vm_get_var(arg);
+            g_nativeAppParserEntry = vm_get_var(arg + 4);
+            vm_set_var(arg + 8, VM_NATIVE_DISPATCH_ADDRESS | 1);
+        }
+        vm_set_call_result(VM_NATIVE_DISPATCH_ADDRESS | 1);
+    }
+    else if (id == 0x52)
+    {
+        if (arg && g_cbeInfo.headerInt1)
+        {
+            /* Native app-object registration; this CBE reads the slot immediately
+             * after the call to patch its init/parse callbacks. */
+            vm_set_var(Program_Data_Address + 0x1724, arg);
+        }
+        vm_set_call_result(0);
+    }
+    else if (id == 0x8f || id == 0x8e || id == 0x97 || id == 0xac || id == 0x421)
+    {
+        vm_set_call_result(id);
+    }
+    else if (id == 0xb7 || id == 0xb8)
+    {
+        vm_set_call_result(0);
+    }
+    else if (id == 0x67 || id == 0x6b || id == 0x6e)
+    {
+        vm_set_call_result(0);
+    }
+    else if (id == 0x3ed)
+    {
+        if (arg)
+            vm_set_var_byte(arg, 0);
+        vm_set_call_result(0);
+    }
+    else if (id == 0x3ec || id == 0x3ee)
+    {
+        if (arg)
+        {
+            vm_set_var_byte(arg, 0);
+            vm_set_var_byte(arg + 1, 0);
+            vm_set_var_byte(arg + 2, 0);
+            vm_set_var_byte(arg + 3, 0);
+        }
+        vm_set_call_result(0);
+    }
+    else if (id == 0x7d1)
+    {
+        if (arg)
+        {
+            u32 outPtr = vm_get_var(arg);
+            u32 handle = vm_get_var(arg + 4);
+            u32 size = vm_get_var(arg + 8);
+            if (outPtr && size)
+            {
+                u8 zero[16] = {0};
+                u32 clearLen = size < sizeof(zero) ? size : (u32)sizeof(zero);
+                uc_mem_write(MTK, outPtr, zero, clearLen);
+                if (handle == 0x8f && size >= 4)
+                {
+                    if (!g_nativeSystemInfoPtr)
+                    {
+                        g_nativeSystemInfoPtr = vm_malloc(0x400);
+                        for (u32 off = 0; off < 0x400; off += sizeof(emptyBuff))
+                            uc_mem_write(MTK, g_nativeSystemInfoPtr + off, emptyBuff, sizeof(emptyBuff));
+                        vm_set_var(g_nativeSystemInfoPtr + 0xf0, VM_NATIVE_DISPATCH_ADDRESS | 1);
+                    }
+                    vm_set_var(outPtr, g_nativeSystemInfoPtr);
+                }
+                else if (handle == 0x8e && size >= 4)
+                {
+                    if (!g_nativePropertyInfoPtr)
+                    {
+                        g_nativePropertyInfoPtr = vm_malloc(0x100);
+                        uc_mem_write(MTK, g_nativePropertyInfoPtr, emptyBuff, 0x100);
+                        vm_set_var(g_nativePropertyInfoPtr + 0x14, VM_NATIVE_DISPATCH_ADDRESS | 1);
+                    }
+                    vm_set_var(outPtr, g_nativePropertyInfoPtr);
+                }
+            }
+        }
+        vm_set_call_result(0);
+    }
+    else
+    {
+        u32 r2 = 0;
+        u32 r3 = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+        printf("[impl]native dispatcher id:%x arg:%x r2:%x r3:%x lr:%x\n", id, arg, r2, r3, lr);
+        assert(0);
+    }
+
+    vm_bx(lr);
+    return true;
+}
+
 static bool hook_vm_sys_manager_func(u32 address)
 {
     if (!(address >= VM_SYS_MANAGER_FUNC_LIST_ADDRESS && address < (VM_SYS_MANAGER_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
@@ -6052,9 +6233,7 @@ return 4;
             if (uc_mem_read(MTK, sp + off, &word, 4) != UC_ERR_OK)
                 break;
             printf("assert_stack[%02x]=%08x\n", off, word);
-            if ((word >= 0x01000000 && word < 0x01100000) ||
-                (word >= 0x1000000 && word < 0x1100000) ||
-                (word >= ROM_ADDRESS && word < ROM_ADDRESS + 0x800000))
+            if ((word >= Program_ROM_Address && word < Program_ROM_Address + Program_ROM_Mapped_Size))
             {
             }
         }
@@ -10819,6 +10998,12 @@ static void hook_vm_manager_code_callback(uc_engine *uc, uint64_t address, uint3
     lastAddress = (u32)address;
 }
 
+static void hook_vm_native_dispatch_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_native_dispatch_func((u32)address);
+    lastAddress = (u32)address;
+}
+
 static void hook_vm_sys_manager_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
 {
     hook_vm_sys_manager_func((u32)address);
@@ -11005,6 +11190,7 @@ static uc_err add_manager_code_hooks(uc_engine *uc)
 #define ADD_MANAGER_CODE_HOOK(begin, cb) ADD_MANAGER_CODE_HOOK_RANGE(begin, begin + VM_MANAGER_FUNC_LIST_SIZE - 1, cb)
 
     ADD_MANAGER_CODE_HOOK(VM_MANAGER_FUNC_LIST_ADDRESS, hook_vm_manager_code_callback);
+    ADD_MANAGER_CODE_HOOK_RANGE(VM_NATIVE_DISPATCH_ADDRESS, VM_NATIVE_DISPATCH_ADDRESS + 3, hook_vm_native_dispatch_code_callback);
     ADD_MANAGER_CODE_HOOK(VM_SYS_MANAGER_FUNC_LIST_ADDRESS, hook_vm_sys_manager_code_callback);
     ADD_MANAGER_CODE_HOOK(VM_MEMORY_MANAGER_FUNC_LIST_ADDRESS, hook_vm_memory_manager_code_callback);
     ADD_MANAGER_CODE_HOOK(VM_MANAGER_LCD_FUNC_LIST_ADDRESS, hook_vm_manager_lcd_code_callback);

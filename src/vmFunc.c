@@ -713,7 +713,7 @@ int vm_cbfs_vm_file_open(int openMode, int namePtr, int rwPtr)
         uc_reg_read(MTK, UC_ARM_REG_LR, &r[7]);
         for (u32 i = 4; i <= 6; ++i)
         {
-            if ((r[i] >= ROM_ADDRESS && r[i] < ROM_ADDRESS + 0x1000000) ||
+            if ((r[i] >= Program_ROM_Address && r[i] < Program_ROM_Address + Program_ROM_Mapped_Size) ||
                 (r[i] >= VM_Memory_Pool_ADDRESS && r[i] < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE) ||
                 (r[i] >= STACK_ADDRESS && r[i] < STACK_ADDRESS + 0x100000))
             {

@@ -42,6 +42,9 @@ u32 IRQ_MASK_SET_L_Data;
 u32 IRQ_MASK_SET_H_Data;
 
 u32 Global_R9;
+u32 Program_ROM_Address;
+u32 Program_ROM_Mapped_Size;
+u32 Program_Data_Address;
 
 u8 *ROM_MEMPOOL;
 u8 *STACK_MEMPOOL;
