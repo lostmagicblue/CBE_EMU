@@ -7,6 +7,8 @@
 #include <direct.h>
 #endif
 #include <stdarg.h>
+#include <math.h>
+#include <stdint.h>
 
 #include "main.h"
 #include "lcd.h"
@@ -4445,6 +4447,169 @@ static int vm_ascii_stricmp(const char *a, const char *b)
     return (int)(unsigned char)*a - (int)(unsigned char)*b;
 }
 
+static u32 vm_math_sqrt_result(u32 value)
+{
+    int32_t signedValue = (int32_t)value;
+    if (signedValue <= 0)
+        return vm_set_call_result(0);
+
+    uint64_t target = (uint32_t)signedValue;
+    uint32_t lo = 1;
+    uint32_t hi = 46340;
+    uint32_t result = 0;
+    while (lo <= hi)
+    {
+        uint32_t mid = lo + (hi - lo) / 2;
+        uint64_t square = (uint64_t)mid * (uint64_t)mid;
+        if (square <= target)
+        {
+            result = mid;
+            lo = mid + 1;
+        }
+        else
+        {
+            hi = mid - 1;
+        }
+    }
+    return vm_set_call_result(result);
+}
+
+static int vm_math_df_sin_value(int deg)
+{
+    double rad = (double)deg * 3.14159265358979323846 / 180.0;
+    return (int)(sin(rad) * 4096.0);
+}
+
+static u32 vm_math_df_sin_result(u32 deg)
+{
+    return vm_set_call_result((u32)vm_math_df_sin_value((int32_t)deg));
+}
+
+static u32 vm_math_df_cos_result(u32 deg)
+{
+    return vm_math_df_sin_result(deg + 90);
+}
+
+static u32 vm_math_df_degree_result(u32 xValue, u32 yValue)
+{
+    int32_t x = (int32_t)xValue;
+    int32_t y = (int32_t)yValue;
+    int64_t lenSq = (int64_t)x * (int64_t)x + (int64_t)y * (int64_t)y;
+    int32_t scaledY = (int32_t)((uint32_t)y << 12);
+    int32_t begin;
+    int32_t end;
+
+    if (lenSq > 0)
+    {
+        uint64_t target = (uint64_t)lenSq;
+        uint64_t len64 = (uint64_t)sqrt((double)target);
+        while ((len64 + 1) <= 3037000499ULL && (len64 + 1) * (len64 + 1) <= target)
+            ++len64;
+        while (len64 * len64 > target)
+            --len64;
+        uint32_t len = len64 > 0xffffffffu ? 0xffffffffu : (uint32_t)len64;
+        if (len > 0)
+            scaledY /= (int32_t)len;
+    }
+
+    if (y < 0)
+    {
+        if (x > 0)
+        {
+            begin = 271;
+            end = 359;
+        }
+        else
+        {
+            begin = 181;
+            end = 270;
+        }
+    }
+    else if (x < 0)
+    {
+        begin = 91;
+        end = 180;
+    }
+    else
+    {
+        begin = 0;
+        end = 90;
+    }
+
+    for (int32_t deg = begin; deg <= end; ++deg)
+    {
+        int s = vm_math_df_sin_value(deg);
+        if (end == 90 || end == 359)
+        {
+            if (s >= scaledY)
+                return vm_set_call_result((u32)deg);
+        }
+        else if (s <= scaledY)
+        {
+            return vm_set_call_result((u32)deg);
+        }
+    }
+    return vm_set_call_result(0);
+}
+
+static int16_t vm_math_low_i16(u32 value)
+{
+    return (int16_t)(value & 0xffffu);
+}
+
+static int16_t vm_math_high_i16(u32 value)
+{
+    return (int16_t)((value >> 16) & 0xffffu);
+}
+
+static u32 vm_math_df_collection_test_result(u32 a1, u32 a2, u32 a3, u32 a4)
+{
+    int result = (int)vm_math_low_i16(a1) + (int)vm_math_low_i16(a2) > (int)vm_math_low_i16(a3) &&
+                 (int)vm_math_low_i16(a3) + (int)vm_math_low_i16(a4) > (int)vm_math_low_i16(a1) &&
+                 (int)vm_math_high_i16(a1) + (int)vm_math_high_i16(a2) > (int)vm_math_high_i16(a3) &&
+                 (int)vm_math_high_i16(a3) + (int)vm_math_high_i16(a4) > (int)vm_math_high_i16(a1);
+    return vm_set_call_result((u32)result);
+}
+
+static u32 vm_math_df_swap_val_result(u32 ptrA, u32 ptrB)
+{
+    u16 a = 0;
+    u16 b = 0;
+    if (ptrA && ptrB)
+    {
+        uc_mem_read(MTK, ptrA, &a, sizeof(a));
+        uc_mem_read(MTK, ptrB, &b, sizeof(b));
+        uc_mem_write(MTK, ptrA, &b, sizeof(b));
+        uc_mem_write(MTK, ptrB, &a, sizeof(a));
+    }
+    return vm_set_call_result(ptrA);
+}
+
+static u32 vm_math_pow_float_result(u32 baseBits, u32 expBits)
+{
+    float base;
+    float exp;
+    float result;
+    u32 resultBits;
+
+    memcpy(&base, &baseBits, sizeof(base));
+    memcpy(&exp, &expBits, sizeof(exp));
+    result = powf(base, exp);
+    memcpy(&resultBits, &result, sizeof(resultBits));
+    return vm_set_call_result(resultBits);
+}
+
+static u32 vm_math_rand_result(void)
+{
+    static int seeded = 0;
+    if (!seeded)
+    {
+        srand((unsigned int)time(NULL) ^ (unsigned int)SDL_GetTicks());
+        seeded = 1;
+    }
+    return vm_set_call_result((u32)rand());
+}
+
 static int vm_bytes_contains(const char *haystack, const unsigned char *needle, size_t needleLen)
 {
     size_t hayLen;
@@ -7704,8 +7869,7 @@ static bool hook_vm_manager_stdio_func(u32 address)
     else if (idx == 6)
     {
         DEBUG_PRINT("[call]VmGetRand\n");
-        tmp1 = currentTime;
-        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_math_rand_result();
     }
     else if (idx == 7)
     {
@@ -7786,8 +7950,9 @@ static bool hook_vm_manager_stdio_func(u32 address)
     }
     else if (idx == 14)
     {
-        printf("[call]vMpow\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_math_pow_float_result(tmp1, tmp2);
     }
     else if (idx == 15)
     {
@@ -8113,8 +8278,8 @@ static bool hook_vm_manager_game_util_func(u32 address)
     }
     else if (idx == 9)
     {
-        printf("[call]Sqrt\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_math_sqrt_result(tmp1);
     }
     else if (idx == 10)
     {
@@ -8257,18 +8422,23 @@ static bool hook_vm_manager_game_util_func(u32 address)
     }
     else if (idx == 34)
     {
-        printf("[call]DF_Degree\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_math_df_degree_result(tmp1, tmp2);
     }
     else if (idx == 35)
     {
-        printf("[call]DF_CollectionTest\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+        vm_math_df_collection_test_result(tmp1, tmp2, tmp3, tmp4);
     }
     else if (idx == 36)
     {
-        printf("[call]DF_SwapVal\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_math_df_swap_val_result(tmp1, tmp2);
     }
     else if (idx == 37)
     {
@@ -9402,8 +9572,8 @@ static bool hook_vm_manager_gameold_func(u32 address)
     }
     else if (idx == 58)
     {
-        printf("[call]Sqrt\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_math_sqrt_result(tmp1);
     }
     else if (idx == 59)
     {
@@ -9630,28 +9800,33 @@ static bool hook_vm_manager_gameold_func(u32 address)
     }
     else if (idx == 104)
     {
-        printf("[call]DF_Sin\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_math_df_sin_result(tmp1);
     }
     else if (idx == 105)
     {
-        printf("[call]DF_Cos\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_math_df_cos_result(tmp1);
     }
     else if (idx == 106)
     {
-        printf("[call]DF_Degree\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_math_df_degree_result(tmp1, tmp2);
     }
     else if (idx == 107)
     {
-        printf("[call]DF_CollectionTest\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+        vm_math_df_collection_test_result(tmp1, tmp2, tmp3, tmp4);
     }
     else if (idx == 108)
     {
-        printf("[call]DF_SwapVal\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_math_df_swap_val_result(tmp1, tmp2);
     }
     else if (idx == 109)
     {
@@ -9703,8 +9878,7 @@ static bool hook_vm_manager_gameold_func(u32 address)
     }
     else if (idx == 139)
     {
-        printf("[call]VmGetRand\n");
-        assert(0);
+        vm_math_rand_result();
     }
     else if (idx == 140)
     {
