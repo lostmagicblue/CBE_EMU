@@ -425,6 +425,37 @@ net_send ... source=builtin-mmgame-scene-transfer-followup ...
 mock_mmgame_scene_transfer_followup scene=... pos=(...) response=resources+30/1
 ```
 
+## 2026-06-30 Compact 16/2 Unstuck / Kubao Prompt
+
+Manual runtime after a bad portal landing showed:
+
+```text
+net_send connect=2 wt=16/2 len=19 source=builtin-teleport-stone-transfer resp=78
+```
+
+The visible client prompt was "酷宝不足，需要充值". IDA evidence from
+`mmGameMstarWqvga.cbm:sub_11CE(0x11CE)` explains the branch:
+
+- `16/2 result == 2` opens the confirmation/payment callback path
+  (`sub_24A8`) with the local "酷宝不足/充值" text.
+- `16/2 result == 4` shows the `hint` text field.
+- Other `16/2` result values fall through to `sub_BCC(0x0BCC)`, which reads
+  `scene`, `posinfo`, and `exitid` and calls the mmGame scene-entry vtable.
+- `16/3 result == 2` is still the validated scene-entry path for the primary
+  settings request (`12/3 + 16/3`).
+
+The mock-server's teleport-stone detector accepted any `16/2` packet containing
+`type`, so this compact unstuck packet was answered as teleport-stone
+confirmation (`result=2`), triggering the Kubao prompt. A new narrow handler
+`builtin-settings-unstuck-16-2` now catches only compact `16/2` requests that:
+
+- contain `type`;
+- do not contain `exitID`, `exitid`, `scene`, or `posinfo`;
+- did not arrive immediately after a `16/1` teleport-stone exitinfo list.
+
+It returns `16/2 result=1 + scene/posinfo/exitid`, using the current-scene
+unstuck target, so mmGame enters through `sub_BCC` instead of the payment prompt.
+
 For teleport-stone or map-transfer paths, the expected second-stage line may be:
 
 ```text

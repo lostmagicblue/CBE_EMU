@@ -9312,7 +9312,11 @@ static bool hook_vm_manager_screen_func(u32 address)
                 if (lastAddress == 0x01018150)
                 {
                     activeTarget = vm_active_scene_reenter_target();
-                    if (vm_scene_same_reenter_matches_target(activeTarget))
+                    if (vm_net_mock_consume_update_completed_scene_reenter(activeTarget))
+                    {
+                        acceptSameSceneReenter = true;
+                    }
+                    else if (vm_scene_same_reenter_matches_target(activeTarget))
                     {
                         acceptSameSceneReenter = false;
                         printf("[info][screen] screen_mgr same-suppressed caller=%08x serial=%u scene=%s pos=(%u,%u) exit=%u\n",

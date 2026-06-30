@@ -440,6 +440,11 @@ Status: validated
 - 其中 `249` 条记录的 `entry_id != target_entry_id`。
 - 示例：`c00蓬莱仙岛_01.sce -> 00蓬莱仙岛_02.sce` 的源入口是 `entry_id=1,target_entry_id=0`；目标图 `entry_id=1` 是铸剑谷上入口 `(128,45)`，`entry_id=0` 是下入口 `(396,473)`。
 - 结论：`target_entry_id` 不能作为目标落点 fallback；它只可用于从源 SCE 中按请求 `exitID` 反查 portal。通用落点规则仍是“选中的源 portal 的 `entry_id` 去目标 SCE 查同 id 入口”。
+- 2026-06-30 重新核对本地 `web/fs/JHOnlineData/*.sce`：196 个 SCE 文件都是
+  `little-endian u32 block_len + resource_type + big-endian compressed_len + big-endian decoded_len + LZSS stream`。
+  解压后的负载才以 `SCE2` 开头，原始文件不能直接扫描 `edge_portal`。
+- 大理复现样本：`c18大理_02.sce` 原文件 226 字节，资源流声明压缩 213 字节、解包 272 字节；解包后可读到
+  `entry_id=1 -> c18大理_03.sce` 与 `entry_id=2 -> c18大理_01.sce` 两条 `edge_portal`。
 
 ### 根因
 
@@ -447,6 +452,8 @@ Status: validated
 - 当请求上下文与当前源入口不一致时，旧代码会直接选择目标图的错误 entry，例如铸剑谷 `entry_id=0` 的 `(396,473)`。
 - 本轮运行输出确认初次 `WT 2/3 len=74` 后仍进入 `00蓬莱仙岛_02.sce pos=(389,473) exit=0`，说明请求 `exitID=0` 对应的是源记录的 `target_entry_id=0`，不能直接拿去目标图查 spawn。
 - 但源 SCE 明确说明玩家踩到的是 `c00蓬莱仙岛_01.sce` 的 `entry_id=1` 边缘出口，对应目标图应优先落到同 entry 的入口，即铸剑谷上方 `(128,45)`。安全落点调整后会避开上方触发矩形。
+- 本次大理问题的直接原因是 mock-server 的 SCE 读取层只扫原始文件中的明文 `SCE2`，遇到压缩资源时读不到目标 `edge_portal`，随后落入中心点路径，产生
+  `scene=c18大理_02 pos=(200,200)`。
 
 ### 实现结论
 
@@ -458,6 +465,18 @@ Status: validated
   - 坐标只采用选中源 portal 的 `entry_id` 去目标 scene 查同 id spawn；`target_entry_id` 不再作为目标图落点；
   - 如果源 portal 命中但目标 SCE entry 解不出，则返回无 `posinfo` 的 scene ack，等待客户端下载/补资源，不再伪造另一条入口坐标。
 - 目标 SCE entry 直接查询仍保留为 fallback，用于没有实时源 portal 上下文的启动、传送石、或其他非边缘路径；普通下载 key 不允许再落到静态坐标表。
+- `vm_net_mock_load_scene_resource()` 现在先读取真实 `.sce` 资源文件，再按客户端 `GetStreamDataFormRes/LzssDecode` 等价规则解出 `SCE2` 负载，所有
+  `edge_portal`、entry spawn、尺寸解析都基于解压后的服务端资源数据。
+- `WT 2/3` 解析不再使用“目标 SCE 存在但 entry 查不到时取中心点”的兜底；这种情况记录
+  `mock_scene_entry_missing ... action=no-center-fallback`，继续回到入口/资源/协议证据排查。
+- 2026-06-30 follow-up: `WT 2/1` 的 `moveinfo` 上传包前两个 tagged i16 是客户端上报的
+  `gridPosX/gridPosY`（IDA: `net_handle_actor_move_info(0x01012ADC)` case 2）。服务端现在记录
+  “最后一次 moveinfo 源 scene + 坐标”，并在 `WT 2/3` 解析时先用这份服务端可见位置反查源 SCE portal。
+  这避免本地 scene object 已经预切到目标图后，role/runtime 源 scene 被污染而选错目标入口。
+- 地图瞬移 `16/4` 的 saved-target inherit 不在 target 解析函数里消费；
+  `vm_net_mock_get_scene_change_target()` 会被多个 detector 预探测调用，解析阶段必须保持无副作用。
+  pending 只在真实进场完成分支清掉，避免 `WT 2/3` 真正构包前丢失 `16/4` 的权威落点。
+- `1/27/4.info` 默认不再填“蓬莱-铜雀台”；对象仍保留，但默认文本为空，避免每次切图后弹出错误地点提示。
 
 ### 验证点
 
@@ -466,6 +485,13 @@ Status: validated
   - `target=(128,57)` 是 `(128,45)` 经过上方触发矩形 `(108,5)-(148,25)` 的 32px 安全间隔调整后的落点。
 - 若出现 `mock_scene_portal_exit_mismatch`，说明请求 `exitID` 与源 SCE `target_entry_id` 不一致，应继续追 `0x01018166` 到 `WT 2/3` 组包之间的字段来源，而不是新增地图特殊处理。
 - 若出现 `mock_scene_change_source_probe_miss`，说明 pending target 已匹配请求，但角色稳定场景/runtime scene 中没有找到满足 target/exit 的源 portal，需要继续追 SCE 载入到 move entry 的字段映射。
+- 2026-06-30 follow-up: map-stone download support had introduced an
+  `exitID=0` same-scene pending/completed target inheritance before the source
+  portal lookup. That is valid for post-download packets that no longer carry the
+  original position, but it is too early for real edge-portal scene changes: a
+  new portal into the same scene can inherit stale coordinates and land away
+  from the target entrance. The source SCE portal lookup is now tried before the
+  inheritance branch, so live portal context always wins.
 - 本轮自动化烟测：
   - `make` 通过；
   - 使用 `CBE_SCENE_KEY=c00蓬莱仙岛_01.sce` 与 `hold:8` 能进入地图并连续产生 `WT 2/1 moveinfo`，但脚本没有稳定走入下边缘触发矩形，因此未触发目标 `WT 2/3`；

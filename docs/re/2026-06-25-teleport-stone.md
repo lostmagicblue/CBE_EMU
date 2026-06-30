@@ -286,12 +286,19 @@ IDA evidence:
 - `Jianghu OL.CBE:SendItemUseReq(0x0103573A)` allocates
   `event(5, 1, 16, 4)`.
 - It writes `curid` and `objid` from the teleport-stone map list item.
+- 2026-06-30 IDA follow-up: `curid` is read from the selected current world-map
+  row's teleport id, and `objid` is read from the target world-map row's
+  teleport id. The selected child scene row is not serialized into the `16/4`
+  packet. The client stores `wMap.lower_map + selected_child_offset` in local
+  UI state before sending, but that is client memory and is not a valid runtime
+  mock-server input. Treat it only as reverse-engineering evidence.
 - In the first validated sample, `objid=22` matches the UI selection
-  `HuoYanShan / YeHuoGu` and local SCE prefix `22HuoYanShan`; `curid=1`
-  also matches the `_01.sce` landing scene.
-- A later random-map validation produced `curid=20 objid=4` and correctly
-  landed on `c04LinAnFu_01.sce`, so `curid` is only treated as a preferred
-  exact scene index, not as an authoritative sub-scene id.
+  `HuoYanShan / YeHuoGu` and local SCE prefix `22HuoYanShan`.
+- Earlier notes treated `curid` as a preferred exact scene index. That was
+  wrong for city sub-map selection: a manual selection of `临安-西宣门` produced
+  `curid=1 objid=4`, while local `sMap.dsh` shows `临安-西宣门` is row `49`
+  (`c04临安府_03.sce @ 80,144`). From the server's visible `16/4` packet alone,
+  this child row cannot be recovered.
 - Runtime on 2026-06-30 produced `curid=1 objid=4` while the local
   `JHOnlineData` directory only contained Penglai SCE files. The old
   directory-scan mapping failed and logged `scene_source=default`, incorrectly
@@ -311,9 +318,8 @@ Response strategy:
   `wMap.dsh` chooses the sub-map row range, and `sMap.dsh` supplies the target
   scene file name.
 - when `sMap.dsh` supplies position fields, keep those coordinates as the map
-  stone landing point. If the row has no usable position, derive a fallback from
-  the raw SCE header width/height: `(width/2,height/2)`, then the existing
-  edge-portal safe-landing adjustment.
+  stone landing point. If the row has no usable position, do not invent one;
+  log `mock_teleport_stone_map_unresolved` and return no synthetic response.
 - when the target SCE is missing, keep the `sMap.dsh` scene file name in the
   response instead of falling back to the default scene, and preserve the
   `sMap.dsh` position fields while the client downloads the matching resources.
@@ -322,15 +328,176 @@ Response strategy:
 - implemented mapping:
 
 ```text
-objid=NN -> wMap.dsh row with ID or teleport_id NN
-wMap.lower_map + (curid-1 when curid is within scene_count) -> sMap.dsh row ID
-fallback for out-of-range curid -> wMap.lower_map first scene
-fallback only when DSH is unavailable -> first existing JHOnlineData/[c]NN..._%02M.sce
+objid=NN -> wMap.dsh row with teleport_id NN
+visible 16/4 fields do not carry selected child sMap row
+wMap.lower_map -> default sMap row
+if wMap.scene_count > 1, mark row_source=wmap-base-ambiguous in trace
 old fixed-coordinate behavior: curid=1 objid=22 -> 22HuoYanShan_01.sce @ (120,120)
-current expected behavior: curid=1 objid=22 -> 22HuoYanShan_01.sce @ sMap.dsh position when available
-current expected behavior: curid=20 objid=4 -> c04LinAnFu_01.sce @ sMap.dsh position, then normal local scene flow
-current missing-resource behavior: curid=1 objid=4 -> c04LinAnFu_01.sce with scene download enabled
+current visible-packet behavior: curid=1 objid=22 -> 22HuoYanShan_01.sce @ sMap.dsh position when available
+current visible-packet behavior: curid=1 objid=4 -> c04LinAnFu_01.sce @ sMap.dsh position, row_source=wmap-base-ambiguous
+current missing-resource behavior: DSH-derived scene name is preserved with scene download enabled
+unresolved behavior: no row/scene/position fallback; log action=no-fallback and continue investigation
 ```
+
+2026-06-30 missing-resource follow-up negative evidence:
+
+```text
+mock_teleport_stone_map_transfer curid=1 objid=4 scene=c04..._01 pos=(112,208)
+mock_scene_target_remember serial=2 scene=c04..._01 pos=(152,208) exit=29793
+```
+
+Two separate findings were present:
+
+- `curid=1` was incorrectly interpreted as child scene index `1`. Removing that
+  interpretation still leaves an ambiguity: with only `curid=1 objid=4`, a
+  real server cannot distinguish row `47` (`临安-南宣门`) from row `49`
+  (`临安-西宣门`). The mock must not read local UI memory to fill this gap.
+- the following `2/3` scene-change packet carried a non-authoritative `exitID`
+  value (`29793` in the sample). Because pending-target inheritance only worked
+  for `exitID=0`, the server fell through to SCE fallback and overwrote the DSH
+  landing point with the scene center `(152,208)`.
+
+Fix:
+
+- `16/4` DSH mapping uses only server-visible packet fields and DSH resources.
+  Multi-scene targets are explicitly traced as `row_source=wmap-base-ambiguous`
+  until a packet-visible child-scene selector is identified.
+- map-stone transfers set a separate `map_enter_pending` flag. The next
+  same-scene `2/3` target parse inherits the saved DSH scene/position regardless
+  of the later packet's `exitID`, and logs
+  `mock_scene_target_inherit_map_transfer`.
+- the target parse must not consume `map_enter_pending`. The dispatcher probes
+  scene-change packets through several narrow detectors before calling the
+  generic `builtin-scene-change` builder, so consuming the flag inside
+  `vm_net_mock_get_scene_change_target()` can make the real builder lose the
+  authoritative `16/4` scene/position.
+
+2026-06-30 野猪林 follow-up negative evidence:
+
+```text
+mock_scene_target_inherit_completed scene=06..._01.sce pos=(96,120) exit=0
+mock_scene_target_remember serial=15 scene=06..._01.sce pos=(96,120) exit=0
+net_send wt=2/3 source=builtin-scene-change ...
+mock_mmgame_scene_transfer_followup scene=06..._01.sce pos=(96,120) ...
+mock_update_chunk file=m_mount.gif ...
+ScreenInit Ok
+mock_scene_target_inherit_completed scene=06..._01.sce pos=(96,120) exit=0
+mock_scene_target_remember serial=16 scene=06..._01.sce pos=(96,120) exit=0
+```
+
+The first `25/5` correctly delivered the scene resource family plus `30/1`.
+The client then downloaded a missing GIF and re-entered the same scene init.
+That second `2/3` is a post-download repeat confirmation for the already
+completed destination. It must not re-arm `g_vm_net_mock_last_scene_change_target`,
+otherwise the next short `25/5` sends another resource family and the client
+loops through update/init until it crashes.
+
+Fix:
+
+- completed-scene inheritance and completed-repeat suppression now share the
+  same server-side reuse window;
+- completed-repeat identity is scene plus landing coordinate, not `exitId`,
+  because the repeat confirmation can legally arrive as `exitID=0` after a
+  `16/4` destination was remembered with another entry id;
+- repeated same-arrival `2/3` now logs
+  `mock_scene_change_completed_repeat_ack` and remains an ack-only response.
+  It must not be followed by another same-target
+  `mock_mmgame_scene_transfer_followup`.
+
+2026-06-30 雁门关 follow-up negative evidence:
+
+```text
+mock_scene_target_inherit_completed scene=c08..._01.sce pos=(80,160) exit=0
+mock_scene_target_remember serial=26 scene=c08..._01.sce pos=(80,160) exit=0
+net_send wt=2/3 source=builtin-scene-change ...
+mock_mmgame_scene_transfer_followup scene=c08..._01.sce pos=(80,160) ...
+```
+
+This proved the previous fix was incomplete. The target parser inherited the
+completed destination, but the inherited target could still carry an old
+`needsSceneDownload` flag from the earlier missing-resource phase. In
+`vm_net_mock_build_scene_change_combo_response()`, that download branch ran
+before the completed-repeat rearm suppression and remembered the same target
+again.
+
+Fix:
+
+- `vm_net_mock_mark_completed_scene_change_target()` clears
+  `needsSceneDownload`; a completed enter target must be treated as past the
+  download phase;
+- completed-target inheritance also clears `needsSceneDownload`;
+- combo handling logs `mock_scene_change_completed_stale_download` and clears
+  the flag if a completed-repeat target ever arrives with stale download state.
+
+2026-06-30 大理/金蛇谷 target negative evidence:
+
+```text
+manual target: 大理
+runtime target: scene=19金蛇谷_01.sce pos=(80,168)
+```
+
+Local `wMap.dsh` shows the ambiguity:
+
+```text
+row ID=18 teleportID=19 name=金蛇谷 lower_map=126
+row ID=19 teleportID=18 name=大理 lower_map=130
+```
+
+IDA evidence for `SendItemUseReq(0x0103573A)` says `objid` is the selected
+world-map row's teleport id, not the DSH row id. The old server lookup accepted
+`teleportId == objId || rowId == objId` in file order, so `objid=18` matched
+row ID `18` first and incorrectly entered 金蛇谷.
+
+Fix:
+
+- wMap lookup uses only `teleportId == objId`;
+- `rowId == objId` is not a valid server interpretation for `16/4`;
+- if `teleportId`, `sMap` row, scene key, or landing position cannot be resolved
+  from authoritative server data, the handler logs
+  `mock_teleport_stone_map_unresolved ... action=no-fallback` and returns no
+  synthetic target.
+
+2026-06-30 大理 resource-completion negative evidence:
+
+```text
+mock_scene_target_inherit_map_transfer scene=c18DaLi_01.sce pos=(80,144)
+mock_mmgame_scene_transfer_followup scene=c18DaLi_01.sce pos=(80,144) ...
+mock_update_chunk file=c18DaLi_01.sce ...
+ScreenInit Ok
+mock_scene_change_completed_repeat_ack scene=c18DaLi_01.sce pos=(80,144) ...
+mock_update_chunk file=18DaLi_01.map ...
+pc=0x0100575e lr=0x0104678f
+```
+
+IDA/runtime interpretation:
+
+- `0x0100575e` writes the decoded map-data pointer into the scene map-layer
+  host object. The crash had a valid map-data pointer but an invalid host object
+  (`r0=0x20000`), so the target mapping was no longer the primary failure.
+- The server had marked the scene-change target as completed immediately after
+  the first resource-family + `30/1` response, even though the client had only
+  downloaded the SCE and still needed the SCE-declared primary MAP.
+- The next repeat `2/3` was therefore treated as a completed repeat ack. When
+  `18DaLi_01.map` arrived, the client rendered without a fresh pending scene
+  enter and crashed in the map-layer bind path.
+
+Corrected fix:
+
+- a real server does not inspect the client's writable resource cache to decide
+  whether a scene is ready;
+- `handle_update_chunk_response(0x010372D6)` only consumes the `18/7` response,
+  writes the chunk, clears network state, and returns. No separate
+  server-visible "download completed" request was found after the final chunk;
+- therefore the server-visible completion point is the final `18/7` response
+  itself: `request.start + response.data_len >= response.totalsize`;
+- when a final `18/7` resource chunk is delivered, the mock records
+  `mock_update_chunk_complete ... action=allow-scene-reenter`;
+- if the client then calls `EnterSceneByMapName(0x01018150)` for the same scene,
+  the host same-screen guard allows that one re-enter and logs
+  `screen_mgr allow-update-reenter`;
+- this preserves the client-driven lifecycle after resource download without
+  guessing a fallback scene, reading client cache state, or pushing an unsolicited
+  business packet.
 
 2026-06-30 follow-up negative evidence:
 
@@ -368,18 +535,18 @@ Two additional issues were identified:
 - after the SCE had been downloaded, a later `2/3` request used `exitID=0` and
   did not repeat the map-stone coordinates. `vm_net_mock_get_scene_change_target()`
   now inherits a pending/recent completed target for the same scene before trying
-  to re-derive an entry spawn. If no previous target exists, the generic fallback
-  is the raw SCE center. For the downloaded `c04LinAnFu_01.sce`, the SCE2 header
-  gives width `304` and height `416`, so that fallback would be `(152,208)`.
+  to re-derive an entry spawn. If no authoritative target exists, the server
+  must not invent one for `16/4`; leave the packet unresolved and investigate
+  the missing selector/data source.
 - the client can emit a post-enter combo ordered as
   `2/10 + 2/3 + 27/11 + 7/42`. The existing post-enter handler only accepted
   `25/5 + 2/3 + 27/11 + 7/42`, so the new actor-other ordered variant is handled
   narrowly and reuses the same completion response family.
 
-The fallback runtime scan intentionally excludes `b_*.sce` regional-map index
-scenes. Town-style resources such as `c04LinAnFu_01.sce`, `c08YanMenGuan_01.sce`,
-`c14ShuShan_01.sce`, `c18DaLi_01.sce`, and `c24XiaKeDao_01.sce` are accepted
-through the `cNN` prefix only when the DSH map tables are unavailable.
+The older runtime directory scan has been removed from the `16/4` path. Map
+stone targets must come from server-visible request fields plus `wMap.dsh` /
+`sMap.dsh`; directory names are not an authoritative substitute for server map
+data.
 
 ### Post-enter Combo
 
@@ -476,3 +643,96 @@ from the selected scene's SCE dimensions instead of a fixed point.
 - The scan maps by local resource naming, not by an authoritative server table.
   If a live server later proves a different first landing scene for a specific
   `objid`, add a narrow override before the scan.
+
+### 2026-06-30 Dali Child Scene Evidence
+
+Runtime request:
+
+```text
+mock_teleport_stone_map_transfer curid=2 objid=18 smap_row=130 scene_count=3 row_source=wmap-base-ambiguous scene=c18大理_01 pos=(80,144)
+```
+
+Manual UI target was `大理校场`, but the server selected the wMap base sMap row.
+Local server tables:
+
+```text
+wMap: teleportID=18 name=大理 lower_map=130 scene_count=3
+sMap 130: c18大理_01.sce alias=大理街市 pos=(80,144)
+sMap 131: c18大理_02.sce alias=大理校场 pos=(112,144)
+sMap 132: c18大理_03.sce alias=大理东市 pos=(144,144)
+```
+
+New server rule:
+
+- `objid` still selects the wMap row by `teleportID`;
+- if `1 <= curid <= scene_count`, treat `curid` as the selected child index and
+  use `lower_map + curid - 1`;
+- otherwise keep the previous base-row behavior and mark `row_source=wmap-base-ambiguous`.
+
+This keeps earlier `curid=20 objid=4` evidence from forcing an out-of-range child
+row, while allowing visible child selections like `curid=2 objid=18` to resolve
+to the authoritative `sMap.dsh` row.
+
+### 2026-06-30 Dali Street Pending Consumption
+
+Runtime negative evidence:
+
+```text
+mock_teleport_stone_map_transfer curid=1 objid=18 smap_row=130 scene_count=3 row_source=wmap-curid-index scene=c18大理_01 pos=(80,144) download=0
+mock_scene_enter_defer phase=mmgame-scene-transfer-followup scene=c18大理_01 pos=(80,144) exit=1 missing=- keep_pending=1
+mock_mmgame_scene_transfer_followup scene=c18大理_01 pos=(80,144) objects=9 resp=348 complete=0
+```
+
+Interpretation:
+
+- `16/4` resolved correctly from server-visible DSH data: Dali street is
+  `sMap` row `130`, scene `c18大理_01`, landing `(80,144)`.
+- `missing=-` proves the stall was not a resource lookup failure.
+- The failure was an event-order bug in the mock server: the target resolver
+  consumed `g_vm_net_mock_teleport_stone_map_enter_pending` while narrow
+  scene-change detectors were only probing the packet. When the real generic
+  `2/3` response builder ran, it no longer inherited the saved `16/4` target and
+  could mark the target as `needsSceneDownload`, causing the later `25/5`
+  follow-up to stay `complete=0`.
+
+Fix:
+
+- `vm_net_mock_get_scene_change_target()` is now side-effect free for
+  map-transfer inheritance;
+- map-transfer pending is still cleared by the real completion paths
+  (`post-enter`, `mmgame-scene-transfer-followup`, or task-subset completion),
+  after the response contract has actually advanced.
+
+### 2026-06-30 Server Resource Authority
+
+Runtime negative evidence from a map-stone jump to the `23` area:
+
+```text
+mock_scene_target_inherit_map_transfer scene=23..._06.sce pos=(128,184) request_exit=0 saved_exit=1
+mock_scene_enter_defer phase=mmgame-scene-transfer-followup scene=23..._06.sce pos=(128,184) exit=1 missing=- keep_pending=1
+mock_mmgame_scene_transfer_followup scene=23..._06.sce pos=(128,184) objects=9 resp=353 complete=0
+mock_update_chunk file=m_castle2.gif ...
+screen_mgr allow-update-reenter scene=23..._06.sce pos=(128,184) exit=1 file=m_castle2.gif
+```
+
+Interpretation:
+
+- the `16/4` DSH target was already correct: scene `23..._06.sce`, landing
+  `(128,184)`;
+- `missing=-` means the defer was not naming a concrete resource from a server
+  missing-resource decision;
+- `complete=0` came from a stale `needsSceneDownload` flag set while checking
+  `JHOnlineData/<scene>` under the emulator working directory. When the emulator
+  runs from `bin/`, that path is the client's writable cache, not the server's
+  resource source.
+
+Fix:
+
+- scene existence and SCE parsing now read only server resource paths:
+  `../web/fs/JHOnlineData` when launched from `bin/`, or
+  `web/fs/JHOnlineData` when launched from the workspace root;
+- named `18/7` update chunks use the same server resource source and no longer
+  fall back to the client cache;
+- if the client lacks a GIF/MAP/SCE locally, it still drives the normal `18/7`
+  download flow. That download should not cause `16/4` targets to be marked as
+  unresolved on the server side.
