@@ -292,26 +292,94 @@ IDA evidence:
 - A later random-map validation produced `curid=20 objid=4` and correctly
   landed on `c04LinAnFu_01.sce`, so `curid` is only treated as a preferred
   exact scene index, not as an authoritative sub-scene id.
+- Runtime on 2026-06-30 produced `curid=1 objid=4` while the local
+  `JHOnlineData` directory only contained Penglai SCE files. The old
+  directory-scan mapping failed and logged `scene_source=default`, incorrectly
+  entering `c00Penglai_01` instead of the selected LinAnFu map.
+- Local `wMap.dsh` row `ID=4 / teleport_id=4` maps to `lower_map=47` and
+  `scene_count=10`. Local `sMap.dsh` row `ID=47` contains the real target scene
+  `c04LinAnFu_01.sce`. This pair is the authoritative local resource table for
+  map-stone scene-name mapping.
 
 Response strategy:
 
 - return a `1/16/2` object instead of a same-subtype `16/4` object;
 - reuse the already validated `result + scene + posinfo + exitid` scene-enter
   contract consumed by `mmGame:0x11CE` / `mmBattle:0x1868`;
+- do not use a fixed `(120,120)` landing point. The request carries only
+  `curid/objid`, so the server maps those ids through the real local DSH tables:
+  `wMap.dsh` chooses the sub-map row range, and `sMap.dsh` supplies the target
+  scene file name.
+- when `sMap.dsh` supplies position fields, keep those coordinates as the map
+  stone landing point. If the row has no usable position, derive a fallback from
+  the raw SCE header width/height: `(width/2,height/2)`, then the existing
+  edge-portal safe-landing adjustment.
+- when the target SCE is missing, keep the `sMap.dsh` scene file name in the
+  response instead of falling back to the default scene, and preserve the
+  `sMap.dsh` position fields while the client downloads the matching resources.
+- exported `scene.json` files are reference material only and must not be used
+  as a runtime data source.
 - implemented mapping:
 
 ```text
-objid=NN curid=M -> first existing JHOnlineData/[c]NN..._%02M.sce
-fallback -> JHOnlineData/[c]NN..._01.sce, then any [c]NN*.sce, then default scene
-validated: curid=1 objid=22 -> 22HuoYanShan_01.sce @ (120,120)
-validated: curid=20 objid=4 -> c04LinAnFu_01.sce @ (120,120), then normal local scene flow
+objid=NN -> wMap.dsh row with ID or teleport_id NN
+wMap.lower_map + (curid-1 when curid is within scene_count) -> sMap.dsh row ID
+fallback for out-of-range curid -> wMap.lower_map first scene
+fallback only when DSH is unavailable -> first existing JHOnlineData/[c]NN..._%02M.sce
+old fixed-coordinate behavior: curid=1 objid=22 -> 22HuoYanShan_01.sce @ (120,120)
+current expected behavior: curid=1 objid=22 -> 22HuoYanShan_01.sce @ sMap.dsh position when available
+current expected behavior: curid=20 objid=4 -> c04LinAnFu_01.sce @ sMap.dsh position, then normal local scene flow
+current missing-resource behavior: curid=1 objid=4 -> c04LinAnFu_01.sce with scene download enabled
 ```
 
-The runtime scan intentionally excludes `b_*.sce` regional-map index scenes.
-Town-style resources such as `c04LinAnFu_01.sce`, `c08YanMenGuan_01.sce`,
+2026-06-30 follow-up negative evidence:
+
+```text
+mock_update_chunk file=c04LinAnFu_01.sce ...
+mock_update_chunk file=04LinAnFu_01.map ...
+net_send wt=6/1 source=builtin-scene-resource-followup ...
+screen_mgr same ... scene= pos=(0,0) exit=0
+```
+
+The download itself succeeded, but the earlier `2/3` scene-change ack for a
+missing SCE cleared `g_vm_net_mock_last_scene_change_target_valid`. The later
+`25/5` and `6/1` follow-ups therefore lost the original `c04LinAnFu_01.sce`
+target and fell back to current/default scene data. The fix is to keep missing
+SCE targets pending across the download window:
+
+```text
+2/3 missing-SCE ack -> keep pending target
+25/5 before file exists -> light ack only, keep pending target
+18/7 chunks -> client writes SCE/MAP/GIF resources
+6/1 after file exists -> refresh pending target from raw SCE, then emit resource follow-up + 30/1
+later task subset -> close deferred target with normal 30/2/27 completion
+```
+
+2026-06-30 follow-up after the above fix:
+
+```text
+mock_scene_target_remember serial=2 scene=c04LinAnFu_01 pos=(0,0) exit=0
+mock_mmgame_scene_transfer_followup scene=c04LinAnFu_01 pos=(0,0) ...
+unhandled wt=2/10 len=84 objects=1 first=1/2/10:10,1/2/3:50,1/27/11:0,1/7/42:0
+```
+
+Two additional issues were identified:
+
+- after the SCE had been downloaded, a later `2/3` request used `exitID=0` and
+  did not repeat the map-stone coordinates. `vm_net_mock_get_scene_change_target()`
+  now inherits a pending/recent completed target for the same scene before trying
+  to re-derive an entry spawn. If no previous target exists, the generic fallback
+  is the raw SCE center. For the downloaded `c04LinAnFu_01.sce`, the SCE2 header
+  gives width `304` and height `416`, so that fallback would be `(152,208)`.
+- the client can emit a post-enter combo ordered as
+  `2/10 + 2/3 + 27/11 + 7/42`. The existing post-enter handler only accepted
+  `25/5 + 2/3 + 27/11 + 7/42`, so the new actor-other ordered variant is handled
+  narrowly and reuses the same completion response family.
+
+The fallback runtime scan intentionally excludes `b_*.sce` regional-map index
+scenes. Town-style resources such as `c04LinAnFu_01.sce`, `c08YanMenGuan_01.sce`,
 `c14ShuShan_01.sce`, `c18DaLi_01.sce`, and `c24XiaKeDao_01.sce` are accepted
-through the `cNN` prefix and normalized by the existing scene-enter helper when
-needed.
+through the `cNN` prefix only when the DSH map tables are unavailable.
 
 ### Post-enter Combo
 
@@ -351,11 +419,11 @@ mock_teleport_stone_list entries=1 exitinfo_len=...
 mock_teleport_stone_transfer subtype=2 ... response=16/2-confirm-target pending=0 confirm=1
 mock_teleport_stone_transfer subtype=3 ... response=scene-channel-enter-confirm-target pending=0 confirm=1
 mock_teleport_stone_direct_enter_followup scene=... pos=(...) objects=... response=scene-task-subset
-mock_teleport_stone_map_transfer curid=... objid=... scene=... pos=(...)
+mock_teleport_stone_map_transfer curid=... objid=... scene=... pos=(...) scene_source=... pos_source=... download=...
 mock_teleport_stone_post_enter scene=... pos=(...) objects=4
 ```
 
-Default target:
+Direct-transfer and last-resort fallback target:
 
 ```text
 scene = vm_net_mock_default_scene_name()
@@ -390,9 +458,10 @@ confirm if a prompt appears
 ```
 
 The current deterministic smoke path uses the HuoYanShan world node and reaches
-`22HuoYanShan_01.sce @ (120,120)` without unhandled packets. The handler now
-uses the same `curid/objid` packet shape for any local map group that has a
-matching SCE resource under `JHOnlineData`.
+the selected `22HuoYanShan_01.sce` scene without unhandled packets. The handler
+now uses the same `curid/objid` packet shape for any local map group that has a
+matching SCE resource under `JHOnlineData`, and derives the landing coordinate
+from the selected scene's SCE dimensions instead of a fixed point.
 
 ## Unknowns
 

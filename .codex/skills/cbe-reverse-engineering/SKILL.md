@@ -13,6 +13,8 @@ Do not patch game logic, bypass branch conditions, or force gameplay by writing 
 
 Allowed host-side writes are limited to emulator framework mechanics already required for I/O: allocating/copying response buffers with `vm_malloc`/`uc_mem_write`, queueing scheduler network events, and read-only tracing/instrumentation. Treat existing compatibility shims as legacy surface; do not expand them as a solution pattern.
 
+Runtime mock behavior must not depend on reverse-engineering exports such as `tmp/all_sce_bundle/*/scene.json`. Use those exports only as human reference material. Implement data-driven behavior from client request packets, real game resources such as SCE/DSH files, and IDA parser evidence.
+
 ## First pass
 
 1. Inspect local context before guessing:

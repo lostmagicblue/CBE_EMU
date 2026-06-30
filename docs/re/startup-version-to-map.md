@@ -47,3 +47,107 @@ Final screenshot reached the map UI with title `蓬莱仙岛_十二域` and the 
 - The title/login chain still emits repeated queued event entries while callbacks are pending. Current behavior is parser-safe and reaches map, but the scheduler duplicate policy may need a separate cleanup pass.
 - The role-list wait response is still staged as a no-op before explicit server select; keep it unless IDA evidence proves the live server combines those payloads.
 
+## 2026-06-29 Update-Chunk Guard
+
+Resource update chunks are confirmed as WT `18/7` requests with
+`name/screen/type/start/version` fields (`send_update_chunk_request`
+`0x01036D80`). The old dispatch guard only searched for `start` plus `id` or
+`name`, which can accidentally consume scene packets such as WT `2/3` when
+their payload happens to contain those strings.
+
+`builtin-update-chunk` is now gated by WT kind/subtype `18/7` plus the existing
+`start` and `id/name` field evidence.
+
+## 2026-06-29 Clean Resource Release Version Loop
+
+After clearing the released resource directory, the client can recreate
+`JHOnlineData/mmGameMstarWqvga.cbm` and `JHOnlineData/mmorpg_updateversioncbm`
+without creating `JHOnlineData/MMORPGTempcbm`. Treating the temp network-update
+name as mandatory makes the server answer `WT 18/5` with `result=1`, then the
+client repeatedly calls `send_update_chunk_request(2)` and emits `WT 18/6`.
+
+IDA evidence:
+
+- `handle_version_update_response` at `0x01037473` handles kind `18`. For
+  subtype `5`, `result & 1` enters the update-chunk path; otherwise it marks
+  version negotiation complete.
+- `send_update_chunk_request` at `0x01036D80` sends subtype `6` for the main
+  update payload and subtype `7` for named resource chunks.
+- `handle_update_chunk_response` reads subtype `6` as
+  `totalsize/crc/version/data`; subtype `7` additionally reads `type/name`.
+
+Fix:
+
+- Installed-resource detection now accepts the released `mmGameMstarWqvga.cbm`
+  when `mmorpg_updateversioncbm` exists, instead of requiring
+  `MMORPGTempcbm`.
+- `WT 18/6` is handled before the generic version handler and returns a narrow
+  subtype `6` chunk response. This prevents the generic `version` detector from
+  answering a chunk request with another subtype `5` response.
+
+## 2026-06-30 Named Resource Update Cache Pollution
+
+Runtime failure:
+
+```text
+mock_update_chunk subtype=7 start=45056 chunk=3802 total=48858 source=00_*.sce
+vm_malloc FAILED size=4278124288
+```
+
+The crash happened after the update screen because `WT 18/7` requested a named
+scene resource, but the mock could read the client's writable
+`JHOnlineData/<name>` cache first. A previous bad run had written
+`mmGameMstarWqvga.cbm` bytes into `JHOnlineData/00_蓬莱仙岛01.sce`; the file was
+48858 bytes and had the same hash as the main CBM. The client accepted the
+`name` field and wrote the payload as `.sce`, then later loaded it as scene
+data and read a bogus large allocation size.
+
+IDA evidence:
+
+- `handle_update_chunk_response` at `0x010372D6` reads subtype `7` fields
+  `totalsize`, `crc`, `version`, `type`, `name`, and `data`.
+- It copies the response `name` into a local buffer, accumulates a signed-byte
+  checksum over `data`, and writes the completed named resource through
+  `WriteResBinToTempFile(name, buffer)`.
+
+Fix:
+
+- Named update chunks now prefer clean server resources under
+  `../web/fs/JHOnlineData/<name>` or `web/fs/JHOnlineData/<name>` before falling
+  back to the writable client cache. The `../web/fs` form is required when the
+  emulator is launched from `bin/`.
+- Named update chunks no longer fall back to wrapping the main CBM as a missing
+  resource. If the named resource is missing, the `18/7` handler records a
+  `mock_update_chunk_missing` line and does not fall through to the generic
+  version handler.
+- `mock_update_chunk` logs convert the GBK request name to UTF-8 and include the
+  clean source path:
+
+```text
+mock_update_chunk subtype=7 file=00_蓬莱仙岛01.sce start=0 chunk=279 total=279 ... path=web/fs/JHOnlineData/00_蓬莱仙岛01.sce
+```
+
+2026-06-30 follow-up: after teleporting into `c04临安府_03`, the client repeatedly
+entered the update screen and then crashed in `SetMapAndClampViewport(0x0100575C)`
+from `DrawSceneMapLayer(0x0104676C)`. Local evidence showed the writable cache
+had polluted files:
+
+```text
+web/fs/JHOnlineData/c04临安府_03.sce 397 bytes
+bin/JHOnlineData/c04临安府_03.sce    469 bytes
+web/fs/JHOnlineData/04临安府_03.map  874 bytes
+bin/JHOnlineData/04临安府_03.map     508 bytes
+```
+
+If `WT 18/7` runs from `bin/` and cannot find `../web/fs`, it can fall back to the
+polluted `JHOnlineData` cache and re-serve the bad map/SCE bytes. The update
+source search order now covers both working directories before the cache fallback.
+
+Validation:
+
+- Temporarily removed the polluted `bin/JHOnlineData/00_蓬莱仙岛01.sce`.
+- Runtime downloaded `00_蓬莱仙岛01.sce`, `00_蓬莱仙岛01.map`, and
+  `m_palace2.gif` from `web/fs/JHOnlineData`.
+- The recreated `bin/JHOnlineData/00_蓬莱仙岛01.sce` is 279 bytes and the game
+  reached the map screen.
+

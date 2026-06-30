@@ -38,9 +38,11 @@ serving the old cached scene/coordinate until a later save happened.
 
 ## Implementation
 
-- New/default roles now initialize to the fixed Penglai starting scene returned
-  by `vm_net_mock_default_scene_name()` with `VM_NET_MOCK_ROLE_INITIAL_X/Y`
-  `(223,382)`.
+- New/default roles now initialize to Penglai TongQueTai
+  `c00蓬莱仙岛_01.sce` with `VM_NET_MOCK_ROLE_INITIAL_X/Y` `(216,216)`.
+  The older `(223,382)` coordinate is that scene's edge-portal spawn near the
+  route to `00蓬莱仙岛_02.sce`, so it is intentionally no longer used for first
+  login.
 - The role DB no longer imports the legacy player-position file during
   initialization, and the mock no longer writes that file as a mirror.
 - The process player-position cache and loaded flag were removed. Scene helpers

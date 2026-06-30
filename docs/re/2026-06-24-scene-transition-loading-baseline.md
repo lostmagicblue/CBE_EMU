@@ -364,7 +364,7 @@ Status: validated
 
 ### Unknowns
 
-- `edge_portal.targetEntryId` 的完整语义还没完全读透。当前运行证据显示这条链应优先使用请求 `exitID` / 源 `entryId` 去匹配目标 scene entry；如果后续地图发现反例，需要回到客户端 edge portal parser 继续核对。
+- `edge_portal.targetEntryId` 不能作为目标落点 fallback；它可以作为源 portal 反查键。运行证据显示客户端请求里的 `exitID` 可能对应源记录的 `target_entry_id`，而真正目标落点仍应使用同一源记录的 `entry_id` 去目标 SCE 查 spawn。
 - 当前 JSON 读取器只覆盖已经确认会影响边缘传送的导出字段，不把它扩展成完整 JSON/SCE 反序列化器；后续每增加新字段都必须先有 IDA 或运行证据。
 
 ## 18. 追加规则：缺 SCE 数据时触发客户端下载而不是坐标回退
@@ -408,3 +408,65 @@ Status: validated
 
 - 后续任何地图切换问题都先确认目标 SCE/JSON 是否可读；不可读时只能走 download ack，不允许新增手写坐标 fallback。
 - 新增地图支持时，优先补 SCE 解包/JSON 读取或验证 `18/7` 下载链路；静态 fallback 只能作为明确标注的临时兼容项，并且不能覆盖普通 scene key。
+
+## 19. 追加取证：铜雀台下出口到铸剑谷上入口
+
+- 日期：2026-06-30
+- 用户反馈：从 `蓬莱-铜雀台` 下方传送点进入 `蓬莱-铸剑谷` 后，人物出现在铸剑谷下方传送点附近；理论上应出现在铸剑谷上方入口附近。
+
+### SCE 证据
+
+- `c00蓬莱仙岛_01.sce` 下边缘出口：
+  - trigger rect: `(203,402)-(240,422)`
+  - target scene: `00蓬莱仙岛_02.sce`
+  - `entry_id=1`, `target_entry_id=0`
+  - source-side spawn point: `(223,382)`
+- `00蓬莱仙岛_02.sce` 入口：
+  - `entry_id=1` 的 spawn point 是 `(128,45)`，位于铸剑谷上方入口；
+  - `entry_id=0` 的 spawn point 是 `(396,473)`，位于铸剑谷下方/右下入口。
+
+### IDA / 客户端证据
+
+| binary | function/address | finding |
+| --- | --- | --- |
+| `江湖OL.CBE` | `sub_1018166` / `0x01018166` | 本地场景逻辑遍历 `Global_R9 + 23780` 的 32 字节 move entry；命中 trigger rect 后把 `entry+16` 的目标场景名复制到 scene object，并把 `entry+0` 写入 `Global_R9 + 23692`。这说明运行时切图的源身份来自当前场景的 move entry。 |
+| `江湖OL.CBE` | `scene_handle_change_result_scene_pos` / `0x01039890` | `30/2` 在 `result==1` 后读取 `scene` 与 tagged `posinfo`，并调用 scene object 的 enter/update 方法。服务端响应坐标就是最终落点。 |
+| `江湖OL.CBE` | `scene_handle_enter_with_scene_pos` / `0x010396D6` | `30/1` 同样读取 `scene + posinfo`，坐标流格式为两个 tagged i16。 |
+| `江湖OL.CBE` | `EnterSceneByMapName` / `0x01018150` | 把场景名复制到 scene object，并写入目标 x/y 后触发生命周期切换。 |
+
+### 批量 SCE 证据
+
+- `tmp/all_sce_export/*.json` 统计到 `317` 条 `edge_portal`，覆盖 `151` 张场景。
+- 其中 `249` 条记录的 `entry_id != target_entry_id`。
+- 示例：`c00蓬莱仙岛_01.sce -> 00蓬莱仙岛_02.sce` 的源入口是 `entry_id=1,target_entry_id=0`；目标图 `entry_id=1` 是铸剑谷上入口 `(128,45)`，`entry_id=0` 是下入口 `(396,473)`。
+- 结论：`target_entry_id` 不能作为目标落点 fallback；它只可用于从源 SCE 中按请求 `exitID` 反查 portal。通用落点规则仍是“选中的源 portal 的 `entry_id` 去目标 SCE 查同 id 入口”。
+
+### 根因
+
+- 旧实现中 `vm_net_mock_get_scene_change_target()` 在解析 `WT 2/3` 时优先按“目标地图 `mapID` + 请求 `exitID`”读取目标 SCE entry。
+- 当请求上下文与当前源入口不一致时，旧代码会直接选择目标图的错误 entry，例如铸剑谷 `entry_id=0` 的 `(396,473)`。
+- 本轮运行输出确认初次 `WT 2/3 len=74` 后仍进入 `00蓬莱仙岛_02.sce pos=(389,473) exit=0`，说明请求 `exitID=0` 对应的是源记录的 `target_entry_id=0`，不能直接拿去目标图查 spawn。
+- 但源 SCE 明确说明玩家踩到的是 `c00蓬莱仙岛_01.sce` 的 `entry_id=1` 边缘出口，对应目标图应优先落到同 entry 的入口，即铸剑谷上方 `(128,45)`。安全落点调整后会避开上方触发矩形。
+
+### 实现结论
+
+- `src/mock-server.c` 增加源 SCE portal 上下文优先解析：
+  - `WT 2/3` 解析出 `mapID/exitID/maptype` 后，先读取当前玩家格点；
+  - 先用角色最后稳定场景与当前 runtime scene 作为源 scene 候选，但必须经过 SCE 校验，不能直接当坐标来源；
+  - 若源 scene 的 `edge_portal` trigger rect 命中当前位置，并且该 portal 的 target scene 与请求 `mapID` 一致，则采用该源 portal；
+  - 若客户端已经进入 pending 本地切图态，且 scene object `+0x475` 的 pending target scene 与请求 `mapID` 一致，则允许用请求 `exitID == source_portal.target_entry_id` 反查源 portal；
+  - 坐标只采用选中源 portal 的 `entry_id` 去目标 scene 查同 id spawn；`target_entry_id` 不再作为目标图落点；
+  - 如果源 portal 命中但目标 SCE entry 解不出，则返回无 `posinfo` 的 scene ack，等待客户端下载/补资源，不再伪造另一条入口坐标。
+- 目标 SCE entry 直接查询仍保留为 fallback，用于没有实时源 portal 上下文的启动、传送石、或其他非边缘路径；普通下载 key 不允许再落到静态坐标表。
+
+### 验证点
+
+- 预期日志：
+  - `mock_scene_change_source_portal source_kind=role-pending source=c00蓬莱仙岛_01... request=00蓬莱仙岛_02.sce request_exit=0 portal_entry=1 targetEntry=0 match=target-entry ... target=(128,57)`
+  - `target=(128,57)` 是 `(128,45)` 经过上方触发矩形 `(108,5)-(148,25)` 的 32px 安全间隔调整后的落点。
+- 若出现 `mock_scene_portal_exit_mismatch`，说明请求 `exitID` 与源 SCE `target_entry_id` 不一致，应继续追 `0x01018166` 到 `WT 2/3` 组包之间的字段来源，而不是新增地图特殊处理。
+- 若出现 `mock_scene_change_source_probe_miss`，说明 pending target 已匹配请求，但角色稳定场景/runtime scene 中没有找到满足 target/exit 的源 portal，需要继续追 SCE 载入到 move entry 的字段映射。
+- 本轮自动化烟测：
+  - `make` 通过；
+  - 使用 `CBE_SCENE_KEY=c00蓬莱仙岛_01.sce` 与 `hold:8` 能进入地图并连续产生 `WT 2/1 moveinfo`，但脚本没有稳定走入下边缘触发矩形，因此未触发目标 `WT 2/3`；
+  - 该自动化结果只证明没有启动/移动断言，不能当作 portal 修复的完整运行通过证据。需要手动或更精确的点击/坐标驱动继续确认。

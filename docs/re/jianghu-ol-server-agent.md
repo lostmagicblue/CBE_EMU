@@ -28,6 +28,7 @@
 - 通过改寄存器返回值、改 PC/LR、直接调用 screen change 等方式伪造进度。
 - 用宽泛 detector 吞掉未知请求，比如只看一个字符串就返回大包。
 - 在没有客户端解析证据时猜字段含义并长期保留。
+- 在 mock-server 运行时依赖逆向导出的 JSON 文件作为业务数据源。`tmp/all_sce_bundle/*/scene.json` 等导出文件只能作为人工参考，实际实现优先从客户端请求包、真实资源文件（如 SCE/DSH）和 IDA parser 证据中取数。
 
 允许：
 

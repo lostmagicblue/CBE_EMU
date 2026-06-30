@@ -160,8 +160,8 @@ sex = 0
 hp/mp = 120/100
 money = 1000
 backpackCapacity = 40
-scene = default local Penglai scene
-position = 223,382
+scene = c00蓬莱仙岛_01.sce (Penglai TongQueTai)
+position = 216,216
 backpack = item 800 seq 1 count 5
 nextBackpackSeq = 2
 equippedItemIds[0] = 1001
@@ -224,9 +224,9 @@ Title role list:
   `activeRoleId` before scene/login actorinfo is built. Scene helpers read
   `scene/x/y` from that active role row.
 - title role create handles request `1/1/7`, appends a persisted role when
-  capacity allows it, starts the new role at the default Penglai position with
-  the default teleport-stone stack, and returns `actorid/result` to the title
-  parser.
+  capacity allows it, starts the new role at Penglai TongQueTai
+  `c00蓬莱仙岛_01.sce @ (216,216)` with the default teleport-stone stack, and
+  returns `actorid/result` to the title parser.
 - role DB load repairs duplicate legacy rows that were previously persisted
   with the default name after a create-payload decode miss. The first default
   role keeps the GBK default name; later duplicate default rows become stable

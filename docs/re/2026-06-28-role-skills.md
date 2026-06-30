@@ -207,3 +207,29 @@ learnednum as u32 -> client getter +0x48 read 0, so no skill IDs were consumed.
 learnedskill via blob helper -> client read 262144 because the extra length
 prefix shifted the tagged-u32 stream by two bytes.
 ```
+
+## 2026-06-29 Compact Scene Skill/Default Follow-up
+
+New runtime after role-select map entry produced a shorter post-`ScreenInit`
+request:
+
+```text
+unhandled wt=12/1 len=19 first=1/12/1:0,1/7/42:0,1/25/5:0
+```
+
+This is not the full first-scene resource/task family. Returning the older
+`scene-resource-followup` response with a trailing `30/1` re-entered the scene
+again (`screen_mgr same`) and sent the client into resource/download churn.
+
+The mock now handles the exact three-empty-object signature as
+`builtin-scene-compact-skill-default` and returns only:
+
+```text
+1/12/1 learned skills
+1/7/42 empty books
+1/17/1 backpack item refresh
+1/25/5 { result = 4 }
+```
+
+It intentionally does not append `30/1` or `30/2`; the request arrives after the
+scene screen has already initialized.
