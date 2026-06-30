@@ -47,6 +47,44 @@ Final screenshot reached the map UI with title `蓬莱仙岛_十二域` and the 
 - The title/login chain still emits repeated queued event entries while callbacks are pending. Current behavior is parser-safe and reaches map, but the scheduler duplicate policy may need a separate cleanup pass.
 - The role-list wait response is still staged as a no-op before explicit server select; keep it unless IDA evidence proves the live server combines those payloads.
 
+## 2026-06-30 No-Account Login Server List
+
+Runtime negative evidence:
+
+```text
+net_send connect=2 wt=1/12 len=86 source=builtin-login resp=141
+net_send connect=2 wt=1/12 len=86 source=builtin-login resp=23
+net_send connect=2 wt=1/16 len=9 source=builtin-title-rolelist-wait-server-select resp=23
+```
+
+The no-account title button sends subtype `1/1/12` with empty username and
+password. This first visible request should enter the server-list screen. Two
+bad response shapes were observed:
+
+- subtype-12 `result=1` without `serverinfo/servernum/color` moves the UI into a
+  list state with no rows to draw;
+- subtype-12 `result=4` with server info parses the list bytes but then enters
+  the `sub_10C6(..., sub_5922)` prompt/callback path, which can leave the title
+  screen resending the same `1/12` request.
+
+Fix:
+
+- for subtype `1/1/12` with empty username and password, the default/staged mode
+  returns subtype-12 `result=1` together with `serverinfo`, `color`, `servernum`,
+  and `newVer`;
+- subtype-12 result `3`/`4` remains available for explicit regression through
+  `CBE_ALT12_SERVERLIST_RESULT`, but is not the default no-account button
+  response.
+
+IDA evidence:
+
+- `mmTitleMstarWqvga.cbm:net_handle_login_response(0x16DC)` parses
+  `serverinfo/servernum/newVer` for result `'1'` when the stage flag is not `1`;
+- `login_alt_result_dispatch(0x19C2)` sends result `'1'` directly to
+  `login_stage_success_dispatch(0x1960)`, whose stageFlag `4` target is the
+  title list target;
+- result `'4'` goes through `sub_10C6(..., sub_5922)` before success dispatch.
+
 ## 2026-06-29 Update-Chunk Guard
 
 Resource update chunks are confirmed as WT `18/7` requests with

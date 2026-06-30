@@ -496,3 +496,52 @@ Status: validated
   - `make` 通过；
   - 使用 `CBE_SCENE_KEY=c00蓬莱仙岛_01.sce` 与 `hold:8` 能进入地图并连续产生 `WT 2/1 moveinfo`，但脚本没有稳定走入下边缘触发矩形，因此未触发目标 `WT 2/3`；
   - 该自动化结果只证明没有启动/移动断言，不能当作 portal 修复的完整运行通过证据。需要手动或更精确的点击/坐标驱动继续确认。
+
+## 2026-06-30 Same-Scene Repeat With Missing Entry
+
+Runtime negative evidence:
+
+```text
+mock_scene_entry_missing scene=00..._02.sce exit=0 action=no-center-fallback
+net_send connect=2 wt=2/3 len=74 source=builtin-scene-change resp=99
+mock_scene_enter_defer phase=mmgame-scene-transfer-followup scene=00..._02.sce pos=(0,0) exit=1 missing=- keep_pending=1
+mock_mmgame_scene_transfer_followup scene=00..._02.sce pos=(0,0) objects=9 resp=355 complete=0
+```
+
+The user-observed sequence is: first scene entry lands near the portal, then a
+second loading pass starts and the avatar moves outside the valid map area. The
+trace shows the second `WT 2/3` was resolved as an existing target scene with no
+SCE entry coordinates. The old code treated that as a pending scene-download
+target, then the later `25/5` follow-up sent a `30/1 scene+posinfo` object for
+`(0,0)`.
+
+Client evidence:
+
+| binary | function/address | finding |
+| --- | --- | --- |
+| `江湖OL.CBE` | `net_handle_scene_channel_dispatch(0x01039BB4)` | scene channel case `1` consumes `30/1`, case `2` consumes `30/2`; other objects are informational. |
+| `江湖OL.CBE` | `scene_handle_enter_with_scene_pos(0x010396D6)` | `30/1` reads `scene` and tagged `posinfo`, then drives the scene enter path. |
+| `江湖OL.CBE` | `EnterSceneByMapName(0x01018150)` | writes target scene and coordinates before triggering the scene lifecycle. |
+
+Implementation rule:
+
+- An existing server-side SCE with a missing entry is not a resource download
+  target. It means the current request did not carry enough source-portal
+  context for the server to compute an authoritative landing point.
+- For that unresolved existing-scene target, `WT 2/3` must be ack-only: send the
+  normal scene ack objects requested by the client, but do not call
+  `vm_net_mock_remember_scene_change_target()`, do not defer completion, and do
+  not save `(0,0)` as role position.
+- If a previous bad pending target is already present, the `25/5` follow-up must
+  clear it and return a default ack without `30/1`, because `30/1` would call
+  `EnterSceneByMapName(scene, 0, 0)`.
+
+Expected trace after the fix:
+
+```text
+mock_scene_entry_missing scene=... exit=0 action=no-center-fallback
+mock_scene_change_unresolved_entry_ack scene=... exit=0 action=ack-only-no-pending
+```
+
+There should be no subsequent
+`mock_mmgame_scene_transfer_followup scene=... pos=(0,0)` for that same target.

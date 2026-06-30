@@ -232,10 +232,14 @@ Fallback response shape:
 30/1 { scene, posinfo }
 ```
 
-The `30/1` scene and position come from the current runtime/active role state.
-If the live scene node exposes a player grid, that grid wins; otherwise the
-active role's persisted scene position is used. The final position passes
-through the same safe-landing adjustment as other scene-enter paths.
+The `30/1` scene comes from the current runtime/active role state. The target
+position must not reuse the current player coordinate, because the menu is
+usually clicked after that coordinate has already become bad. The server now
+uses the current coordinate only as a reference point, then selects the nearest
+non-zero SCE edge-entry spawn in the same scene and runs it through the normal
+safe-landing adjustment. For interior-only scenes without edge entries, the
+secondary target is the SCE-derived scene center, not a hand-written map
+constant or a JSON export.
 
 ## Implementation
 
@@ -455,6 +459,80 @@ confirmation (`result=2`), triggering the Kubao prompt. A new narrow handler
 
 It returns `16/2 result=1 + scene/posinfo/exitid`, using the current-scene
 unstuck target, so mmGame enters through `sub_BCC` instead of the payment prompt.
+
+## 2026-06-30 Unstuck Landing Point
+
+Manual runtime after a bad repeat scene-enter showed the compact `16/2`
+unstuck path was handled but did not move the character:
+
+```text
+mock_scene_target_remember serial=4 scene=00..._02.sce pos=(8,14) exit=0
+mock_settings_unstuck_16_2 scene=00..._02.sce pos=(8,14) response=16/2-direct-enter
+screen_mgr same ... scene=00..._02.sce pos=(8,14) exit=0
+```
+
+Root cause: `vm_net_mock_get_current_scene_unstuck_target()` used the current
+runtime grid as both the source coordinate and the destination coordinate. When
+the player is already outside the map, this re-enters the same bad point and
+then saves it back to the active role state.
+
+Fix:
+
+- keep the current grid only as the distance reference;
+- load the current `.sce` through the existing server-side SCE/LZSS reader;
+- choose the nearest non-zero `edge_portal.spawn` as the unstuck destination;
+- adjust that destination away from portal trigger rectangles with the existing
+  `vm_net_mock_adjust_safe_player_pos_for_scene()` helper;
+- print the chosen source as `mock_unstuck_target ... source=sce-nearest-entry`.
+
+If a scene has no edge entries, the compact unstuck path uses the SCE file's own
+dimensions to choose `source=sce-center`. This is scoped to the explicit
+unstuck feature and is not used by portal or teleport destination resolution.
+
+## 2026-06-30 Unstuck Follow-Up Reentry
+
+Manual runtime after the SCE-derived unstuck target showed the position moved to
+the intended unstuck point, but loading restarted several times:
+
+```text
+mock_scene_target_inherit_pending scene=00..._02.sce pos=(256,256) exit=0
+net_send connect=2 wt=2/3 len=74 source=builtin-scene-change resp=428
+ScreenInit Ok
+mock_scene_change_post_enter_followup scene=00..._02.sce pos=(256,256) objects=6 resp=259
+ScreenInit Ok
+```
+
+This sequence is not correct. The compact `16/2 result=1 + scene/posinfo`
+unstuck response is already a direct scene-enter contract consumed by
+`mmGame:sub_BCC(0x0BCC)`, which calls the scene-enter vtable with the supplied
+`scene`, `posinfo`, and `exitid`. The later `WT 2/3` and `25/5` packets are
+follow-up/completion traffic for the already-entered same scene; they must not
+send another `30/1` or `30/2` scene-position object.
+
+Fix:
+
+- settings unstuck responses now call
+  `vm_net_mock_mark_direct_scene_enter_completed()`: this still allocates a new
+  scene-change target serial for the host same-screen guard, but immediately
+  marks the target completed and clears pending state;
+- `vm_net_mock_build_scene_change_combo_response()` skips full scene bootstrap
+  when the resolved target is the recent completed direct-enter target;
+- `vm_net_mock_build_scene_change_post_enter_followup_response()` returns a
+  post-enter repeat ack for recent completed targets:
+  `25/5 result + 30/2 ack without posinfo + empty 27/11 + 7/42`, with no
+  `27/12` and no `30/2 scene+posinfo`.
+
+Expected trace:
+
+```text
+mock_scene_target_direct_completed scene=... pos=(...) reason=settings-unstuck-16-2-target
+mock_scene_target_inherit_completed scene=... pos=(...) exit=0
+mock_scene_change_completed_repeat_ack scene=...
+mock_scene_change_post_enter_repeat_ack scene=...
+```
+
+There should be no full-bootstrap `builtin-scene-change resp=428` and no
+post-enter `objects=6` response for the same completed unstuck target.
 
 For teleport-stone or map-transfer paths, the expected second-stage line may be:
 

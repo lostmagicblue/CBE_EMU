@@ -2143,8 +2143,6 @@ static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t
         if (currentR9 != moduleR9)
             uc_reg_write(uc, UC_ARM_REG_R9, &moduleR9);
     }
-
-    vm_note_battle_mp_pc(pc);
 }
 
 
@@ -7854,6 +7852,69 @@ static bool vm_net_mock_get_scene_center_spawn_from_sce(const char *scene,
     return true;
 }
 
+static bool vm_net_mock_get_scene_nearest_entry_spawn_from_sce(const char *scene,
+                                                               u16 fromX,
+                                                               u16 fromY,
+                                                               u16 *xOut,
+                                                               u16 *yOut,
+                                                               u16 *entryIdOut)
+{
+    u8 data[8192];
+    u32 len = vm_net_mock_load_scene_resource(scene, data, sizeof(data));
+    u32 start = vm_net_mock_scene_payload_start(data, len);
+    bool found = false;
+    u16 bestX = 0;
+    u16 bestY = 0;
+    u16 bestEntryId = 0;
+    unsigned long long bestDistance = 0xffffffffffffffffull;
+
+    if (xOut)
+        *xOut = 0;
+    if (yOut)
+        *yOut = 0;
+    if (entryIdOut)
+        *entryIdOut = 0xffff;
+    if (scene == NULL || scene[0] == 0 || len == 0 || start == 0)
+        return false;
+
+    for (u32 off = start; off + 18 <= len; ++off)
+    {
+        vm_net_mock_sce_edge_portal portal;
+        u32 end = 0;
+        int dx = 0;
+        int dy = 0;
+        unsigned long long distance = 0;
+        if (!vm_net_mock_parse_sce_edge_portal_at(data, len, off, &portal, &end))
+            continue;
+        if (portal.spawnX == 0 && portal.spawnY == 0)
+            continue;
+        dx = (int)portal.spawnX - (int)fromX;
+        dy = (int)portal.spawnY - (int)fromY;
+        distance = (unsigned long long)(dx < 0 ? -dx : dx) *
+                       (unsigned long long)(dx < 0 ? -dx : dx) +
+                   (unsigned long long)(dy < 0 ? -dy : dy) *
+                       (unsigned long long)(dy < 0 ? -dy : dy);
+        if (found && distance >= bestDistance)
+            continue;
+        found = true;
+        bestDistance = distance;
+        bestX = portal.spawnX;
+        bestY = portal.spawnY;
+        bestEntryId = portal.entryId;
+    }
+
+    if (!found)
+        return false;
+    vm_net_mock_adjust_safe_player_pos_for_scene(scene, &bestX, &bestY);
+    if (xOut)
+        *xOut = bestX;
+    if (yOut)
+        *yOut = bestY;
+    if (entryIdOut)
+        *entryIdOut = bestEntryId;
+    return true;
+}
+
 static bool vm_net_mock_find_sce_edge_portal_at_pos(const char *scene, u16 gridX, u16 gridY,
                                                     u16 margin,
                                                     vm_net_mock_sce_edge_portal *portalOut)
@@ -8430,6 +8491,29 @@ static void vm_net_mock_mark_completed_scene_change_target(const vm_net_mock_sce
     g_vm_net_mock_last_completed_scene_change_tick = g_schedulerTick;
 }
 
+static void vm_net_mock_mark_direct_scene_enter_completed(const vm_net_mock_scene_change_target *target,
+                                                          const char *reason)
+{
+    if (target == NULL || target->scene[0] == 0)
+        return;
+    /*
+     * Direct mmGame responses such as settings/unstuck already carry
+     * scene+posinfo and make the client call EnterSceneByMapName(). We still
+     * allocate a fresh target serial so the host same-screen guard accepts that
+     * client-driven re-entry, but the target must not remain pending; otherwise
+     * later WT 2/3 or 25/5 follow-ups send another 30/1/30/2 and reopen loading.
+     */
+    vm_net_mock_remember_scene_change_target(target);
+    vm_net_mock_mark_completed_scene_change_target(target);
+    g_vm_net_mock_last_scene_change_target_valid = false;
+    printf("[info][network] mock_scene_target_direct_completed scene=%s pos=(%u,%u) exit=%u reason=%s\n",
+           target->scene,
+           target->x,
+           target->y,
+           target->exitId,
+           reason ? reason : "direct-enter");
+}
+
 static bool vm_net_mock_is_recent_completed_scene_change_target(const vm_net_mock_scene_change_target *target)
 {
     if (!g_vm_net_mock_last_completed_scene_change_target_valid ||
@@ -8450,6 +8534,36 @@ static bool vm_net_mock_is_recent_completed_scene_name(const char *scene, u32 wi
         return false;
     }
     return (g_schedulerTick - g_vm_net_mock_last_completed_scene_change_tick) < windowTicks;
+}
+
+static bool vm_net_mock_scene_change_target_is_unresolved_existing_scene(const vm_net_mock_scene_change_target *target)
+{
+    return target != NULL &&
+           target->scene[0] != 0 &&
+           target->needsSceneDownload &&
+           !target->hasSceEntry &&
+           target->x == 0 &&
+           target->y == 0 &&
+           vm_net_mock_scene_resource_exists(target->scene);
+}
+
+static void vm_net_mock_clear_unresolved_scene_change_target(const vm_net_mock_scene_change_target *target)
+{
+    if (target == NULL ||
+        !g_vm_net_mock_last_scene_change_target_valid ||
+        !vm_net_mock_scene_names_equal_loose(g_vm_net_mock_last_scene_change_target.scene, target->scene))
+    {
+        return;
+    }
+    if (vm_net_mock_scene_change_target_is_unresolved_existing_scene(&g_vm_net_mock_last_scene_change_target) ||
+        (g_vm_net_mock_last_scene_change_target.x == 0 &&
+         g_vm_net_mock_last_scene_change_target.y == 0))
+    {
+        printf("[warn][network] mock_scene_target_clear_unresolved scene=%s exit=%u action=drop-zero-pending\n",
+               g_vm_net_mock_last_scene_change_target.scene,
+               g_vm_net_mock_last_scene_change_target.exitId);
+        g_vm_net_mock_last_scene_change_target_valid = false;
+    }
 }
 
 static bool vm_net_mock_is_recent_current_scene_reload(const char *scene, u32 windowTicks)
@@ -9426,19 +9540,57 @@ static bool vm_net_mock_is_settings_unstuck_request(const u8 *request, u32 reque
 static void vm_net_mock_get_current_scene_unstuck_target(vm_net_mock_scene_change_target *target)
 {
     const char *scene = vm_net_mock_current_scene_name();
+    u16 fromX = vm_net_mock_scene_spawn_x();
+    u16 fromY = vm_net_mock_scene_spawn_y();
+    u16 entryX = 0;
+    u16 entryY = 0;
+    u16 entryId = 0xffff;
+    const char *targetSource = "current-pos";
+    const char *fromSource = "role-pos";
 
     memset(target, 0, sizeof(*target));
     if (!vm_net_mock_scene_name_is_safe(scene))
         scene = vm_net_mock_default_scene_name();
     snprintf(target->scene, sizeof(target->scene), "%s", scene);
-    target->x = vm_net_mock_scene_spawn_x();
-    target->y = vm_net_mock_scene_spawn_y();
-    (void)vm_net_mock_read_current_player_grid(NULL, NULL, &target->x, &target->y, NULL, NULL);
-    vm_net_mock_adjust_safe_player_pos_for_scene(target->scene, &target->x, &target->y);
+    if (vm_net_mock_read_current_player_grid(NULL, NULL, &fromX, &fromY, NULL, NULL))
+        fromSource = "runtime-grid";
+
+    if (vm_net_mock_get_scene_nearest_entry_spawn_from_sce(target->scene,
+                                                           fromX,
+                                                           fromY,
+                                                           &entryX,
+                                                           &entryY,
+                                                           &entryId))
+    {
+        target->x = entryX;
+        target->y = entryY;
+        targetSource = "sce-nearest-entry";
+    }
+    else if (vm_net_mock_get_scene_center_spawn_from_sce(target->scene, &entryX, &entryY))
+    {
+        target->x = entryX;
+        target->y = entryY;
+        targetSource = "sce-center";
+    }
+    else
+    {
+        target->x = fromX;
+        target->y = fromY;
+        vm_net_mock_adjust_safe_player_pos_for_scene(target->scene, &target->x, &target->y);
+    }
     target->exitId = 0;
     target->mapType = 2;
-    target->hasSceEntry = true;
+    target->hasSceEntry = strcmp(targetSource, "current-pos") != 0;
     target->needsSceneDownload = false;
+    printf("[info][network] mock_unstuck_target scene=%s from=(%u,%u) from_source=%s pos=(%u,%u) source=%s entry=%u\n",
+           target->scene,
+           fromX,
+           fromY,
+           fromSource,
+           target->x,
+           target->y,
+           targetSource,
+           entryId);
 }
 
 static u32 vm_net_mock_build_settings_unstuck_response(const u8 *request, u32 requestLen,
@@ -9458,7 +9610,7 @@ static u32 vm_net_mock_build_settings_unstuck_response(const u8 *request, u32 re
         return 0;
     vm_net_mock_finish_wt_packet(out, pos, 2);
 
-    vm_net_mock_remember_scene_change_target(&target);
+    vm_net_mock_mark_direct_scene_enter_completed(&target, "settings-unstuck-target");
     g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
     g_vm_net_mock_last_scene_change_fb4_type = 1;
     vm_net_mock_save_player_pos_state(target.scene, target.x, target.y, "settings-unstuck-target");
@@ -9515,7 +9667,7 @@ static u32 vm_net_mock_build_settings_unstuck_16_2_response(const u8 *request, u
     }
     vm_net_mock_finish_wt_packet(out, pos, 1);
 
-    vm_net_mock_remember_scene_change_target(&target);
+    vm_net_mock_mark_direct_scene_enter_completed(&target, "settings-unstuck-16-2-target");
     g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
     g_vm_net_mock_last_scene_change_fb4_type = 1;
     g_vm_net_mock_teleport_stone_map_enter_pending = false;
@@ -10800,7 +10952,8 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
                                 currentScene != NULL &&
                                 vm_net_mock_scene_uses_current_scene_completion(currentScene) &&
                                 vm_net_mock_scene_names_equal_loose(currentScene, target.scene);
-    if (vm_net_mock_should_use_full_scene_bootstrap(currentScene, &target))
+    if (!recentCompletedTarget &&
+        vm_net_mock_should_use_full_scene_bootstrap(currentScene, &target))
     {
         /*
          * Some live portal transitions already entered the client's pending
@@ -10915,6 +11068,24 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
         objectCount += 1;
     }
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    if (vm_net_mock_scene_change_target_is_unresolved_existing_scene(&target))
+    {
+        /*
+         * This is a repeat/completion WT 2/3 for a scene the server already
+         * knows, but the request no longer carries enough source-portal context
+         * to resolve an entry. Sending 30/1 or keeping a pending target here
+         * re-enters the map at (0,0). Acknowledge the packet only; the first
+         * valid scene-enter response has already driven EnterSceneByMapName().
+         */
+        vm_net_mock_clear_unresolved_scene_change_target(&target);
+        g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+        g_vm_net_mock_last_scene_change_fb4_type = fb4Type;
+        printf("[warn][network] mock_scene_change_unresolved_entry_ack scene=%s exit=%u resp=%u action=ack-only-no-pending evidence=JianghuOL.CBE:0x1039BB4 case2-no-posinfo\n",
+               target.scene, target.exitId, pos);
+        vm_autotest_note("mock_scene_change_unresolved_entry_ack scene=%s exit=%u response=scene-ack-only-no-pending evidence=JianghuOL.CBE:0x1039BB4\n",
+                         target.scene, target.exitId);
+        return pos;
+    }
     if (target.needsSceneDownload)
     {
         if (g_vm_net_mock_last_scene_change_target_valid &&
@@ -11170,6 +11341,7 @@ static u32 vm_net_mock_build_scene_change_post_enter_followup_response(const u8 
     vm_net_mock_scene_change_target target;
     char missingResource[64];
     bool resourcesReady = false;
+    bool recentCompletedTarget = false;
 
     if (outCap < pos ||
         (!vm_net_mock_is_scene_change_post_enter_followup_request(request, requestLen) &&
@@ -11184,6 +11356,7 @@ static u32 vm_net_mock_build_scene_change_post_enter_followup_response(const u8 
     resourcesReady = vm_net_mock_prepare_scene_enter_resources(&target,
                                                                missingResource,
                                                                sizeof(missingResource));
+    recentCompletedTarget = vm_net_mock_is_recent_completed_scene_change_target(&target);
 
     if (!resourcesReady)
     {
@@ -11211,6 +11384,38 @@ static u32 vm_net_mock_build_scene_change_post_enter_followup_response(const u8 
         g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
         vm_autotest_note("mock_scene_download_followup_ack scene=%s exit=%u response=scene-ack-without-posinfo\n",
                          target.scene, target.exitId);
+        return pos;
+    }
+
+    if (recentCompletedTarget)
+    {
+        u32 objectStart = 0;
+
+        if (!vm_net_mock_append_info_banner_result5_object(out, outCap, &pos))
+            return 0;
+        objectCount += 1;
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 2, &objectStart))
+            return 0;
+        if (!vm_net_mock_put_scene_ack_without_posinfo(out, outCap, &pos, 2, target.scene))
+            return 0;
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        objectCount += 1;
+        if (!vm_net_mock_append_fb_target_empty11_object(out, outCap, &pos))
+            return 0;
+        objectCount += 1;
+        if (!vm_net_mock_append_books42_object(out, outCap, &pos))
+            return 0;
+        objectCount += 1;
+        vm_net_mock_finish_wt_packet(out, pos, objectCount);
+        g_vm_net_mock_last_scene_change_target_valid = false;
+        g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+        printf("[info][network] mock_scene_change_post_enter_repeat_ack scene=%s pos=(%u,%u) objects=%u resp=%u age=%u\n",
+               target.scene,
+               target.x,
+               target.y,
+               objectCount,
+               pos,
+               g_schedulerTick - g_vm_net_mock_last_completed_scene_change_tick);
         return pos;
     }
 
@@ -11384,6 +11589,20 @@ static u32 vm_net_mock_build_mmgame_scene_transfer_followup_response(const u8 *r
     if (outCap < pos || !vm_net_mock_is_mmgame_scene_transfer_followup_request(request, requestLen))
         return 0;
     target = g_vm_net_mock_last_scene_change_target;
+    if (vm_net_mock_scene_change_target_is_unresolved_existing_scene(&target))
+    {
+        u32 ackLen = vm_net_mock_build_scene_default_event_response(out, outCap);
+        if (ackLen == 0)
+            return 0;
+        vm_net_mock_clear_unresolved_scene_change_target(&target);
+        g_vm_net_mock_last_scene_change_target_valid = false;
+        g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+        printf("[warn][network] mock_mmgame_scene_transfer_unresolved_entry_ack scene=%s exit=%u resp=%u action=drop-pending-no-30-1 evidence=JianghuOL.CBE:0x10396D6\n",
+               target.scene, target.exitId, ackLen);
+        vm_autotest_note("mock_mmgame_scene_transfer_unresolved_entry_ack scene=%s exit=%u response=25/5-ack-no-30/1\n",
+                         target.scene, target.exitId);
+        return ackLen;
+    }
     resourcesReady = vm_net_mock_prepare_scene_enter_resources(&target,
                                                                missingResource,
                                                                sizeof(missingResource));
@@ -16887,7 +17106,7 @@ static u32 vm_net_mock_build_login_alt12_server_list_response(const u8 *request,
     char password[64];
     bool haveUserName = false;
     bool havePassword = false;
-    u8 resultCode = vm_net_mock_env_u8("CBE_ALT12_SERVERLIST_RESULT", 4);
+    u8 resultCode = vm_net_mock_env_u8("CBE_ALT12_SERVERLIST_RESULT", 1);
     bool echoCredentials = vm_net_mock_env_u8("CBE_ALT12_ECHO_CREDENTIALS", 0) != 0;
 
     if (outCap < pos)
@@ -16909,17 +17128,16 @@ static u32 vm_net_mock_build_login_alt12_server_list_response(const u8 *request,
         haveUserName = vm_net_mock_get_object_string_field(request, requestLen, "userName", userName, sizeof(userName));
     havePassword = vm_net_mock_get_object_string_field(request, requestLen, "password", password, sizeof(password));
 
-    if (resultCode != 3 && resultCode != 4)
-        resultCode = 4;
+    if (resultCode != 1 && resultCode != 3 && resultCode != 4)
+        resultCode = 1;
 
     /*
-     * mmTitle net_handle_login_response(0x16DC) treats subtype-12 result '1'
-     * as a staged success and login_alt_result_dispatch(0x19C2) immediately
-     * enters the stageFlag==4 role-list target. Result '3'/'4' on the subtype
-     * 12 path is the parser branch that still consumes serverinfo/servernum.
-     * Runtime showed result '3' can loop back through the sub_5916 success
-     * callback path; prefer result '4', whose sub_5922 callback checks the
-     * title confirmation byte before calling login_stage_success_dispatch().
+     * mmTitle net_handle_login_response(0x16DC) parses serverinfo/servernum
+     * for subtype-12 result '1', then login_alt_result_dispatch(0x19C2)
+     * enters the stageFlag==4 server-list target. Result '3'/'4' also parse
+     * serverinfo, but they go through sub_10C6() prompt/callback paths first;
+     * returning result '4' as the default can leave the title screen resending
+     * the same no-account login request.
      */
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 1, 12, &objectStart))
         return 0;
@@ -16945,6 +17163,8 @@ static u32 vm_net_mock_build_login_alt12_server_list_response(const u8 *request,
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);
     vm_net_mock_title_login_phase_mark_server_list();
+    printf("[info][network] mock_login_alt12_server_list result=%u servernum=1 serverinfo_len=%u resp=%u\n",
+           resultCode, serverInfoLen, pos);
     return pos;
 }
 
@@ -17026,12 +17246,18 @@ static u32 vm_net_mock_build_login_response(const u8 *request, u32 requestLen, u
     const char *mode = vm_net_mock_env_str("CBE_LOGIN_RESPONSE", "");
     char userName[64];
     char password[64];
-    bool haveUserName = vm_net_mock_get_object_string_field(request, requestLen, "userName", userName, sizeof(userName));
+    bool haveUserName = false;
     bool havePassword = false;
+    bool noAccountAlt12Login = false;
+    memset(userName, 0, sizeof(userName));
     memset(password, 0, sizeof(password));
+    haveUserName = vm_net_mock_get_object_string_field(request, requestLen, "userName", userName, sizeof(userName));
     if (!haveUserName)
         haveUserName = vm_net_mock_get_object_string_field(request, requestLen, "username", userName, sizeof(userName));
     havePassword = vm_net_mock_get_object_string_field(request, requestLen, "password", password, sizeof(password));
+    noAccountAlt12Login = requestSubtype == 12 &&
+                           haveUserName && userName[0] == 0 &&
+                           havePassword && password[0] == 0;
 
     if (haveUserName && strcmp(userName, "1234") == 0)
     {
@@ -17057,16 +17283,20 @@ static u32 vm_net_mock_build_login_response(const u8 *request, u32 requestLen, u
         return vm_net_mock_build_login_primary_validation_response(out, outCap);
     }
 
-    if (requestSubtype == 12 &&
-        haveUserName && userName[0] == 0 &&
-        havePassword && password[0] == 0 &&
-        g_netMockTitleServerListPending &&
-        !g_netMockTitleServerSelectConfirmed &&
+    if (noAccountAlt12Login &&
         (mode == NULL || mode[0] == 0 ||
          strcmp(mode, "staged-rolelist") == 0 ||
          strcmp(mode, "staged") == 0))
     {
-        return vm_net_mock_build_login_alt12_success_response(out, outCap);
+        /*
+         * No-account title login sends 1/1/12 with empty credentials when the
+         * user taps "start game". This visible request is the server-list phase,
+         * not the later role-list success phase: answer it with serverinfo /
+         * color / servernum so the title list has rows to render. The subtype-12
+         * result=1 success packet remains available through explicit regression
+         * modes such as CBE_LOGIN_RESPONSE=alt12-success.
+         */
+        return vm_net_mock_build_login_alt12_server_list_response(request, requestLen, out, outCap);
     }
 
     if (requestSubtype == 12 &&

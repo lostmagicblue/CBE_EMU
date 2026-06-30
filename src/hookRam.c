@@ -39,7 +39,6 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             ;
     }
 #endif
-    vm_note_battle_mp_write(uc, type, address, size, value);
     // if (type == UC_MEM_WRITE && ((address == 0x10353C0)))
     // {
     //     printf("write[%x:", address);
