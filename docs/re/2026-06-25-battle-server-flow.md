@@ -389,9 +389,15 @@ opens the panel immediately, so `4/7` must be present in the same terminal
 response by default. `hp/mp` remain recovery deltas and default to `0/0`.
 
 Dropped-item display: `itemnum` is separate from raw `iteminfo`. The recovered
-ordinary item row is `ownerRoleId, displayFlag, itemId, itemName, rewardType=2,
-i16 value, u32 value`. Rows whose owner role id does not match the current
-player are skipped by the client.
+row prefix is `ownerRoleId, displayFlag, itemId, itemName, rewardType, i16
+value, u32 value`. Rows whose owner role id does not match the current player
+are skipped by the client. Runtime negative evidence: `rewardType=1` enters an
+equipment/detail registration helper and crashes with the short ordinary
+consumable row; `rewardType=2` parses without crashing but reserves a blank row
+in the current client. The visible ordinary drop line is therefore sent through
+the same `4/7.fdata` settlement text field parsed at `0x7B08` and rendered by
+the result panel at `0x4462`, while the durable item grant is persisted in the
+role backpack.
 
 ## implementation target
 

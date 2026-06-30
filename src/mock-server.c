@@ -2644,7 +2644,7 @@ enum
     VM_NET_MOCK_BATTLE_POISON_SLIME_EXP = 5,
     VM_NET_MOCK_BATTLE_POISON_SLIME_GOLD = 5,
     VM_NET_MOCK_BATTLE_CHANGMING_SAN_ITEM_ID = 304,
-    VM_NET_MOCK_BATTLE_CHANGMING_SAN_DROP_RATE = 10,
+    VM_NET_MOCK_BATTLE_CHANGMING_SAN_DROP_RATE = 100,
     VM_NET_MOCK_ROLE_DEFAULT_ID = 10001,
     VM_NET_MOCK_ROLE_DEFAULT_HP = 120,
     VM_NET_MOCK_ROLE_DEFAULT_MP = 100,
@@ -5196,6 +5196,7 @@ static u32 g_vm_net_mock_battle_rewarded_exp = 0;
 static u32 g_vm_net_mock_battle_rewarded_drop_item = 0;
 static u16 g_vm_net_mock_battle_rewarded_drop_seq = 0;
 static u32 g_vm_net_mock_battle_enemy_id_current = VM_NET_MOCK_BATTLE_POISON_SLIME_ID;
+static u32 g_vm_net_mock_battle_role_id_current = VM_NET_MOCK_ROLE_DEFAULT_ID;
 static u32 g_vm_net_mock_battle_reward_rng = 0;
 static u32 g_vm_net_mock_battle_settlement_sent_serial = 0;
 static u32 g_vm_net_mock_battle_recovered_serial = 0;
@@ -7077,55 +7078,6 @@ static void vm_net_mock_role_apply_battle_settlement(u32 hp, u32 mp,
 static u32 vm_net_mock_battle_recover_mp_value(void)
 {
     return vm_net_mock_env_u32_if_set("CBE_BATTLE_RECOVER_MP", 0);
-}
-
-static bool vm_net_mock_build_battle_settle_iteminfo_blob(u8 *out, u32 outCap,
-                                                          u32 *blobLenOut,
-                                                          u32 *rowCountOut,
-                                                          u32 ownerRoleId,
-                                                          u32 itemId)
-{
-    u32 pos = 0;
-    const vm_net_mock_shop_catalog_item *item = NULL;
-    const char *itemName = "Item";
-
-    if (blobLenOut)
-        *blobLenOut = 0;
-    if (rowCountOut)
-        *rowCountOut = 0;
-    if (out == NULL || itemId == 0 || ownerRoleId == 0)
-        return true;
-
-    item = vm_net_mock_find_shop_catalog_item(itemId);
-    if (item != NULL && item->name[0] != 0)
-        itemName = item->name;
-
-    /*
-     * mmBattle HandleBattleSettleMsg(0x743C) reads itemnum separately, then
-     * loops over this raw stream. Each row starts with the owner role id; rows
-     * for other ids are skipped. For a normal dropped item, rewardType=2 avoids
-     * the equipment branch (1) and the money-add branch (3).
-     */
-    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, ownerRoleId))
-        return false;
-    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 1))
-        return false;
-    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, itemId))
-        return false;
-    if (!vm_net_mock_seq_put_string(out, outCap, &pos, itemName))
-        return false;
-    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 2))
-        return false;
-    if (!vm_net_mock_seq_put_i16(out, outCap, &pos, 1))
-        return false;
-    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, 1))
-        return false;
-
-    if (blobLenOut)
-        *blobLenOut = pos;
-    if (rowCountOut)
-        *rowCountOut = 1;
-    return true;
 }
 
 static u32 vm_net_mock_battle_apply_mp_recovery_once(vm_net_mock_role_state *role,
@@ -14685,9 +14637,8 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
     u32 dropItemId = 0;
     u16 dropSeq = 0;
     bool dropGranted = false;
-    u8 itemInfo[128];
-    u32 itemInfoLen = 0;
-    u32 itemInfoRows = 0;
+    char dropInfo[VM_NET_MOCK_SHOP_NAME_BYTES + 8];
+    bool haveDropInfo = false;
     u32 applyRewardExp = 0;
     u32 displayExpGain = 0;
     bool victory = g_mockBattleEnemyHpCurrent == 0 && roleHp > 0;
@@ -14727,17 +14678,17 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
     statusPercentExp = vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_PERCENT_EXP",
                                                   statusPercentExp);
     statusLevel = vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_LEVEL", statusLevel);
-    memset(itemInfo, 0, sizeof(itemInfo));
+    dropInfo[0] = 0;
     if (dropGranted && role != NULL)
     {
-        if (!vm_net_mock_build_battle_settle_iteminfo_blob(itemInfo, sizeof(itemInfo),
-                                                          &itemInfoLen, &itemInfoRows,
-                                                          role->roleId, dropItemId))
+        const vm_net_mock_shop_catalog_item *dropItem = vm_net_mock_find_shop_catalog_item(dropItemId);
+        if (dropItem != NULL && dropItem->name[0] != 0)
         {
-            return false;
+            int written = snprintf(dropInfo, sizeof(dropInfo), "%s x1", dropItem->name);
+            haveDropInfo = written > 0 && (u32)written < sizeof(dropInfo);
         }
     }
-    printf("[info][network] mock_battle_settle enemy=%u victory=%u exp_gain=%u exp_total=%u gold=%u level=%u recover=%u/%u drop=%u seq=%u item_rows=%u iteminfo_len=%u\n",
+    printf("[info][network] mock_battle_settle enemy=%u victory=%u exp_gain=%u exp_total=%u gold=%u level=%u recover=%u/%u drop=%u seq=%u role=%u battle_role=%u fdata_len=%u\n",
            g_vm_net_mock_battle_enemy_id_current,
            victory ? 1 : 0,
            displayExpGain,
@@ -14748,9 +14699,10 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
            recoverMp,
            dropGranted ? dropItemId : 0,
            dropSeq,
-           itemInfoRows,
-           itemInfoLen);
-    vm_autotest_note("mock_battle_settle enemy=%u victory=%u exp_gain=%u exp_total=%u gold=%u level=%u hp=%u mp=%u recover=%u/%u recovered=%u drop=%u seq=%u item_rows=%u iteminfo_len=%u\n",
+           role ? role->roleId : 0,
+           g_vm_net_mock_battle_role_id_current,
+           haveDropInfo ? (u32)strlen(dropInfo) : 0);
+    vm_autotest_note("mock_battle_settle enemy=%u victory=%u exp_gain=%u exp_total=%u gold=%u level=%u hp=%u mp=%u recover=%u/%u recovered=%u drop=%u seq=%u role=%u battle_role=%u fdata_len=%u\n",
                      g_vm_net_mock_battle_enemy_id_current,
                      victory ? 1 : 0,
                      displayExpGain,
@@ -14764,8 +14716,9 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
                      mpRecoveryApplied ? 1 : 0,
                      dropGranted ? dropItemId : 0,
                      dropSeq,
-                     itemInfoRows,
-                     itemInfoLen);
+                     role ? role->roleId : 0,
+                     g_vm_net_mock_battle_role_id_current,
+                     haveDropInfo ? (u32)strlen(dropInfo) : 0);
 
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 4, 7, &objectStart))
         return false;
@@ -14800,12 +14753,24 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
         return false;
     if (!vm_net_mock_put_object_u32(out, outCap, pos, "mp", recoverMp))
         return false;
-    if (!vm_net_mock_put_object_u8(out, outCap, pos, "itemnum", itemInfoRows > 255 ? 255 : (u8)itemInfoRows))
+    /*
+     * The result parser has two display paths. The iteminfo reward-type 1 path
+     * enters an equipment/detail registration helper and crashes with ordinary
+     * consumable rows; reward-type 2 parses without crashing but only reserves
+     * an empty item row in the current client. fdata is a normal settlement
+     * text field rendered by mmBattle at 0x7B08/0x4462, so use it for the
+     * visible drop line while the durable item is already persisted in the
+     * role backpack.
+     */
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "itemnum", 0))
         return false;
-    if (!vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo",
-                                    itemInfoLen ? itemInfo : NULL,
-                                    (u16)itemInfoLen))
+    if (!vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo", NULL, 0))
         return false;
+    if (haveDropInfo &&
+        !vm_net_mock_put_object_string(out, outCap, pos, "fdata", dropInfo))
+    {
+        return false;
+    }
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "autorevive", 0))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
@@ -15100,6 +15065,8 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
     g_vm_net_mock_battle_rewarded_drop_seq = 0;
     g_vm_net_mock_battle_settlement_sent_serial = 0;
     g_vm_net_mock_battle_recovered_serial = 0;
+    g_vm_net_mock_battle_role_id_current = roleId != 0 ? roleId :
+                                           (role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID);
     g_mockBattleRoleHpCurrent = roleHp;
     g_mockBattleRoleHpMax = roleMaxHp;
     if (g_mockBattleRoleHpMax < g_mockBattleRoleHpCurrent)
@@ -15114,8 +15081,9 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
         g_mockBattleEnemyHpMax = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MAX_HP", g_mockBattleEnemyHpCurrent);
         if (g_mockBattleEnemyHpMax < g_mockBattleEnemyHpCurrent)
             g_mockBattleEnemyHpMax = g_mockBattleEnemyHpCurrent;
-        printf("[info][network] mock_challenge_battle_start id=%u requested=%u rolehp=%u/%u rolemp=%u/%u enemyhp=%u/%u enemymp=%u subtype=%u side=%u scene_start=%u index=%u pos=(%u,%u)\n",
+        printf("[info][network] mock_challenge_battle_start id=%u requested=%u roleid=%u rolehp=%u/%u rolemp=%u/%u enemyhp=%u/%u enemymp=%u subtype=%u side=%u scene_start=%u index=%u pos=(%u,%u)\n",
                id, requestedEnemyId,
+               g_vm_net_mock_battle_role_id_current,
                g_mockBattleRoleHpCurrent,
                g_mockBattleRoleHpMax,
                g_mockBattleRoleMpCurrent,
@@ -15125,8 +15093,10 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
                vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MP", stats.mp),
                battleStartSubtype, battleSide, useSceneMonsterStart ? 1 : 0,
                sceneMonsterIndex, sceneMonsterPosX, sceneMonsterPosY);
-        vm_autotest_note("mock_challenge_battle_start id=%u requested=%u wire=%u level=%u hp=%u/%u rolemp=%u/%u enemymp=%u atk=%u def=%u exp=%u gold=%u index=%u pos=(%u,%u) reqIndex=%u reqPos=(%u,%u) subtype=%u side=%u scene_start=%u table=%08x ids=%u/%u/%u/%u\n",
-                         id, requestedEnemyId, enemyWireId,
+        vm_autotest_note("mock_challenge_battle_start id=%u requested=%u roleid=%u wire=%u level=%u hp=%u/%u rolemp=%u/%u enemymp=%u atk=%u def=%u exp=%u gold=%u index=%u pos=(%u,%u) reqIndex=%u reqPos=(%u,%u) subtype=%u side=%u scene_start=%u table=%08x ids=%u/%u/%u/%u\n",
+                         id, requestedEnemyId,
+                         g_vm_net_mock_battle_role_id_current,
+                         enemyWireId,
                          stats.level,
                          g_mockBattleEnemyHpCurrent,
                          g_mockBattleEnemyHpMax,

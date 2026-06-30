@@ -26,8 +26,10 @@ IDA evidence:
 - `iteminfo` is handed to the battle module's stream reader after the raw field
   lookup. The tail block reached from `0x7612 -> 0x78C6` reads one row per
   `itemnum`: owner role id, display flag, item id, item name, reward type, and
-  two small value fields. `reward type == 1` enters equipment attribute parsing;
-  `reward type == 3` adds a money value; ordinary dropped items use type `2`.
+  two small value fields. `reward type == 1` enters an equipment/detail
+  registration helper at `0x76C6`; runtime with a short ordinary consumable row
+  crashed there. `reward type == 3` adds a money value. Runtime with
+  `reward type == 2` enlarged the panel but left the item row blank.
 
 Local resource evidence:
 
@@ -47,7 +49,7 @@ enemy_id = 105
 reward_exp = 5
 reward_gold = 5
 drop_item_id = 304
-drop_rate = 10%
+drop_rate = 100% (temporary test setting; was 10%)
 ```
 
 Reward grant is guarded by `g_mockBattleOperateSessionSerial`. Both the normal
@@ -80,8 +82,13 @@ Runtime correction:
   the role's persisted current HP/MP. Current battle HP/MP remains stored from
   the server-side battle state; packet `hp/mp` now default to `0/0` so the panel
   shows no automatic recovery unless explicit recovery mechanics are added.
-- Battle-result drop display now sends `itemnum=1` and one `iteminfo` row when
-  the reward roll inserted a backpack item. The row is:
+- Battle-result drop persistence still grants the actual item into the active
+  role backpack when the reward roll succeeds. The visible popup text uses the
+  `4/7.fdata` settlement text field, which `HandleBattleSettleMsg` reads at
+  `0x7B08` and the result panel renders at `0x4462`.
+
+The unsafe `iteminfo` ordinary row shape is retained here only as parser
+evidence:
 
 ```text
 u32 owner_role_id
@@ -93,8 +100,24 @@ i16 count_or_seq = 1
 u32 value = 1
 ```
 
-The row is display-only for the result panel; the actual durable item has
-already been inserted through the active role backpack state.
+IDA correction: `mmBattleMstarWqvga.cbm:HandleBattleSettleMsg(0x743C)`
+compares the row `owner_role_id` with the current battle actor id at
+`*(battleR9+0x286C)+0x64` before copying the item name. If this id does not
+match, the parser skips the row while `itemnum` has already enlarged the result
+panel, producing a blank item line. The mock therefore uses the role id sent in
+the battle-start `battleinfo` for settlement item rows, not merely the active
+local role-db id.
+
+Second correction: owner match alone is not sufficient. `reward_type=2` follows
+the non-money parse-only branch at `0x77FC`, so the result panel reserves a row
+but does not reliably display text. `reward_type=1` is not an ordinary item
+solution: runtime after switching to type `1` crashed at the helper reached
+from `0x76C6` (`pc=0x51896CA`, invalid access near `0x64000098`). Keep
+`itemnum=0/iteminfo=""` for ordinary consumable drops and put the visible line
+in `fdata` instead.
+
+The `fdata` line is display-only for the result panel; the actual durable item
+has already been inserted through the active role backpack state.
 
 Role normalization was tightened to clamp HP/MP only when they exceed max
 values. It no longer treats `hp == 0` or `mp == 0` as "missing data", because
@@ -103,7 +126,6 @@ normalized the role.
 
 ## Remaining Unknown
 
-The ordinary dropped-item row is recovered enough to show item drops on the
-result panel. Equipment reward rows still need a dedicated sample before using
-`reward_type=1`, because that branch enters the larger equipment attribute
-parser.
+The ordinary item drop display now uses `fdata`. Equipment-specific reward
+rows still need a dedicated sample before adding equipment attribute payload
+fields or using `reward_type=1`.
