@@ -118,6 +118,21 @@ kind `2` with matching coordinates. This is the correct path for "touch scene
 monster -> battle", because the left-side monster stays tied to the scene node
 that was touched.
 
+2026-06-30 update: the first subtype-5 byte is now used as the wild encounter
+monster count. `HandleBattleStartMsg(0x66CC)` copies the selected scene monster
+row once per left-side unit and has explicit placement branches for counts
+`1`, `2`, and `3`. The mock therefore rolls `1..3` for scene-monster battles,
+writes that value as `left_count`, and keeps the right-side player count at
+`1`. Server-side battle state stores the same count and keeps independent HP
+slots for each monster wire (`wire 1..N`). The aggregate `enemyhp` trace value
+is only the sum of those slots for logging, status, and victory checks. Do not
+damage a pooled `per_monster_hp * count` value: runtime showed that this desyncs
+the client's independent unit records and can make a monster attack another
+monster or make terminal death fall on the player. Settlement EXP/copper and
+per-monster drop rolls still scale by the count. The durable backpack refresh
+remains the post-battle `7/7 type=1` additive row, with `count_delta` equal to
+the number of items dropped in that battle, not the role's total stack count.
+
 The scene actor HP/MP fields copied by subtype 5 are not populated by
 `scene_node_find_or_create(0x0100EFC4)`. They live inside the raw move blob that
 `scene_node_update_move_blob(0x01012A76)` copies to `ActorSceneNode+0x88`:
@@ -254,28 +269,120 @@ player attack: actor wire 0 -> target wire 1
 enemy counter: actor wire 1 -> target wire 0
 ```
 
-Subtype 5 has a different runtime wire default than the old subtype 10 fallback.
-`CalcTargetSideIndex(0x6CE8)` still remaps through the battle-start group counts,
-but the scene-monster start path uses the touched scene actor row directly. With
-`side=1` and one touched monster plus one role, runtime evidence shows:
+Subtype 5 also uses `CalcTargetSideIndex(0x6CE8)` through the battle-start
+group counts. Static IDA evidence alone was misleading while reconstructing the
+runtime-visible side order, so the implementation now treats the wire mapping as
+runtime evidence first. Scene-monster battles with `side=1`, `left_count=N`, and
+`right_count=1` currently use this server contract:
 
 ```text
-wire 1 -> right-side player
-wire 0 -> left-side monster
+wire 1    -> player actor in the normal attack/skill action
+wire 0    -> single-monster target, and the last monster wire when N > 1
+wire 2..N -> earlier monster wires when N > 1
 
-player attack: actor wire 1 -> target wire 0
-enemy counter: actor wire 0 -> target wire 1
-terminal victory actor: wire 0
+player attack: actor wire 1 -> target wire request_index/fallback monster wire
+enemy counter: first live monster wire -> target wire 1
+terminal victory actor: the monster wire that lost the last HP slot
 ```
 
-Negative evidence: unifying subtype 5 with the subtype 10 fallback and sending
-`actor wire 0 -> target wire 1` made an offensive player skill visibly target
-the player. Runtime also showed post-cost `valueB=35` displayed as MP recovery,
-with the visible MP moving from `35` to `65`.
+2026-06-30 negative evidence: after enabling `left_count=3`, sending
+`actor=3,target=2` for a request with `index=2` made a monster attack another
+monster. The server actor must stay on the player wire; do not derive it from
+the requested target.
 
-For the terminal action record, the actor slot must be the fighter that reached
-zero HP. Sending the role wire describes the player as the fallen actor and can
-drive the client into the "player died" prompt.
+2026-06-30 correction: `Callback_Unknown2(0x2B50)` sends request `index` after
+calling `sub_2B26(0x2B26)`, and `sub_2B26` is the inverse of
+`CalcTargetSideIndex`. Therefore request `index` is already a wire slot, not an
+internal monster slot. For `left_count=3`, selected monster internal slot `1`
+is sent as request `index=2`. The response must use that request index directly
+as the target wire; adding `+1` again can target the wrong unit.
+
+2026-06-30 correction: multi-monster HP is per-slot. A player hit must subtract
+from the selected live monster wire only, then recompute the aggregate total.
+If the selected wire is already dead, redirect the server-side action to the
+first live monster wire. Counterattacks also come from the first live monster
+wire, not from a fixed fallback slot. This keeps `CalcTargetSideIndex`'s unit
+mapping and the server's HP state aligned through the whole round.
+
+2026-07-01 negative evidence: after trying `CBE_BATTLE_BUNDLE_ROUND=0` for
+multi-monster fights, the current player request returned only the player's
+action and armed `g_mockBattlePendingEnemyTurn`; the next player attack request
+was then consumed by the pending monster action. Runtime looked like "player
+acts once, next click monster acts first", and the last monster could stop
+responding to normal attack clicks. Now that the subtype-5 player actor wire is
+back to `1`, multi-monster fights also default to bundled round responses:
+player action first, optional monster counteraction second.
+
+2026-07-01 correction: a later single-monster runtime trace still emitted
+`mock_battle_operate ... actor=0 target=1 ...`, and the visible result was the
+monster acting first followed by the player-death prompt. That disproves the
+previous subtype-5 default for the active client state. The mock's subtype-5
+default is now restored to `player actor wire 1`, `monster target wire 0`, and
+request `index=0` is accepted as the monster target instead of being forced to
+wire 1. The terminal victory action must use the same monster target wire.
+
+2026-07-01 multi-monster correction: scene-monster action target wires do not
+follow a simple ascending formula once the left group has more than one monster.
+Runtime evidence:
+
+```text
+two monsters: selecting the first can send index=2; target=0 still hit the second.
+three monsters: target=2 hits the first, target=3 hits the second, target=0 hits the third.
+```
+
+The mock now uses explicit visual-order maps for subtype 5:
+
+```text
+N=1: slot0 -> wire0
+N=2: slot0 -> wire2, slot1 -> wire0
+N=3: slot0 -> wire2, slot1 -> wire3, slot2 -> wire0
+```
+
+`wire -> HP slot`, `HP slot -> wire`, and request-index translation must stay
+on the same table.
+
+2026-07-01 round-script correction: subtype `4/6 actioninfo` is consumed as a
+round script by `HandleBattleActionMsg(0x6EB0)`. Runtime after fixing terminal
+type-3 actions showed two separate requirements:
+
+- Collecting monster actions only after applying player damage makes
+  three-monster encounters display too few monster turns whenever the player
+  kills one first.
+- Letting the killed monster also counterattack prevents its visual row from
+  disappearing.
+
+The server now snapshots monster actors at the start of the round, then applies
+player damage. If that hit kills a monster, final or non-final, the script emits
+a type-3 death action for that monster and removes it from the counter list.
+The remaining round-start monsters then counterattack in order. A three-monster
+round where the player kills one target therefore returns one player action,
+one death action, and two monster actions (`actions=4`, `deaths=1`,
+`counters=2`). If no monster dies, the same three-monster round returns one
+player action plus three monster actions (`actions=4`, `deaths=0`,
+`counters=3`). A single-monster final kill returns one player action plus one
+death action (`actions=2`, `deaths=1`, `counters=0`) before inline settlement.
+
+2026-07-01 terminal-round ordering correction: runtime showed the final monster
+HP reaching zero and `4/7` settlement being built, but the last player attack
+animation was not visible. The trace order was `mock_battle_settle` before
+`mock_battle_operate`, matching the old packet object order `4/7 status` then
+`4/6 action`. The terminal round now keeps settlement inline but appends `4/6`
+action first and `4/7` status second, so the client can consume the final
+attack/death action before entering the settlement panel. The operate log marks
+this case with `order=action6-first`.
+
+2026-07-01 terminal-action negative evidence: after the order fix, final-kill
+responses still contained an extra terminal record separate from the actual
+death action. Runtime then showed the last remaining monster becoming
+unattackable after an earlier monster died; later clicks returned tiny no-op
+`4/2` responses. The server contract now treats `4/7` as the authoritative
+battle-end signal and does not append the separate terminal action by default.
+`4/6` still carries the actual visual actions for that round, including a
+type-3 monster death action when the current hit drops a monster to zero HP.
+The old separate terminal action can be re-enabled for experiments with
+`CBE_BATTLE_TERMINAL_ACTION_ENABLED=1`; if used, it is skipped when a death
+action is already present. Sending the role wire describes the player as the
+fallen actor and can drive the client into the "player died" prompt.
 
 Runtime evidence after the subtype 5 start fix:
 
@@ -301,13 +408,15 @@ Current expected runtime log after the subtype-5 wire and skill-damage
 correction:
 
 ```text
-mock_battle_operate index=0 operate=203 skill=1 action=1 actions=2 effect=15 actor=1 target=0 damage=<skill-derived> enemyhp=<nonzero> rolehp=<after-counter> mpcost=5 valueB=0 teaminfo=10001:<hp>/<postCostMp> mp=<before>/<after> response=4/6
-battle_probe_action[0] active=1 type=1 actor=<player-wire> childCount=1 target=<enemy-wire> valueA=-<skill-derived> valueB=0 effect=15
-battle_probe_action[1] active=1 type=0 actor=<enemy-wire> childCount=1 target=<player-wire> valueA=-<monster-damage> valueB=0
+mock_battle_operate index=<target-wire> operate=203 skill=1 action=1 actions=<round-script-records> effect=15 actor=1 target=<target-wire> damage=<skill-derived> enemyhp=<nonzero> rolehp=<after-counter> counters=<counter-monsters> deaths=<death-actions> deathActor=<dead-wire> counterdmg=<sum> mpcost=5 valueB=0 teaminfo=10001:<hp>/<postCostMp> mp=<before>/<after> response=4/6
+battle_probe_action[0] active=1 type=1 actor=1 childCount=1 target=<target-wire> valueA=-<skill-derived> valueB=0 effect=15
+battle_probe_action[1] active=1 type=0 actor=<monster-wire> childCount=1 target=1 valueA=-<monster-damage> valueB=0
 ```
 
-If the skill damage kills the enemy, `actions=2` is still valid but the second
-record is terminal action type `3` instead of the monster counterattack.
+If the skill or normal damage kills the last enemy, the default terminal packet
+now keeps one player hit plus one monster death action in `4/6`, then appends
+inline `4/7` settlement after the action object. No monster counterattack and
+no separate terminal action should be present in the default path.
 
 Older negative evidence collected while debugging battle skill use:
 
@@ -345,10 +454,10 @@ third read return `hp_low16 + next tagged header`, observed as `0x210004` when
 HP was `33`, then crashed in the renderer. Encode one overlapped row instead:
 `00 04, roleId32, hp32, mp32`.
 runtime after deferring terminal `4/7` showed the result panel with all reward
-fields as zero. The panel is opened by the terminal action; by the time the next
-request asks for pending settlement, the UI has already copied zeroed caches.
-Therefore terminal responses keep `4/7` inline by default, while `hp/mp` remain
-explicit recovery deltas and default to zero.
+fields as zero. By the time the next request asks for pending settlement, the UI
+has already copied zeroed caches. Therefore terminal responses keep `4/7`
+inline by default, while `hp/mp` remain explicit recovery deltas and default to
+zero.
 ```
 
 Implementation note: type-1 `effect_text` should carry the display magnitude

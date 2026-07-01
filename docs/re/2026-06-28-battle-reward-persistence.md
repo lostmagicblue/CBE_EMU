@@ -72,12 +72,14 @@ Runtime correction:
   while later duplicate waiting-settlement requests fall back to the old `4/11`
   auto-battle-off response.
 - A later runtime check showed that waiting for the next request was still too
-  late for the result panel. The terminal action in `4/6` can bring up the
-  panel immediately, so terminal operate responses place `4/7` before `4/6` by
-  default. `HandleBattleSettleMsg(0x743C)` treats the `exp` field as total EXP
-  and the `gold` field as total money, then computes the visible gained values
-  by subtracting the old client-side actor fields. Therefore `4/7.exp` must be
-  the role's post-reward total EXP, not the per-kill delta.
+  late for the result panel. Terminal operate responses therefore keep `4/7`
+  inline with the final `4/6` action. Current evidence uses action-first object
+  order and disables the extra type-3 terminal action by default, because that
+  extra visual record can disturb multi-monster target state.
+  `HandleBattleSettleMsg(0x743C)` treats the `exp` field as total EXP and the
+  `gold` field as total money, then computes the visible gained values by
+  subtracting the old client-side actor fields. Therefore `4/7.exp` must be the
+  role's post-reward total EXP, not the per-kill delta.
 - The `hp` and `mp` fields in `4/7` are settlement-panel recovery amounts, not
   the role's persisted current HP/MP. Current battle HP/MP remains stored from
   the server-side battle state; packet `hp/mp` now default to `0/0` so the panel
@@ -118,6 +120,53 @@ in `fdata` instead.
 
 The `fdata` line is display-only for the result panel; the actual durable item
 has already been inserted through the active role backpack state.
+
+Backpack refresh after a battle drop is a separate client contract. The result
+panel `4/7` object can show text, but it does not update the live item manager.
+`JianghuOL.CBE:net_handle_misc_player_fields(0x01011D16)` dispatches kind
+`7`, subtype `37` to `HandleItemAcquire(0x0101191A)`. That handler reads:
+
+```text
+msg      string, rendered as the acquire message
+result   u8, success when 0
+itemid   u32
+seq      u16
+itemname string
+```
+
+It can insert the item on `result == 0`, but it always renders `msg` before the
+insert. Runtime after adding it to the same packet as the terminal battle
+action showed an early "drop acquired" popup before the kill/settlement flow was
+visibly finished. Do not use `7/37` for battle drops unless a later no-popup
+variant is found.
+
+The no-popup refresh path is `mmGameMstarWqvga.cbm:sub_D04(0x0D04)`, reached
+from the scene callback for kind `7`, subtype `7`. A `type=1` row is an
+add/update operation and its `iteminfo` stream is:
+
+```text
+u8  row_count
+repeat row_count:
+  i16 seq
+  u32 item_id
+  u32 count_delta
+  common item-extra block
+```
+
+The mock therefore appends a one-shot `1/7/7 { type=1, iteminfo }` after the
+post-battle scene follow-up, not inside the battle operate packet. Runtime
+showed two possible follow-up shapes: the usual short `25/5` scene-default event
+and an occasional `split-safe-combo`. The refresh helper is attached to both,
+with battle-session serial de-duplication, so the first actual client request
+wins. The row uses the role DB `seq` returned by the server-side drop grant and
+a `count_delta` equal to the number of items dropped in that battle. Runtime
+after sending the full server-side stack count (`6`) showed the client adding
+6 more items, so this branch is additive rather than a set-count refresh. Do
+not use `7/1` for this path:
+`HandleItemOperationResponse(0x01033544)` requires the client-side pending
+item-use pointer at `r9+38036`, which is absent for battle rewards. `17/1`
+remains the explicit full-list response for opening the backpack UI, not the
+battle-drop acquire event.
 
 Role normalization was tightened to clamp HP/MP only when they exceed max
 values. It no longer treats `hp == 0` or `mp == 0` as "missing data", because

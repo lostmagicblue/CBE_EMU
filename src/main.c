@@ -317,6 +317,9 @@ static u32 g_mockBattleRoleHpCurrent = 0;
 static u32 g_mockBattleRoleHpMax = 0;
 static u32 g_mockBattleRoleMpCurrent = 0;
 static u32 g_mockBattleRoleMpMax = 0;
+static u8 g_mockBattleEnemyCountCurrent = 1;
+static u32 g_mockBattleEnemyHpSlots[3] = {0, 0, 0};
+static u32 g_mockBattleEnemyHpMaxSlots[3] = {0, 0, 0};
 static u32 g_mockBattleEnemyHpCurrent = 0;
 static u32 g_mockBattleEnemyHpMax = 0;
 
