@@ -3122,7 +3122,7 @@ typedef struct
     u32 strengthCoeff;
     u32 agilityCoeff;
     u32 wisdomCoeff;
-    u8 job;
+    u8 rawJob;
     u8 levelRequired;
     char name[VM_NET_MOCK_SKILL_NAME_BYTES + 1];
 } vm_net_mock_skill_catalog_item;
@@ -3265,13 +3265,35 @@ static bool vm_net_mock_dsh_value_equals_ascii(const u8 *raw, u32 len,
     return memcmp(raw, text, len) == 0;
 }
 
+static u8 vm_net_mock_role_job_to_skill_raw_job(u8 roleJob)
+{
+    if (roleJob >= 1 && roleJob <= 3)
+        return (u8)(roleJob - 1);
+    return 0;
+}
+
+static const char *vm_net_mock_skill_raw_job_name(u8 rawJob)
+{
+    switch (rawJob)
+    {
+    case 0:
+        return "Tianji";
+    case 1:
+        return "Huanjian";
+    case 2:
+        return "Guidao";
+    default:
+        return "Unknown";
+    }
+}
+
 static int vm_net_mock_compare_skill_catalog_items(const void *lhs, const void *rhs)
 {
     const vm_net_mock_skill_catalog_item *a = (const vm_net_mock_skill_catalog_item *)lhs;
     const vm_net_mock_skill_catalog_item *b = (const vm_net_mock_skill_catalog_item *)rhs;
 
-    if (a->job != b->job)
-        return a->job < b->job ? -1 : 1;
+    if (a->rawJob != b->rawJob)
+        return a->rawJob < b->rawJob ? -1 : 1;
     if (a->levelRequired != b->levelRequired)
         return a->levelRequired < b->levelRequired ? -1 : 1;
     if (a->skillId != b->skillId)
@@ -3320,7 +3342,7 @@ static bool vm_net_mock_add_skill_catalog_item(u32 skillId, u32 rawJob,
     skill->strengthCoeff = strengthCoeff;
     skill->agilityCoeff = agilityCoeff;
     skill->wisdomCoeff = wisdomCoeff;
-    skill->job = (u8)(rawJob + 1);
+    skill->rawJob = (u8)rawJob;
     skill->levelRequired = (u8)((levelRequired == 0) ? 1 :
                                 (levelRequired > 255 ? 255 : levelRequired));
     copyLen = vm_net_mock_shop_safe_name_len(name, nameLen, VM_NET_MOCK_SKILL_NAME_BYTES);
@@ -3505,11 +3527,12 @@ static u32 vm_net_mock_load_skill_catalog_dsh(const char *path)
                 name = value;
                 nameLen = valueLen;
                 break;
+            case 2:
+                /* Battle action effect index; maps to eidolon.dsh sequence. */
+                effectIndex = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+                break;
             case 4:
                 levelRequired = vm_net_mock_parse_dsh_u32(value, valueLen, 1);
-                break;
-            case 5:
-                effectIndex = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
                 break;
             case 6:
                 rawJob = vm_net_mock_parse_dsh_u32(value, valueLen, 0xff);
@@ -3567,15 +3590,15 @@ static u32 vm_net_mock_load_skill_catalog(void)
 
     if (skillCount == 0)
     {
-        (void)vm_net_mock_add_skill_catalog_item(1, 0, 1, 1, 10,
+        (void)vm_net_mock_add_skill_catalog_item(1, 0, 1, 14, 10,
                                                 -130, 50, 0, 0,
                                                 (const u8 *)"\xcd\xf2\xbd\xa3\xd6\xef\xcf\xc9\x31",
                                                 9);
-        (void)vm_net_mock_add_skill_catalog_item(101, 1, 1, 7, 20,
+        (void)vm_net_mock_add_skill_catalog_item(101, 1, 1, 1, 20,
                                                 -75, 0, 50, 0,
                                                 (const u8 *)"\xb7\xe7\xce\xe8\xc8\xd0\xd0\xd0\x31",
                                                 9);
-        (void)vm_net_mock_add_skill_catalog_item(201, 2, 1, 15, 5,
+        (void)vm_net_mock_add_skill_catalog_item(201, 2, 1, 7, 5,
                                                 -30, 0, 0, 110,
                                                 (const u8 *)"\xe7\xca\xd1\xd7\xbb\xc3\xb7\xa8\x31",
                                                 9);
@@ -3622,7 +3645,8 @@ static u32 vm_net_mock_build_role_learned_skill_blob(const vm_net_mock_role_stat
     u32 pos = 0;
     u32 learned = 0;
     u32 limit = vm_net_mock_role_learned_skill_limit(role ? role->level : 1);
-    u8 job = role ? role->job : 1;
+    u8 roleJob = role ? role->job : 1;
+    u8 rawJob = vm_net_mock_role_job_to_skill_raw_job(roleJob);
     u32 previewPos = 0;
 
     if (learnedCountOut)
@@ -3631,15 +3655,13 @@ static u32 vm_net_mock_build_role_learned_skill_blob(const vm_net_mock_role_stat
         previewOut[0] = 0;
     if (out == NULL || outCap == 0)
         return 0;
-    if (job == 0 || job > 3)
-        job = 1;
     if (limit > VM_NET_MOCK_LEARNED_SKILL_MAX_ITEMS)
         limit = VM_NET_MOCK_LEARNED_SKILL_MAX_ITEMS;
 
     for (u32 i = 0; i < total && learned < limit; ++i)
     {
         const vm_net_mock_skill_catalog_item *skill = &g_vm_net_mock_skill_catalog[i];
-        if (skill->job != job)
+        if (skill->rawJob != rawJob)
             continue;
         if (!vm_net_mock_seq_put_u32(out, outCap, &pos, skill->skillId))
             break;
@@ -10935,6 +10957,8 @@ static bool vm_net_mock_append_login_tail_skill_objects(u8 *out, u32 outCap, u32
     u32 learnedSkillLen = 0;
     u8 learnedCount = 0;
     char learnedPreview[192];
+    u8 roleJob = role ? role->job : 1;
+    u8 rawJob = vm_net_mock_role_job_to_skill_raw_job(roleJob);
 
     if (addedCount == NULL)
         return false;
@@ -10958,9 +10982,11 @@ static bool vm_net_mock_append_login_tail_skill_objects(u8 *out, u32 outCap, u32
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
     *addedCount = (u8)(*addedCount + 1);
-    vm_autotest_note("mock_role_skills role=%u job=%u level=%u learned=%u ids=%s evidence=JianghuOL.CBE:0x1010594 skill.dsh\n",
+    vm_autotest_note("mock_role_skills role=%u role_job=%u raw_job=%u job_name=%s level=%u learned=%u ids=%s evidence=JianghuOL.CBE:0x1010594/0x103550E skill.dsh\n",
                      role ? role->roleId : 0,
-                     role ? role->job : 0,
+                     roleJob,
+                     rawJob,
+                     vm_net_mock_skill_raw_job_name(rawJob),
                      role ? role->level : 1,
                      learnedCount,
                      learnedPreview);

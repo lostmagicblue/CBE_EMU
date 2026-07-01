@@ -21,12 +21,26 @@ Relevant columns:
 ID, 名称, 技能图片, 说明, 等级, 法术标示, 职业
 ```
 
+For battle playback, `技能图片` is the visual effect sequence. It indexes
+`eidolon.dsh` (`序列号 -> 精灵名字`) and is the value sent in subtype `4/6`
+actioninfo for action type `1`. `法术标示` is not the battle actor/eidolon
+index; using it can produce a valid but wrong visual.
+
 The `职业` column is the real job discriminator:
 
 ```text
-0 = 天机
-1 = 幻剑
-2 = 鬼道
+raw job 0 = 天机
+raw job 1 = 幻剑
+raw job 2 = 鬼道
+```
+
+The local mock role DB stores role jobs as `1..3` for title/role-state
+convenience. Convert it to the raw client/DSH value before selecting skills:
+
+```text
+role job 1 -> raw job 0 -> 天机
+role job 2 -> raw job 1 -> 幻剑
+role job 3 -> raw job 2 -> 鬼道
 ```
 
 The later columns named `天机 / 幻剑 / 鬼道` are coefficient columns in this
@@ -38,14 +52,17 @@ membership flags.
 `JianghuOL.CBE:net_handle_business_followup_events(0x01010594)` handles WT
 object `1/12/1`:
 
-1. Calls `LoadSkillDataSheet(0x0103550E)` to load `skill.dsh`.
+1. Calls `LoadSkillDataSheet(0x0103550E)` with `actor+321`, the actorinfo job
+   byte stored by `parse_actorinfo_response(0x0100FA88)`.
 2. Reads `learnednum`.
 3. Opens the `learnedskill` blob as a tagged stream.
 4. Reads one skill ID per learned row.
 5. Calls `MarkListItemActive()` for each ID.
 
-Therefore the server only needs to send learned skill IDs. Names, descriptions,
-effects, and icons are supplied by the local `skill.dsh`.
+`LoadSkillDataSheet()` filters `skill.dsh` by the same raw job value (`0..2`).
+Therefore the server only sends learned skill IDs, but those IDs must come from
+the same raw-job group that the actorinfo job byte selected. Names,
+descriptions, effects, and icons are supplied by the local `skill.dsh`.
 
 ## Unlock Rule
 
@@ -165,8 +182,23 @@ payload must be a raw tagged-u32 stream, without an extra blob length prefix.
 The skill-tail response logs:
 
 ```text
-mock_role_skills role=... job=... level=... learned=... ids=...
+mock_role_skills role=... role_job=... raw_job=... job_name=... level=... learned=... ids=...
 ```
+
+## 2026-07-01 Job Mapping Fix
+
+The skill catalog now stores `skill.dsh` column `职业` as `rawJob` without adding
+one. `vm_net_mock_build_role_learned_skill_blob()` converts persisted
+`role->job` to raw job with:
+
+```text
+rawJob = roleJob - 1
+```
+
+This matches the actorinfo byte consumed by
+`LoadSkillDataSheet(actor+321)`. It avoids the previous implicit `+1/-1`
+alignment where role DB job values and client skill-sheet job values were easy
+to mix up.
 
 ## 2026-06-28 Empty Spell List Follow-up
 
@@ -174,9 +206,9 @@ The spell panel is not expected to stay empty after entering the scene. Each
 level-1 profession has a displayable skill row in `skill.dsh`:
 
 ```text
-天机: ID 1   万剑诛仙1   法术标示 1
-幻剑: ID 101 风舞刃行1   法术标示 7
-鬼道: ID 201 绯炎幻法1   法术标示 15
+天机: ID 1   万剑诛仙1   技能图片 14 -> f_sword1.actor
+幻剑: ID 101 风舞刃行1   技能图片 1  -> f_blood2.actor
+鬼道: ID 201 绯炎幻法1   技能图片 7  -> f_flame1.actor
 ```
 
 Runtime showed the first scene follow-up request as:
@@ -194,7 +226,7 @@ path.
 Verification after rebuild:
 
 ```text
-mock_role_skills role=10001 job=3 level=2 learned=1 ids=201
+mock_role_skills role=10001 role_job=3 raw_job=2 job_name=Guidao level=2 learned=1 ids=201
 net_send connect=2 wt=12/1 len=54 source=builtin-scene-task-subset-followup resp=304
 skill parser probe: learnednum=1, read_skill=201, MarkListItemActive(skill=201)
 autotest_exit elapsed=40003 max_ms=40000

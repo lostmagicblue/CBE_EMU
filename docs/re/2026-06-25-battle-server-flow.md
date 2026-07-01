@@ -37,11 +37,15 @@ is caused by the server `actioninfo` response, not by the request.
 
 For selected skills, the same request builder reads the selected battle-skill
 record pointer at `r9+0x40B4` and sends `Operate = skillId + 2`. The server
-must map `skillId` through `skill.dsh` column `法术标示` before writing the
-action effect index. Sending the raw skill id as the effect index is invalid:
+must map `skillId` through `skill.dsh` column `技能图片` before writing the
+action effect index. That value is an `eidolon.dsh` sequence and selects the
+battle-effect actor copied by `HandleBattleActionMsg(0x6EB0)`. Sending the raw
+skill id as the effect index is invalid:
 runtime with `Operate=203` for skill id `201` tried to use effect `201` and
-crashed during effect allocation. The corrected response maps skill id `201`
-to effect `15`.
+crashed during effect allocation. Sending column `法术标示` was parser-safe but
+visually wrong: `201 绯炎幻法1` has `法术标示=15`, which points to
+`f_sword2.actor`; its correct battle visual is `技能图片=7`, which maps through
+`eidolon.dsh` to `f_flame1.actor`.
 
 The same `skill.dsh` row also drives MP cost and damage. Column `耗费法力` is
 the battle skill cost; for `201 绯炎幻法1` it is `5`. Column `生命变化` is a
@@ -64,7 +68,8 @@ overrideable through `CBE_BATTLE_RECOVER_MP` only for explicit experiments.
 
 Current contract: a skill response keeps type-1 scoped to the enemy target only.
 That record carries skill-derived HP damage in `valueA`, target MP delta `0` in
-`valueB`, and the mapped spell effect index from `skill.dsh`. The same `4/6`
+`valueB`, and the mapped battle-effect index from `skill.dsh` column `技能图片`.
+The same `4/6`
 object carries `teaminfo = roleId, currentHp, postCostMp`, and the mock server
 also updates the selected role's MP in the local role database. `actionnum`
 still permits multiple records: if the enemy survives the skill hit, append the
@@ -415,8 +420,8 @@ Current expected runtime log after the subtype-5 wire and skill-damage
 correction:
 
 ```text
-mock_battle_operate index=<target-wire> operate=203 skill=1 action=1 actions=<round-script-records> effect=15 actor=1 target=<target-wire> damage=<skill-derived> enemyhp=<nonzero> rolehp=<after-counter> counters=<counter-monsters> deaths=<death-actions> deathActor=<dead-wire> counterdmg=<sum> mpcost=5 valueB=0 teaminfo=10001:<hp>/<postCostMp> mp=<before>/<after> response=4/6
-battle_probe_action[0] active=1 type=1 actor=1 childCount=1 target=<target-wire> valueA=-<skill-derived> valueB=0 effect=15
+mock_battle_operate index=<target-wire> operate=203 skill=1 action=1 actions=<round-script-records> effect=7 actor=1 target=<target-wire> damage=<skill-derived> enemyhp=<nonzero> rolehp=<after-counter> counters=<counter-monsters> deaths=<death-actions> deathActor=<dead-wire> counterdmg=<sum> mpcost=5 valueB=0 teaminfo=10001:<hp>/<postCostMp> mp=<before>/<after> response=4/6
+battle_probe_action[0] active=1 type=1 actor=1 childCount=1 target=<target-wire> valueA=-<skill-derived> valueB=0 effect=7
 battle_probe_action[1] active=1 type=0 actor=<monster-wire> childCount=1 target=1 valueA=-<monster-damage> valueB=0
 ```
 
