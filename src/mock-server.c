@@ -19017,8 +19017,12 @@ static u32 vm_net_mock_sync_response_to_vm(void)
     if (g_netMockResponseLen == 0)
         return 0;
 
-    if (g_netMockResponseVmPtr)
-        vm_free(g_netMockResponseVmPtr);
+    /*
+     * Network data events keep the VM response pointer in the queued task.
+     * Do not free the previous pointer here: a burst of sends can queue
+     * response A, build response B before A is dispatched, and leave A's
+     * callback reading freed/reused memory.
+     */
     g_netMockResponseVmPtr = vm_malloc(g_netMockResponseLen);
     if (g_netMockResponseVmPtr == 0)
         return 0;
