@@ -430,6 +430,57 @@ now keeps one player hit plus one monster death action in `4/6`, then appends
 inline `4/7` settlement after the action object. No monster counterattack and
 no separate terminal action should be present in the default path.
 
+2026-07-01 escape contract: the client sends an empty `WT 1/4/4` object when the
+player chooses escape. `mmBattle.HandleServerBattleCmd(0x7BD0)` dispatches
+server subtype `4` at `0x7F06`, reads only the `"result"` field, and uses
+`result=1` for the escape-success branch (`0x7F18..0x7F4A`) and `result!=1`
+for the escape-failure branch (`0x7F4C..0x7F62`). The success branch clears the
+battle/death flags itself, so the server returns only `4/4 { result=1 }` and
+ends the mock battle session without reward settlement. The failure branch only
+shows the failure notice; it does not play monster actions by itself. To model
+the next monster turn, the failure response returns `4/4 { result=0 }` followed
+by the usual `4/6 actioninfo` records for every currently alive monster. The
+mock default success rate is 50%, with `CBE_BATTLE_ESCAPE_RATE` kept only as a
+debug override.
+
+2026-07-01 player-death correction: monster damage sent in `4/6 actioninfo`
+must be clamped to the player's remaining HP. Server state already clamps
+`g_mockBattleRoleHpCurrent` at zero, but sending a larger negative HP delta lets
+the client animate HP below zero and can crash the battle renderer. Negative
+runtime after adding `4/8 autorevive` inline showed the battle ending
+immediately and a blank prompt, so `4/8` is not the normal prompt trigger. A
+type-3 player death action is the trigger that opens the prompt, but order is
+critical: it must be appended in the same `4/6 actioninfo` after every monster
+damage/counter action that reduced HP to zero. Putting it before the final
+monster hit makes the prompt appear too early; removing it or delaying it to the
+next battle request leaves HP at zero with no prompt, because the client may not
+send another battle request. Do not append `4/7` settlement on player death,
+because `4/7` is the victory result panel/reward path. After the user clicks the
+death prompt, the client sends `WT objs=1/7/14(result=2)` for the "no" branch;
+the mock handles this as `builtin-battle-death-prompt-choice`, clears stale
+battle session flags, applies the server-side death settlement, then sends
+`1/20/1 { result=0 }` plus `1/30/1 { scene, posinfo }` for the respawn point.
+Current server-side death settlement is:
+
+- lose 10% of current-level EXP progress, clamped so death does not de-level;
+- lose 5% of carried copper;
+- revive with 30% max HP and 30% max MP;
+- move the selected role to the same Penglai TongQueTai start point used by new
+  characters.
+
+IDA evidence:
+`net_handle_simple_result_info` at `JianghuOL.CBE:0x1011434` handles
+kind `20` subtype `1`, reads `result`, and clears the scene/network wait flag at
+`0x101145C`; scene-channel subtype `30/1` is the normal scene-enter contract
+consumed by `scene_handle_enter_with_scene_pos` around `0x010396D6`. Do not echo
+the request-shaped `1/7/14(result=2)` packet back as a response: the main
+business dispatcher runs `event_packet_init(..., 10, 19)` before response
+dispatch, and the echo trips the generic unpack-error branch. Negative runtime
+after returning an empty `WT` ACK (`len=5`, `objects=0`): no unpack error, but
+the loading/progress bar stays active because no business handler clears the
+wait flag. Battle start still applies a 1 HP floor to recover older local role
+records that were already saved with zero HP before this settlement existed.
+
 Older negative evidence collected while debugging battle skill use:
 
 ```text
