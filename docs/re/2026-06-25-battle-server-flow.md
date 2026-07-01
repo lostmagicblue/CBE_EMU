@@ -244,13 +244,20 @@ repeat actionnum:
     u8 child_flag
     u32 value_a
     u32 value_b
-  if action_type == 1 or action_type == 2:
+if action_type == 1 or action_type == 2:
     u32 effect_index
     string effect_text
     u8 tail0
     u8 tail1
     u8 tail2
 ```
+
+2026-07-01 correction: this `effect_index` is consumed as an index into the
+battle effect sprite table loaded from `eidolon.dsh` (`序列号 -> 精灵名字`).
+For item use, do not use `skill.dsh` column `法术标示` as the direct visual
+index. Runtime negative evidence: `effect_index=16` plays
+`f_thunder1.actor`; `eidolon.dsh` maps the HP-heal visual
+`f_renew1.actor` to index `13`.
 
 Important correction: for physical attacks, do not write the `effect_index`,
 `effect_text`, and tail bytes. Those fields are only parsed for action type 1

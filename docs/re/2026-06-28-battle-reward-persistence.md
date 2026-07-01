@@ -49,7 +49,7 @@ enemy_id = 105
 reward_exp = 5
 reward_gold = 5
 drop_item_id = 304
-drop_rate = 100% (temporary test setting; was 10%)
+drop_rate = 10%
 ```
 
 Reward grant is guarded by `g_mockBattleOperateSessionSerial`. Both the normal

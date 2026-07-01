@@ -63,7 +63,7 @@ actor = player wire slot
 target = player wire slot
 value_a = HP actually restored
 value_b = MP actually restored
-effect_index = CBE_BATTLE_ITEM_EFFECT_INDEX or 0
+effect_index = CBE_BATTLE_ITEM_EFFECT_INDEX or item-derived default
 ```
 
 The mock consumes one active-role backpack row by `seq`, applies the item effect
@@ -73,6 +73,39 @@ By default a live enemy counterattack is bundled after the item action; set
 
 If the selected `seq` cannot be resolved or the item has no usable effect, the
 mock returns a narrow battle no-op action and does not consume DB state.
+
+## Item Visual Effect
+
+`HandleBattleActionMsg(0x6EB0)` reads an extra u32 for action type `1` and
+action type `2` after the target/value children. That value is stored in the
+action slot at `+92` and then used to index the battle effect resource table
+before the animation is played.
+
+HP battle medicines should not use the old default `0` effect, and they should
+not use `skill.dsh` column `法术标示` directly. Runtime negative evidence showed
+that `effect_index = 16` plays a thunder visual. The reason is that the battle
+action field indexes the `eidolon.dsh` battle-effect sprite table:
+
+```text
+eidolon.dsh columns: 序列号, 精灵名字
+0  -> f_blood1.actor
+...
+13 -> f_renew1.actor
+16 -> f_thunder1.actor
+```
+
+`JHOnlineData/f_renew1.actor` references `回复.gif`, matching the healing visual.
+Local item data then identifies which items should use that effect:
+
+- `item.dsh` HP medicines such as `301 小回春散` through `305 中长命散` and
+  mixed HP/MP medicines `341..343 五龙膏` are single-target items with positive
+  `生命变化`.
+
+Therefore the mock now writes `effect_index = eidolon.dsh["f_renew1.actor"]`
+for consumed battle items whose `item.dsh` effect has positive HP recovery.
+In the current resources this is `13`. MP-only items still default to `0` until
+their visual contract is reversed. `CBE_BATTLE_ITEM_EFFECT_INDEX` remains an
+explicit debug override, including setting it to `0`.
 
 ## Runtime Source
 
@@ -85,5 +118,5 @@ builtin-battle-item-use
 Trace line:
 
 ```text
-mock_battle_item_use index=... seq=... item=... remaining=... response=4/6-actionType2
+mock_battle_item_use index=... seq=... item=... remaining=... effect=13 response=4/6-actionType2
 ```

@@ -17,6 +17,21 @@ Local resource evidence:
   - Columns: `场景`, `怪物id1`, `怪物id2`, `怪物id3`.
   - Rows: 104 scene rows.
   - Unique nonzero monster ids: 73.
+- `bin/JHOnlineData/task.dsh`
+  - Columns include task target text plus structured requirement fields:
+    `任务要求类型1`, `任务要求ID1`, and `任务要求数量1`.
+  - `任务要求类型1 = 1` identifies task material item requirements. The
+    item id/name is structured, but the source monster is usually only in the
+    task text. There is no drop probability column.
+- `bin/JHOnlineData/item.dsh`
+  - Task material items such as `18 蝙蝠翅膀`, `19 瘴气毛发`, and
+    `25 稻谷` are category `11`, stack `30`.
+- Resource search notes:
+  - `tempData.bin` contains the same `automonster.dsh` scene/monster table.
+  - `mmBattleMstarWqvga.cbm` contains "掉落/背包/物品说明/拾取/丢弃" UI
+    strings, not a monster drop probability table.
+  - Extracted resource package file names include `item.dsh`, `task.dsh`,
+    `automonster.dsh`, etc.; no separate monster drop/probability DSH was found.
 - `tmp/all_sce_bundle/<scene>.sce/scene.json`
   - Monster spawn records are exported as `records[].unknown_blob`.
   - The combat spawn token shape is:
@@ -52,8 +67,8 @@ Runtime/server boundary:
 
 `src/mock-server.c` now has:
 
-- `g_vm_net_mock_monster_entries[]`: all 73 local automatic monster ids with
-  server level and monster family.
+- `g_vm_net_mock_monster_entries[]`: 73 local automatic monster ids plus 4
+  task-only structured monster ids, with server level and monster family.
 - `vm_net_mock_monster_stats_for_enemy()`: derives HP, MP, attack, defense, EXP,
   copper, and optional drop info from the monster entry.
 - `vm_net_mock_battle_player_damage_to_enemy()`: player attack from the unified
@@ -90,6 +105,64 @@ attack/defense = 8/2
 reward = 5 EXP, 5 copper
 drop = 小长命散 item 304, 10%
 ```
+
+## Drop Evidence
+
+No recovered resource currently provides a general
+`monster id -> item id -> probability` table. The active drop entries are
+therefore split by evidence type:
+
+- Poison slime `105` keeps the user-requested ordinary battle reward:
+  `304 小长命散`, `10%`.
+- Task material drops come from `task.dsh` item requirements and matching
+  monster names/ids. Since no probability field exists in the resources, the
+  mock uses the explicit server design constant
+  `VM_NET_MOCK_TASK_MATERIAL_DROP_RATE = 100`.
+- Unmatched task material rows, such as task text that names a boss but does not
+  expose a stable actor id in the current mock path, are not added to the table.
+
+Current task-material mappings added to `g_vm_net_mock_monster_entries[]`:
+
+| Monster ID | Evidence | Drop item | Rate |
+| -: | - | - | -: |
+| 1 | task.dsh 野猪 -> 黑猪獠牙 | 27 黑猪獠牙 | 100% |
+| 3 | task.dsh 桃花岛西侧桃林 -> 蝙蝠翅膀 | 18 蝙蝠翅膀 | 100% |
+| 6 | task.dsh 老野猪 -> 老野猪皮 | 29 老野猪皮 | 100% |
+| 9 | task.dsh 掘地鼠 -> 稻谷 | 25 稻谷 | 100% |
+| 13 | task.dsh 白灵蟒 -> 白蟒毒牙 | 32 白蟒毒牙 | 100% |
+| 15 | task.dsh 碧竹巨蛇 structured monster id | 34 碧竹蛇胆 | 100% |
+| 18 | task.dsh 岩浆石火 -> 怒焰火石 | 36 怒焰火石 | 100% |
+| 19 | task.dsh 岳老三 -> 家传铁锤 | 37 家传铁锤 | 100% |
+| 22 | task.dsh 碧纱幽火 -> 幽火结晶 | 53 幽火结晶 | 100% |
+| 25 | task.dsh 恶臭僵尸 -> 臭鸡蛋 | 43 臭鸡蛋 | 100% |
+| 28 | task.dsh 灰蝙蝠 -> 灰色晶石 | 45 灰色晶石 | 100% |
+| 30 | task.dsh 雪岩怪 -> 冷水晶 | 47 冷水晶 | 100% |
+| 34 | task.dsh 碎骨兵 -> 骨头碎片 | 51 骨头碎片 | 100% |
+| 36 | task.dsh 青石怪 -> 青石怪的心 | 52 青石怪的心 | 100% |
+| 41 | task.dsh 恶臭胶质 -> 恶灵胶 | 55 恶灵胶 | 100% |
+| 42 | task.dsh 白焰鬼 -> 鬼焰 | 56 鬼焰 | 100% |
+| 45 | task.dsh 红鬼火 -> 鬼火 | 58 鬼火 | 100% |
+| 47 | task.dsh 持刀日月教徒 -> 日月教徒头巾 | 63 日月教徒头巾 | 100% |
+| 49 | task.dsh 杂斑野猪 -> 野猪獠牙 | 68 野猪獠牙 | 100% |
+| 50 | task.dsh 金蜜蜂 -> 金蜜蜂 | 71 金蜜蜂 | 100% |
+| 51 | task.dsh 蓝灯鬼 -> 蓝灯鬼的魂魄 | 69 蓝灯鬼的魂魄 | 100% |
+| 53 | task.dsh 白鳞/白磷蛇 -> 白磷蛇干 | 67 白磷蛇干 | 100% |
+| 54 | task.dsh 碧竹蛇 -> 碧竹蛇毒 | 60 碧竹蛇毒 | 100% |
+| 57 | task.dsh 长枪鬼卒 -> 忘忧草 | 61 忘忧草 | 100% |
+| 60 | task.dsh 碎颅/碎骨骷髅 -> 颅骨碎片 | 66 颅骨碎片 | 100% |
+| 63 | task.dsh 青龙王 structured monster id | 35 青龙明珠 | 100% |
+| 64 | task.dsh 火焰山日月教徒 -> 日月令符 | 62 日月令符 | 100% |
+| 65 | task.dsh 东方不败 structured monster id | 38 一盒胭脂 | 100% |
+| 67 | task.dsh 拿枪士兵 -> 士兵护符 | 64 士兵护符 | 100% |
+| 69 | task.dsh 腐血骸骨 -> 灵骸 | 70 灵骸 | 100% |
+| 77 | task.dsh 丹霞山巴寨/染血骷髅 -> 血骨片 | 28 血骨片 | 100% |
+| 78 | task.dsh 死骨锤兵 -> 骨锤之骨 | 50 骨锤之骨 | 100% |
+| 79 | task.dsh 青苔岩精 -> 青苔岩的精华 | 49 青苔岩的精华 | 100% |
+| 92 | task.dsh 暗紫尸骸 -> 白骨碎片 | 57 白骨碎片 | 100% |
+| 94 | task.dsh 黄色蜂群 -> 蜂皇浆 | 59 蜂皇浆 | 100% |
+| 97 | task.dsh 赤焰怪 -> 赤焰怪牙 | 65 赤焰怪牙 | 100% |
+| 106 | task.dsh 瘴气蝙蝠 -> 瘴气毛发 | 19 瘴气毛发 | 100% |
+| 202 | task.dsh 炼狱鬼兵 -> 雪莲花 | 80 雪莲花 | 100% |
 
 ## Stat Rules
 
@@ -177,7 +250,7 @@ boss:      hp=80+L*12, mp=24+L*4, attack=14+L*3, defense=8+L/2, exp=20+L*5, gold
 | 101 | 日月教徒 | 23蟠龙寨_05.sce | 39 | humanoid | 303 | 90 | 87 | 16 | 123 | 84 | - |
 | 103 | 拿枪教徒 | 23蟠龙寨_07.sce | 40 | humanoid | 310 | 92 | 89 | 16 | 126 | 86 | - |
 | 104 | 近卫教徒 | 23蟠龙寨_08.sce | 41 | humanoid | 317 | 94 | 91 | 16 | 129 | 88 | - |
-| 105 | 毒泥怪 | 01桃花岛_01.sce | 1 | slime | 20 | 20 | 8 | 2 | 5 | 5 | 小长命散 100%（临时测试） |
+| 105 | 毒泥怪 | 01桃花岛_01.sce | 1 | slime | 20 | 20 | 8 | 2 | 5 | 5 | 小长命散 10% |
 | 106 | 瘴气蝙蝠 | 01桃花岛_04.sce | 2 | flying | 28 | 14 | 12 | 1 | 10 | 7 | - |
 | 107 | 蓝鬼灯 | 05上古皇陵_03.sce | 6 | spirit | 58 | 34 | 22 | 4 | 24 | 17 | - |
 | 110 | 紫云鬼 | 27深渊沼泽_01.sce | 46 | stone | 456 | 104 | 100 | 29 | 146 | 97 | - |
@@ -201,9 +274,12 @@ result: passed
 
 ## Unknowns
 
-- There is still no recovered live drop table. Only the user-specified poison
-  slime drop is active. The stat layer supports `dropItemId/dropRatePercent`,
-  so later recovered drops can be added without changing battle flow.
+- There is still no recovered live probability table. Current task material
+  rates are server-side modeling based on `task.dsh` item requirements, not a
+  recovered live-server probability value.
+- Some task text names special monsters whose actor id is not yet recovered in
+  the current mock battle path; those rows remain intentionally absent instead
+  of guessing an id.
 - Player skill formulas are not yet recovered. The current normal attack uses
   the server-side player attribute model documented in
   `2026-06-28-player-attribute-model.md`.

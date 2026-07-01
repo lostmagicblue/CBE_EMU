@@ -2884,8 +2884,9 @@ enum
     VM_NET_MOCK_BATTLE_POISON_SLIME_ID = 105,
     VM_NET_MOCK_BATTLE_POISON_SLIME_EXP = 5,
     VM_NET_MOCK_BATTLE_POISON_SLIME_GOLD = 5,
-    VM_NET_MOCK_BATTLE_CHANGMING_SAN_ITEM_ID = 304,
-    VM_NET_MOCK_BATTLE_CHANGMING_SAN_DROP_RATE = 100,
+    VM_NET_MOCK_BATTLE_CHANGMING_SAN_ITEM_ID = 304,//回春散ID
+    VM_NET_MOCK_BATTLE_CHANGMING_SAN_DROP_RATE = 10,//回春散掉落概率
+    VM_NET_MOCK_TASK_MATERIAL_DROP_RATE = 100,//人物材料掉落概率
     VM_NET_MOCK_ROLE_DEFAULT_ID = 10001,
     VM_NET_MOCK_ROLE_DEFAULT_HP = 120,
     VM_NET_MOCK_ROLE_DEFAULT_MP = 100,
@@ -3138,6 +3139,9 @@ static bool g_vm_net_mock_item_effect_catalog_loaded = false;
 static vm_net_mock_skill_catalog_item g_vm_net_mock_skill_catalog[VM_NET_MOCK_SKILL_CATALOG_MAX_ITEMS];
 static u32 g_vm_net_mock_skill_catalog_count = 0;
 static bool g_vm_net_mock_skill_catalog_loaded = false;
+static bool g_vm_net_mock_eidolon_catalog_loaded = false;
+static bool g_vm_net_mock_eidolon_heal_effect_found = false;
+static u32 g_vm_net_mock_eidolon_heal_effect_index = 0;
 
 static u32 vm_net_mock_shop_catalog_group(u32 itemId)
 {
@@ -3251,6 +3255,16 @@ static int32_t vm_net_mock_parse_dsh_s32(const u8 *raw, u32 len, int32_t fallbac
     return haveDigit ? value * sign : fallback;
 }
 
+static bool vm_net_mock_dsh_value_equals_ascii(const u8 *raw, u32 len,
+                                               const char *text)
+{
+    size_t textLen = text ? strlen(text) : 0;
+
+    if (raw == NULL || text == NULL || textLen != len)
+        return false;
+    return memcmp(raw, text, len) == 0;
+}
+
 static int vm_net_mock_compare_skill_catalog_items(const void *lhs, const void *rhs)
 {
     const vm_net_mock_skill_catalog_item *a = (const vm_net_mock_skill_catalog_item *)lhs;
@@ -3313,6 +3327,118 @@ static bool vm_net_mock_add_skill_catalog_item(u32 skillId, u32 rawJob,
     if (copyLen > 0)
         memcpy(skill->name, name, copyLen);
     skill->name[copyLen] = 0;
+    return true;
+}
+
+static bool vm_net_mock_load_eidolon_effect_index_dsh(const char *path,
+                                                      const char *actorName,
+                                                      u32 *indexOut)
+{
+    static u8 data[4096];
+    u32 len = vm_net_mock_load_response_file(path, data, sizeof(data));
+    u32 columnCount = 0;
+    u32 rowCount = 0;
+    u32 pos = 16;
+
+    if (indexOut)
+        *indexOut = 0;
+    if (actorName == NULL || indexOut == NULL || len < 16)
+        return false;
+    columnCount = vm_net_mock_read_le32_at(data, 4);
+    rowCount = vm_net_mock_read_le32_at(data, 8);
+    if (columnCount < 2 || columnCount > 16 || rowCount > 1024)
+        return false;
+
+    for (u32 i = 0; i < columnCount; ++i)
+    {
+        u32 fieldLen = 0;
+        if (pos >= len)
+            return false;
+        fieldLen = data[pos++];
+        if (pos + fieldLen > len)
+            return false;
+        pos += fieldLen;
+    }
+
+    for (u32 row = 0; row < rowCount && pos + 4 <= len; ++row)
+    {
+        u32 rowLen = vm_net_mock_read_le32_at(data, pos);
+        u32 rowPos = pos + 4;
+        u32 rowEnd = rowPos + rowLen;
+        u32 sequence = 0;
+        bool haveSequence = false;
+        const u8 *name = NULL;
+        u32 nameLen = 0;
+
+        if (rowEnd > len || rowEnd < rowPos)
+            break;
+
+        for (u32 col = 0; col < columnCount && rowPos < rowEnd; ++col)
+        {
+            u32 valueLen = data[rowPos++];
+            const u8 *value = data + rowPos;
+
+            if (rowPos + valueLen > rowEnd)
+                break;
+            switch (col)
+            {
+            case 0:
+                sequence = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+                haveSequence = valueLen != 0;
+                break;
+            case 1:
+                name = value;
+                nameLen = valueLen;
+                break;
+            default:
+                break;
+            }
+            rowPos += valueLen;
+        }
+
+        if (haveSequence &&
+            vm_net_mock_dsh_value_equals_ascii(name, nameLen, actorName))
+        {
+            *indexOut = sequence;
+            return true;
+        }
+        pos = rowEnd;
+    }
+    return false;
+}
+
+static bool vm_net_mock_eidolon_heal_effect_index(u32 *indexOut)
+{
+    if (indexOut)
+        *indexOut = 0;
+    if (!g_vm_net_mock_eidolon_catalog_loaded)
+    {
+        g_vm_net_mock_eidolon_catalog_loaded = true;
+        g_vm_net_mock_eidolon_heal_effect_found =
+            vm_net_mock_load_eidolon_effect_index_dsh("JHOnlineData/eidolon.dsh",
+                                                      "f_renew1.actor",
+                                                      &g_vm_net_mock_eidolon_heal_effect_index);
+        if (!g_vm_net_mock_eidolon_heal_effect_found)
+        {
+            g_vm_net_mock_eidolon_heal_effect_found =
+                vm_net_mock_load_eidolon_effect_index_dsh("bin/JHOnlineData/eidolon.dsh",
+                                                          "f_renew1.actor",
+                                                          &g_vm_net_mock_eidolon_heal_effect_index);
+        }
+        if (g_vm_net_mock_eidolon_heal_effect_found)
+        {
+            printf("[info][network] mock_eidolon_effect actor=f_renew1.actor index=%u source=eidolon.dsh\n",
+                   g_vm_net_mock_eidolon_heal_effect_index);
+        }
+        else
+        {
+            printf("[warn][network] mock_eidolon_effect actor=f_renew1.actor missing source=eidolon.dsh\n");
+        }
+    }
+    if (!g_vm_net_mock_eidolon_heal_effect_found)
+        return false;
+    if (indexOut)
+        *indexOut = g_vm_net_mock_eidolon_heal_effect_index;
     return true;
 }
 
@@ -6060,51 +6186,54 @@ typedef struct
 } vm_net_mock_monster_stats;
 
 static const vm_net_mock_monster_entry g_vm_net_mock_monster_entries[] = {
-    {  1,  6, VM_NET_MOCK_MONSTER_BEAST, 0, 0},
-    {  3,  1, VM_NET_MOCK_MONSTER_FLYING, 0, 0},
+    {  1,  6, VM_NET_MOCK_MONSTER_BEAST, 27, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    {  3,  1, VM_NET_MOCK_MONSTER_FLYING, 18, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     {  4,  2, VM_NET_MOCK_MONSTER_INSECT, 0, 0},
-    {  6,  7, VM_NET_MOCK_MONSTER_BEAST, 0, 0},
-    {  9,  3, VM_NET_MOCK_MONSTER_BEAST, 0, 0},
-    { 13, 12, VM_NET_MOCK_MONSTER_BOSS, 0, 0},
-    { 18, 38, VM_NET_MOCK_MONSTER_ELEMENTAL, 0, 0},
-    { 19, 28, VM_NET_MOCK_MONSTER_BOSS, 0, 0},
-    { 22, 12, VM_NET_MOCK_MONSTER_SPIRIT, 0, 0},
-    { 25,  4, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
-    { 28,  7, VM_NET_MOCK_MONSTER_FLYING, 0, 0},
+    {  6,  7, VM_NET_MOCK_MONSTER_BEAST, 29, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    {  9,  3, VM_NET_MOCK_MONSTER_BEAST, 25, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    { 13, 12, VM_NET_MOCK_MONSTER_BOSS, 32, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    { 15, 55, VM_NET_MOCK_MONSTER_REPTILE, 34, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    { 18, 38, VM_NET_MOCK_MONSTER_ELEMENTAL, 36, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    { 19, 28, VM_NET_MOCK_MONSTER_BOSS, 37, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    { 22, 12, VM_NET_MOCK_MONSTER_SPIRIT, 53, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    { 25,  4, VM_NET_MOCK_MONSTER_UNDEAD, 43, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    { 28,  7, VM_NET_MOCK_MONSTER_FLYING, 45, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 29,  8, VM_NET_MOCK_MONSTER_FLYING, 0, 0},
-    { 30,  8, VM_NET_MOCK_MONSTER_STONE, 0, 0},
+    { 30,  8, VM_NET_MOCK_MONSTER_STONE, 47, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 31,  9, VM_NET_MOCK_MONSTER_HUMANOID, 0, 0},
     { 32, 10, VM_NET_MOCK_MONSTER_BEAST, 0, 0},
-    { 34, 11, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
-    { 36, 14, VM_NET_MOCK_MONSTER_STONE, 0, 0},
+    { 34, 11, VM_NET_MOCK_MONSTER_UNDEAD, 51, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    { 36, 14, VM_NET_MOCK_MONSTER_STONE, 52, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 40, 20, VM_NET_MOCK_MONSTER_SPIRIT, 0, 0},
-    { 41, 20, VM_NET_MOCK_MONSTER_SLIME, 0, 0},
-    { 42, 22, VM_NET_MOCK_MONSTER_ELEMENTAL, 0, 0},
-    { 45, 22, VM_NET_MOCK_MONSTER_SPIRIT, 0, 0},
-    { 47, 27, VM_NET_MOCK_MONSTER_HUMANOID, 0, 0},
+    { 41, 20, VM_NET_MOCK_MONSTER_SLIME, 55, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    { 42, 22, VM_NET_MOCK_MONSTER_ELEMENTAL, 56, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    { 45, 22, VM_NET_MOCK_MONSTER_SPIRIT, 58, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    { 47, 27, VM_NET_MOCK_MONSTER_HUMANOID, 63, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 48, 28, VM_NET_MOCK_MONSTER_SOLDIER, 0, 0},
-    { 49, 31, VM_NET_MOCK_MONSTER_BEAST, 0, 0},
-    { 50, 30, VM_NET_MOCK_MONSTER_INSECT, 0, 0},
-    { 51, 31, VM_NET_MOCK_MONSTER_SPIRIT, 0, 0},
+    { 49, 31, VM_NET_MOCK_MONSTER_BEAST, 68, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    { 50, 30, VM_NET_MOCK_MONSTER_INSECT, 71, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    { 51, 31, VM_NET_MOCK_MONSTER_SPIRIT, 69, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 52, 28, VM_NET_MOCK_MONSTER_REPTILE, 0, 0},
-    { 53, 29, VM_NET_MOCK_MONSTER_REPTILE, 0, 0},
-    { 54, 29, VM_NET_MOCK_MONSTER_REPTILE, 0, 0},
+    { 53, 29, VM_NET_MOCK_MONSTER_REPTILE, 67, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    { 54, 29, VM_NET_MOCK_MONSTER_REPTILE, 60, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 55, 34, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
     { 56, 34, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
-    { 57, 32, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
-    { 60, 36, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
-    { 64, 37, VM_NET_MOCK_MONSTER_HUMANOID, 0, 0},
-    { 67, 27, VM_NET_MOCK_MONSTER_SOLDIER, 0, 0},
-    { 69, 24, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
+    { 57, 32, VM_NET_MOCK_MONSTER_UNDEAD, 61, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    { 60, 36, VM_NET_MOCK_MONSTER_UNDEAD, 66, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    { 63, 60, VM_NET_MOCK_MONSTER_BOSS, 35, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    { 64, 37, VM_NET_MOCK_MONSTER_HUMANOID, 62, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    { 65, 60, VM_NET_MOCK_MONSTER_BOSS, 38, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    { 67, 27, VM_NET_MOCK_MONSTER_SOLDIER, 64, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    { 69, 24, VM_NET_MOCK_MONSTER_UNDEAD, 70, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 70, 24, VM_NET_MOCK_MONSTER_SPIRIT, 0, 0},
     { 71, 23, VM_NET_MOCK_MONSTER_STONE, 0, 0},
     { 73,  5, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
     { 74,  5, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
     { 75,  6, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
     { 76,  3, VM_NET_MOCK_MONSTER_BEAST, 0, 0},
-    { 77,  4, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
-    { 78,  9, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
-    { 79, 11, VM_NET_MOCK_MONSTER_STONE, 0, 0},
+    { 77,  4, VM_NET_MOCK_MONSTER_UNDEAD, 28, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    { 78,  9, VM_NET_MOCK_MONSTER_UNDEAD, 50, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    { 79, 11, VM_NET_MOCK_MONSTER_STONE, 49, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 81, 13, VM_NET_MOCK_MONSTER_SPIRIT, 0, 0},
     { 82, 15, VM_NET_MOCK_MONSTER_BEAST, 0, 0},
     { 83, 15, VM_NET_MOCK_MONSTER_BEAST, 0, 0},
@@ -6113,16 +6242,16 @@ static const vm_net_mock_monster_entry g_vm_net_mock_monster_entries[] = {
     { 87, 17, VM_NET_MOCK_MONSTER_HUMANOID, 0, 0},
     { 89, 18, VM_NET_MOCK_MONSTER_SOLDIER, 0, 0},
     { 91, 21, VM_NET_MOCK_MONSTER_INSECT, 0, 0},
-    { 92, 23, VM_NET_MOCK_MONSTER_SLIME, 0, 0},
-    { 94, 26, VM_NET_MOCK_MONSTER_INSECT, 0, 0},
-    { 97, 36, VM_NET_MOCK_MONSTER_ELEMENTAL, 0, 0},
+    { 92, 23, VM_NET_MOCK_MONSTER_SLIME, 57, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    { 94, 26, VM_NET_MOCK_MONSTER_INSECT, 59, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    { 97, 36, VM_NET_MOCK_MONSTER_ELEMENTAL, 65, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 98, 38, VM_NET_MOCK_MONSTER_SLIME, 0, 0},
     { 99, 39, VM_NET_MOCK_MONSTER_BEAST, 0, 0},
     {101, 39, VM_NET_MOCK_MONSTER_HUMANOID, 0, 0},
     {103, 40, VM_NET_MOCK_MONSTER_HUMANOID, 0, 0},
     {104, 41, VM_NET_MOCK_MONSTER_HUMANOID, 0, 0},
     {105,  1, VM_NET_MOCK_MONSTER_SLIME, VM_NET_MOCK_BATTLE_CHANGMING_SAN_ITEM_ID, VM_NET_MOCK_BATTLE_CHANGMING_SAN_DROP_RATE},
-    {106,  2, VM_NET_MOCK_MONSTER_FLYING, 0, 0},
+    {106,  2, VM_NET_MOCK_MONSTER_FLYING, 19, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     {107,  6, VM_NET_MOCK_MONSTER_SPIRIT, 0, 0},
     {110, 46, VM_NET_MOCK_MONSTER_STONE, 0, 0},
     {111, 48, VM_NET_MOCK_MONSTER_STONE, 0, 0},
@@ -6132,7 +6261,8 @@ static const vm_net_mock_monster_entry g_vm_net_mock_monster_entries[] = {
     {122, 53, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
     {200, 43, VM_NET_MOCK_MONSTER_SPIRIT, 0, 0},
     {201, 44, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
-    {202, 45, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0}
+    {202, 45, VM_NET_MOCK_MONSTER_UNDEAD, 80, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    {300, 55, VM_NET_MOCK_MONSTER_BOSS, 0, 0}
 };
 
 static vm_net_mock_monster_entry vm_net_mock_monster_entry_for_enemy(u32 enemyId)
@@ -13554,6 +13684,18 @@ static u32 vm_net_mock_battle_operate_skill_effect(u32 operate)
     return 0;
 }
 
+static u32 vm_net_mock_battle_item_effect_index(u32 hpEffect)
+{
+    const char *override = getenv("CBE_BATTLE_ITEM_EFFECT_INDEX");
+    u32 effectIndex = 0;
+
+    if (override != NULL && override[0] != 0)
+        return vm_net_mock_env_u32("CBE_BATTLE_ITEM_EFFECT_INDEX", 0);
+    if (hpEffect != 0 && vm_net_mock_eidolon_heal_effect_index(&effectIndex))
+        return effectIndex;
+    return 0;
+}
+
 static void vm_net_mock_battle_sync_role_mp_from_role(vm_net_mock_role_state *role)
 {
     if (role == NULL)
@@ -13954,7 +14096,7 @@ static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 req
     u8 enemySlot = 0;
     u8 counterActionType = (u8)vm_net_mock_env_u32("CBE_BATTLE_COUNTER_ACTION_TYPE", 0);
     u8 counterChildFlag = (u8)vm_net_mock_env_u32("CBE_BATTLE_COUNTER_CHILD_FLAG", 0);
-    u32 itemEffectIndex = vm_net_mock_env_u32("CBE_BATTLE_ITEM_EFFECT_INDEX", 0);
+    u32 itemEffectIndex = 0;
     u8 itemTail0 = (u8)vm_net_mock_env_u32("CBE_BATTLE_ITEM_TAIL0", 0);
     u8 itemTail1 = (u8)vm_net_mock_env_u32("CBE_BATTLE_ITEM_TAIL1", 0);
     u8 itemTail2 = (u8)vm_net_mock_env_u32("CBE_BATTLE_ITEM_TAIL2", 0);
@@ -14054,6 +14196,7 @@ static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 req
         u8 itemTargetWireSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_ITEM_TARGET_WIRE_SLOT",
                                                         playerSlot);
         u32 itemMpValueB = mpApplied != 0 ? mpApplied : vm_net_mock_battle_role_mp_current();
+        itemEffectIndex = vm_net_mock_battle_item_effect_index(hpEffect);
         if (!vm_net_mock_append_battle_actioninfo_record(actionInfo, sizeof(actionInfo),
                                                          &actionInfoLen, 2,
                                                          itemActorWireSlot,
@@ -14175,14 +14318,14 @@ static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 req
         g_mockBattlePendingEnemyTurn = 0;
     }
 
-    printf("[info][network] mock_battle_item_use index=%u seq=%u item=%u remaining=%u hp=%u/%u mp=%u/%u exp=%u consumed=%u applied=%u counter=%u resp=%u evidence=mmBattle:0x2B50->4/3,0x7BD0/0x6EB0->4/6\n",
+    printf("[info][network] mock_battle_item_use index=%u seq=%u item=%u remaining=%u hp=%u/%u mp=%u/%u exp=%u effect=%u consumed=%u applied=%u counter=%u resp=%u evidence=mmBattle:0x2B50->4/3,0x7BD0/0x6EB0->4/6,eidolon.dsh:f_renew1\n",
            parsed.index, parsed.seq, itemId, remaining,
            hpApplied, hpEffect, mpApplied, mpEffect, expApplied,
-           consumed ? 1 : 0, applied ? 1 : 0, counterDamageValue, pos);
-    vm_autotest_note("mock_battle_item_use index=%u seq=%u item=%u remaining=%u hp=%u/%u mp=%u/%u exp=%u consumed=%u applied=%u counter=%u response=4/6-actionType2 evidence=mmBattle:0x2B50,0x6EB0\n",
+           itemEffectIndex, consumed ? 1 : 0, applied ? 1 : 0, counterDamageValue, pos);
+    vm_autotest_note("mock_battle_item_use index=%u seq=%u item=%u remaining=%u hp=%u/%u mp=%u/%u exp=%u effect=%u consumed=%u applied=%u counter=%u response=4/6-actionType2 evidence=mmBattle:0x2B50,0x6EB0,eidolon.dsh:f_renew1\n",
                      parsed.index, parsed.seq, itemId, remaining,
                      hpApplied, hpEffect, mpApplied, mpEffect, expApplied,
-                     consumed ? 1 : 0, applied ? 1 : 0, counterDamageValue);
+                     itemEffectIndex, consumed ? 1 : 0, applied ? 1 : 0, counterDamageValue);
     return pos;
 }
 
