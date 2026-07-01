@@ -1740,6 +1740,8 @@ static void vm_input_draw_overlay(void)
     }
 }
 
+static void vm_frame_delay(u32 ms) { SDL_Delay(ms); }
+
 static void vm_lcd_update_with_input_overlay(void)
 {
     uc_mem_read(MTK, VM_screenImage_ADDRESS, Lcd_Cache_Buffer, LCD_WIDTH * LCD_HEIGHT * PIXEL_PER_BYTE);
