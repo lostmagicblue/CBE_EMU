@@ -6,6 +6,10 @@
 #ifdef _WIN32
 #include <direct.h>
 #endif
+#ifdef __ANDROID__
+#include <unistd.h>
+#include "android_compat.c"
+#endif
 #include <stdarg.h>
 #include <math.h>
 #include <stdint.h>
@@ -16,7 +20,7 @@
 #include "hookRam.c"
 #include "vmEvent.c"
 
-#ifdef GDB_SERVER_SUPPORT
+#if defined(GDB_SERVER_SUPPORT) && !defined(__ANDROID__)
 #include "gdb_client.c"
 pthread_t gdb_server_mutex;
 
@@ -99,7 +103,6 @@ u8 isStepNext = 0;
 
 SDL_Keycode isKeyDown = SDLK_UNKNOWN;
 pthread_t EmuThread;
-pthread_t MainUpdareThread;
 
 bool isMouseDown = false;
 u8 currentProgramDir[256] = {0};
@@ -308,7 +311,7 @@ static u32 g_battleSubtype8InfoDstWatchTick = 0;
 static u32 g_battleSubtype8InfoDstWriteLimitCount = 0;
 static u32 g_mockBattleOperateSessionSerial = 0;
 static u32 g_mockBattleOperateTurnCounter = 0;
-static u8 g_mockBattleOperateSessionArmed = 0;
+u8 g_mockBattleOperateSessionArmed = 0;
 static u8 g_mockBattleOperateSessionFinished = 0;
 static u8 g_mockBattlePendingEnemyTurn = 0;
 static u8 g_mockBattleAwaitingSettlement = 0;
@@ -1775,6 +1778,8 @@ static void vm_input_draw_overlay(void)
         vm_lcd_fill_rect_local(caretX, y + 4, 1, h - 8, 0xffff);
     }
 }
+
+static void vm_frame_delay(u32 ms) { SDL_Delay(ms); }
 
 static void vm_lcd_update_with_input_overlay(void)
 {
@@ -4042,12 +4047,11 @@ void loop()
             }
         }
         vm_autotest_tick();
-        SDL_Delay(5);
+        SDL_Delay(16);
     }
     g_vmInputSdlTextInputWanted = 0;
     vm_input_sync_sdl_text_input();
     pthread_join(&EmuThread, &thread_ret);
-    pthread_join(&MainUpdareThread, &thread_ret);
     if (SD_File_Handle != NULL)
         fclose(SD_File_Handle);
     if (g_autotestStateFile != NULL)
@@ -4121,13 +4125,16 @@ u8 *SimpleRamMatch(u8 *start, u8 *end, u8 *matchStart, int matchLen)
 #define LOAD_CBE_PATH "CBE/涂鸦跳跃.CBE"
 #define LOAD_CBE_PATH "CBE/魔塔.CBE"
 #define LOAD_CBE_PATH "CBE/孤岛.CBE"
+#define LOAD_CBE_PATH "CBE/恶魔城.CBE"
+#define LOAD_CBE_PATH "CBE/鬼吹灯.CBE"
+#define LOAD_CBE_PATH "CBE/皇牌空战.CBE"
+#define LOAD_CBE_PATH "CBE/涂鸦跳跃.CBE"
+#define LOAD_CBE_PATH "CBE/江湖OL.CBE"
 #define LOAD_CBE_PATH "CBE/血剑Online.CBE"
 #define LOAD_CBE_PATH "CBE/愤怒的小鸟.CBE"
 #define LOAD_CBE_PATH "CBE/歪歪猫发条城历险记V100.CBE"
 #define LOAD_CBE_PATH "CBE/武林外传(新品).CBE"
 #define LOAD_CBE_PATH "CBE/众神之战.CBE"
-#define LOAD_CBE_PATH "CBE/皇牌空战.CBE"
-#define LOAD_CBE_PATH "CBE/恶魔城.CBE"
 #define LOAD_CBE_PATH "CBE/江湖OL.CBE"
 
 
@@ -4725,7 +4732,7 @@ void RunArmProgram(void *param)
                     break;
             }
             vm_lcd_update_with_input_overlay();
-            SDL_Delay(100);
+            vm_frame_delay(50);
         }
         if (p != UC_ERR_OK)
             printf("native app loop异常:%s\n", uc_strerror(p));
@@ -4819,7 +4826,7 @@ void RunArmProgram(void *param)
                 if (p != UC_ERR_OK)
                     break;
                 vm_lcd_update_with_input_overlay();
-                SDL_Delay(100);
+                vm_frame_delay(50);
             }
         }
         while (p == UC_ERR_OK)
@@ -4850,7 +4857,7 @@ void RunArmProgram(void *param)
                     waitNet30 = vm_get_var(Global_R9 + 0x9588 + 0x30);
                     waitNextScreen = vm_get_var(VM_SCREEN_nextSubTScreen_ADDRESS);
                 }
-                SDL_Delay(100);
+                vm_frame_delay(50);
             }
             if (p != UC_ERR_OK)
                 break;
@@ -4908,6 +4915,7 @@ void RunArmProgram(void *param)
             }
             if (p == UC_ERR_OK)
             {
+                u32 _frameTick = SDL_GetTicks();
                 while (true)
                 {
                     p = scheduler_tick();
@@ -5058,7 +5066,11 @@ void RunArmProgram(void *param)
                             break;
                     }
                     vm_lcd_update_with_input_overlay();
-                    SDL_Delay(100);
+                    u32 _now = SDL_GetTicks();
+                    u32 _elapsed = _now - _frameTick;
+                    if (_elapsed < 100)
+                        SDL_Delay(100 - _elapsed);
+                    _frameTick = SDL_GetTicks();
                 }
                 uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
                 if (screenThisPtr)
@@ -5115,28 +5127,20 @@ void RunArmProgram(void *param)
 #endif
 }
 
-void MainUpdateTask()
-{
-    while (1)
-    {
-        currentTime = clock();
-
-#ifdef GDB_SERVER_SUPPORT
-        if (gdbTarget.running == 0)
-        {
-            usleep(1000);
-            continue;
-        }
-#endif
-        usleep(1000);
-    }
-}
-
+#ifdef __ANDROID__
+int SDL_main(int argc, char *args[])
+#else
 int main(int argc, char *args[])
+#endif
 {
 
     uc_err err;
     uc_hook hookHandle;
+#ifdef __ANDROID__
+    android_extract_assets();
+    if (android_get_data_dir()[0])
+        chdir(android_get_data_dir());
+#endif
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     vm_autotest_init(argc, args);
@@ -5268,7 +5272,6 @@ int main(int argc, char *args[])
         changeTmp1 = Program_ROM_Address;
 
         pthread_create(&EmuThread, NULL, RunArmProgram, changeTmp1);
-        pthread_create(&MainUpdareThread, NULL, MainUpdateTask, NULL);
 #ifdef GDB_SERVER_SUPPORT
         pthread_create(&gdb_server_mutex, NULL, gdb_server_main, NULL);
 #endif

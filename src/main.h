@@ -5,8 +5,13 @@
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
+#ifdef __ANDROID__
+#include <SDL2/SDL.h>
+#include <unicorn/unicorn.h>
+#else
 #include "../Lib/sdl2-2.0.10/include/SDL2/SDL.h"
 #include "../Lib/unicorn-2.1.4/unicorn/unicorn.h"
+#endif
 #include <pthread.h>
 #include "config.h"
 #include "fileIoEngine.h"
