@@ -11649,7 +11649,8 @@ static u32 vm_net_mock_build_type27_followup_combo_response(const u8 *request, u
 
 static bool vm_net_mock_append_battle_drop_refresh7_if_needed(u8 *out, u32 outCap,
                                                               u32 *pos, u8 *objectCount,
-                                                              const char *phase);
+                                                              const char *phase,
+                                                              bool allowActiveSession);
 
 static u32 vm_net_mock_build_scene_default_event_response(u8 *out, u32 outCap)
 {
@@ -11722,7 +11723,8 @@ static u32 vm_net_mock_build_scene_default_event_response(u8 *out, u32 outCap)
     objectCount += 1;
     if (!vm_net_mock_append_battle_drop_refresh7_if_needed(out, outCap, &pos,
                                                            &objectCount,
-                                                           "scene-default-event"))
+                                                           "scene-default-event",
+                                                           false))
         return 0;
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
     return pos;
@@ -14341,6 +14343,11 @@ static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 req
             return 0;
         ++objectCount;
         g_vm_net_mock_battle_settlement_sent_serial = g_mockBattleOperateSessionSerial;
+        if (!vm_net_mock_append_battle_drop_refresh7_if_needed(out, outCap, &pos,
+                                                               &objectCount,
+                                                               "battle-item-use-inline",
+                                                               true))
+            return 0;
     }
     if (!vm_net_mock_append_battle_action6_object(out, outCap, &pos,
                                                  actionInfo, actionInfoLen,
@@ -14684,6 +14691,12 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
         if (!vm_net_mock_append_battle_status7_object(out, outCap, &pos))
             return 0;
         ++terminalObjectCount;
+        g_vm_net_mock_battle_settlement_sent_serial = g_mockBattleOperateSessionSerial;
+        if (!vm_net_mock_append_battle_drop_refresh7_if_needed(out, outCap, &pos,
+                                                               &terminalObjectCount,
+                                                               "battle-operate-terminal",
+                                                               true))
+            return 0;
         if (!vm_net_mock_append_battle_terminal_subtype8_object(out, outCap, &pos))
             return 0;
         ++terminalObjectCount;
@@ -14841,6 +14854,11 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
             return 0;
         ++responseObjectCount;
         g_vm_net_mock_battle_settlement_sent_serial = g_mockBattleOperateSessionSerial;
+        if (!vm_net_mock_append_battle_drop_refresh7_if_needed(out, outCap, &pos,
+                                                               &responseObjectCount,
+                                                               "battle-operate-inline",
+                                                               true))
+            return 0;
     }
     vm_net_mock_finish_wt_packet(out, pos, (u8)responseObjectCount);
     if (g_mockBattleOperateSessionArmed != 0)
@@ -15214,6 +15232,12 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
         if (!vm_net_mock_append_battle_status7_object(out, outCap, &pos))
             return 0;
         ++terminalObjectCount;
+        g_vm_net_mock_battle_settlement_sent_serial = g_mockBattleOperateSessionSerial;
+        if (!vm_net_mock_append_battle_drop_refresh7_if_needed(out, outCap, &pos,
+                                                               &terminalObjectCount,
+                                                               "battle-operate-fallback-terminal",
+                                                               true))
+            return 0;
         if (!vm_net_mock_append_battle_terminal_subtype8_object(out, outCap, &pos))
             return 0;
         ++terminalObjectCount;
@@ -15364,6 +15388,11 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
             return 0;
         ++responseObjectCount;
         g_vm_net_mock_battle_settlement_sent_serial = g_mockBattleOperateSessionSerial;
+        if (!vm_net_mock_append_battle_drop_refresh7_if_needed(out, outCap, &pos,
+                                                               &responseObjectCount,
+                                                               "battle-operate-fallback-inline",
+                                                               true))
+            return 0;
     }
     vm_net_mock_finish_wt_packet(out, pos, (u8)responseObjectCount);
     if (g_mockBattleOperateSessionArmed != 0)
@@ -15566,7 +15595,8 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
 
 static bool vm_net_mock_append_battle_drop_refresh7_if_needed(u8 *out, u32 outCap,
                                                               u32 *pos, u8 *objectCount,
-                                                              const char *phase)
+                                                              const char *phase,
+                                                              bool allowActiveSession)
 {
     u32 objectStart = 0;
     u32 dropItemId = g_vm_net_mock_battle_rewarded_drop_item;
@@ -15578,7 +15608,7 @@ static bool vm_net_mock_append_battle_drop_refresh7_if_needed(u8 *out, u32 outCa
     if (g_mockBattleOperateSessionSerial == 0 ||
         g_vm_net_mock_battle_rewarded_serial != g_mockBattleOperateSessionSerial ||
         g_vm_net_mock_battle_settlement_sent_serial != g_mockBattleOperateSessionSerial ||
-        g_mockBattleOperateSessionArmed != 0 ||
+        (!allowActiveSession && g_mockBattleOperateSessionArmed != 0) ||
         dropItemId == 0 ||
         dropSeq == 0 ||
         dropDelta == 0 ||
@@ -15685,6 +15715,12 @@ static u32 vm_net_mock_build_battle_pending_settlement_response(u8 *out, u32 out
     if (!vm_net_mock_append_battle_status7_object(out, outCap, &pos))
         return 0;
     ++objectCount;
+    g_vm_net_mock_battle_settlement_sent_serial = g_mockBattleOperateSessionSerial;
+    if (!vm_net_mock_append_battle_drop_refresh7_if_needed(out, outCap, &pos,
+                                                           &objectCount,
+                                                           "battle-pending-settlement",
+                                                           false))
+        return 0;
     if (!vm_net_mock_append_battle_terminal_case11_object(out, outCap, &pos))
         return 0;
     ++objectCount;
@@ -15693,8 +15729,7 @@ static u32 vm_net_mock_build_battle_pending_settlement_response(u8 *out, u32 out
     ++objectCount;
 
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
-    g_vm_net_mock_battle_settlement_sent_serial = g_mockBattleOperateSessionSerial;
-    vm_autotest_note("mock_battle_pending_settlement serial=%u objects=%u response=4/7+4/11+4/9 evidence=mmBattle:0x7BD0/0x743C\n",
+    vm_autotest_note("mock_battle_pending_settlement serial=%u objects=%u response=4/7+optional-7/7+4/11+4/9 evidence=mmBattle:0x7BD0/0x743C mmGame:0x0D04\n",
                      g_mockBattleOperateSessionSerial,
                      objectCount);
     return pos;
@@ -18409,7 +18444,8 @@ static u32 vm_net_mock_build_split_safe_combo_response(const u8 *request, u32 re
         return 0;
     if (!vm_net_mock_append_battle_drop_refresh7_if_needed(out, outCap, &pos,
                                                            &objectCount,
-                                                           "split-safe-combo"))
+                                                           "split-safe-combo",
+                                                           false))
         return 0;
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
     return pos;

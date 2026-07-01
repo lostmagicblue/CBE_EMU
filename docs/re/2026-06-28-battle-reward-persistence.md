@@ -168,6 +168,16 @@ item-use pointer at `r9+38036`, which is absent for battle rewards. `17/1`
 remains the explicit full-list response for opening the backpack UI, not the
 battle-drop acquire event.
 
+2026-07-01 correction: the settlement popup's `背包 x/40` line is rendered by
+`mmBattleMstarWqvga.cbm:DrawBattleAnimEffect(0x31FA)`, but the numbers are read
+from the main item manager pointer at `R9+0x2870` offsets `+36/+38`, not from the
+`4/7` settlement object's `bagstatus`. `HandleBattleSettleMsg(0x743C)` stores
+`bagstatus` at `R9+0x3458`, while the popup draw path uses the item manager
+counts. Therefore battle drops must append the no-popup `7/7 type=1` refresh in
+the same WT response as `4/7` settlement when a drop was granted. The later
+scene-default/split-safe refresh remains as a fallback and is de-duplicated by
+battle-session serial.
+
 Role normalization was tightened to clamp HP/MP only when they exceed max
 values. It no longer treats `hp == 0` or `mp == 0` as "missing data", because
 that destroyed persisted current battle state whenever position/backpack saves

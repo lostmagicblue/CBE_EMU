@@ -7,7 +7,7 @@ bin/Rom/moral-i9.bin
 *.nam
 build
 .vscode
-.ideassssss
+.idea/
 obj
 *.err
 *.log
@@ -30,3 +30,4 @@ bin/autotest/
 docs/re/ida_tmp/
 web/
 tmp_ida/
+/
