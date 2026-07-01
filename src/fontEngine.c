@@ -41,15 +41,15 @@ inline int getFontHeight()
 inline int getFontCellWidth()
 {
     /*
-     * ASCII glyphs in font_gb.uc3 live in full 16x16 bitmaps, but UI layout
-     * still treats them as half-width cells.
+     * ASCII glyphs in font_gb.uc3 live in full bitmaps, while the CBE UI
+     * positions them as half-width cells.
      */
     return fontWidth / 2;
 }
 
 inline int getFontAsciiDrawWidth()
 {
-    return fontWidth;
+    return getFontCellWidth();
 }
 // 一个字符32字节，16x16大小，一行16个像素点就是2字节，所以16x16就是32字节
 u8 getFontBitMap(u16 gbCode, char *bitmapData)
@@ -123,10 +123,25 @@ void drawFontCharWithWidth(u16 gbCode, int x, int y, u16 color, int drawWidth)
                 if (px < 0 || px >= LCD_WIDTH)
                     continue;
 
-                int srcX = (i * fontWidth) / drawWidth;
-                int byteIndex = j * linePitch + srcX / 8;
-                int bitIndex = 7 - (srcX % 8);
-                if ((bitMapData[byteIndex] >> bitIndex) & 1)
+                int srcStart = (i * fontWidth) / drawWidth;
+                int srcEnd = ((i + 1) * fontWidth + drawWidth - 1) / drawWidth;
+                if (srcEnd <= srcStart)
+                    srcEnd = srcStart + 1;
+                if (srcEnd > fontWidth)
+                    srcEnd = fontWidth;
+
+                int hasPixel = 0;
+                for (int srcX = srcStart; srcX < srcEnd; srcX++)
+                {
+                    int byteIndex = j * linePitch + srcX / 8;
+                    int bitIndex = 7 - (srcX % 8);
+                    if ((bitMapData[byteIndex] >> bitIndex) & 1)
+                    {
+                        hasPixel = 1;
+                        break;
+                    }
+                }
+                if (hasPixel)
                 {
                     int offset = py * LCD_WIDTH + px;
                     ((u16 *)Lcd_Cache_Buffer)[offset] = color;
