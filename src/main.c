@@ -5947,13 +5947,13 @@ return 4;
     else if (idx == 22)
     {
         DEBUG_PRINT("[call]vMGetKeyNum\n");
-        tmp1 = 33;
+        tmp1 = 255;
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
     }
     else if (idx == 23)
     {
-        printf("[call]vMIsSupportTP\n");
-        assert(0);
+        DEBUG_PRINT("[call]vMIsSupportTP -> 0\n");
+        vm_set_call_result(0);
     }
     else if (idx == 24)
     {
@@ -6169,12 +6169,15 @@ return 4;
     }
     else if (idx == 64)
     {
-        printf("[call]GetCurrentScreenType\n");
-        assert(0);
+        /*
+         * Jianghu OL is packaged for the Mstar WQVGA CoolBars profile.  The
+         * CBE footer stores the same screen/platform pair as 0x0e/0x05.
+         */
+        vm_set_call_result(0x0e);
     }
     else if (idx == 65)
     {
-        vm_set_call_result(0);
+        vm_set_call_result(5);
     }
     else if (idx == 66)
     {
@@ -8991,13 +8994,6 @@ static bool hook_vm_manager_screen_func(u32 address)
         if (lastAddress >= VM_Memory_Pool_ADDRESS && lastAddress < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
         {
             uc_reg_read(MTK, UC_ARM_REG_R9, &moduleBase);
-        }
-        {
-            u32 inferredCodeBase = 0;
-            u32 inferredModuleR9 = 0;
-            if (vm_infer_battle_module_from_screen(tmp1, &inferredCodeBase, &inferredModuleR9))
-            {
-            }
         }
         vm_screen_stack_push(tmp1, moduleBase);
         if (moduleBase)

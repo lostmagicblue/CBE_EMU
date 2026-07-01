@@ -2350,10 +2350,6 @@ static bool vm_is_scene_bootstrap_loading_overlay_caller(u32 lr)
 
 
 
-
-
-
-
 static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
 {
     (void)size;
@@ -2374,7 +2370,7 @@ static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t
     else if (pc >= 0x05181F20 && pc < 0x05195464)
         moduleR9 = loaderModuleR9;
     else if (vm_infer_battle_module_from_screen(vmAddedScreen, &inferredCodeBase, &inferredModuleR9) &&
-             pc >= inferredCodeBase && pc < inferredModuleR9)
+             pc >= inferredCodeBase && pc < inferredCodeBase + 0x16150u)
         moduleR9 = loaderModuleR9;
 
     if (moduleR9 != 0)
@@ -3058,6 +3054,7 @@ static bool vm_net_mock_role_consume_backpack_item(vm_net_mock_role_state *role,
                                                    u32 count,
                                                    u32 *remainingOut);
 static void vm_net_mock_role_sync_derived_vitals(vm_net_mock_role_state *role);
+static bool vm_net_mock_role_add_exp(vm_net_mock_role_state *role, u32 addExp);
 static void vm_net_mock_role_build_player_stats(const vm_net_mock_role_state *role,
                                                 vm_net_mock_player_stats *stats);
 static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap);
@@ -5025,9 +5022,7 @@ static void vm_net_mock_role_apply_item_effect(vm_net_mock_role_state *role,
     {
         uint64_t add = (uint64_t)exp * (uint64_t)count;
         u32 capped = add > 0xffffffffull ? 0xffffffffu : (u32)add;
-        role->exp = vm_net_mock_add_capped_u32(role->exp, capped);
-        role->level = vm_net_mock_role_level_from_exp(role->exp);
-        vm_net_mock_role_sync_derived_vitals(role);
+        vm_net_mock_role_add_exp(role, capped);
     }
 }
 
@@ -6120,6 +6115,28 @@ static void vm_net_mock_role_sync_derived_vitals(vm_net_mock_role_state *role)
         role->hp = role->hpMax;
     if (role->mp > role->mpMax)
         role->mp = role->mpMax;
+}
+
+static bool vm_net_mock_role_add_exp(vm_net_mock_role_state *role, u32 addExp)
+{
+    u32 oldLevel = 1;
+    u32 newLevel = 1;
+
+    if (role == NULL || addExp == 0)
+        return false;
+
+    oldLevel = vm_net_mock_role_level_from_exp(role->exp);
+    role->exp = vm_net_mock_add_capped_u32(role->exp, addExp);
+    newLevel = vm_net_mock_role_level_from_exp(role->exp);
+    role->level = newLevel;
+    vm_net_mock_role_sync_derived_vitals(role);
+    if (newLevel > oldLevel)
+    {
+        role->hp = role->hpMax;
+        role->mp = role->mpMax;
+        return true;
+    }
+    return false;
 }
 
 static u32 vm_net_mock_damage_after_defense(u32 attack, u32 defense)
@@ -7532,7 +7549,7 @@ static void vm_net_mock_role_apply_battle_settlement(u32 hp, u32 mp,
         mp = role->mpMax;
     role->hp = hp;
     role->mp = mp;
-    role->exp = (0xffffffffu - role->exp < rewardExp) ? 0xffffffffu : role->exp + rewardExp;
+    vm_net_mock_role_add_exp(role, rewardExp);
     role->money = (0xffffffffu - role->money < rewardGold) ? 0xffffffffu : role->money + rewardGold;
     vm_net_mock_role_normalize(role);
     vm_net_mock_role_db_save("battle-settle");
@@ -14199,11 +14216,15 @@ static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 req
         }
         if (addExp != 0)
         {
-            role->exp = vm_net_mock_add_capped_u32(role->exp, addExp);
-            role->level = vm_net_mock_role_level_from_exp(role->exp);
-            vm_net_mock_role_sync_derived_vitals(role);
+            bool leveledUp = vm_net_mock_role_add_exp(role, addExp);
             if (role->hpMax > g_mockBattleRoleHpMax)
                 g_mockBattleRoleHpMax = role->hpMax;
+            if (leveledUp)
+            {
+                g_mockBattleRoleHpCurrent = role->hp;
+                g_mockBattleRoleMpMax = role->mpMax;
+                g_mockBattleRoleMpCurrent = role->mp;
+            }
             if (g_mockBattleRoleHpCurrent > g_mockBattleRoleHpMax)
                 g_mockBattleRoleHpCurrent = g_mockBattleRoleHpMax;
             expApplied = addExp;

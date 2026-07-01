@@ -508,6 +508,11 @@ stores the visible result-panel deltas as `new - old`. Therefore `4/7.exp` and
 `4/7.gold` must be post-reward totals, not per-kill deltas. The terminal action
 opens the panel immediately, so `4/7` must be present in the same terminal
 response by default. `hp/mp` remain recovery deltas and default to `0/0`.
+Server-side role state still applies RPG level-up recovery: when awarded EXP
+crosses a level threshold, the role's derived max HP/MP are recalculated and
+current HP/MP are filled to those new maxima. This is persisted as role state;
+it is not encoded as ordinary `4/7.hp/mp` recovery display unless a later client
+contract proves a distinct level-up recovery field.
 
 Dropped-item display: `itemnum` is separate from raw `iteminfo`. The recovered
 row prefix is `ownerRoleId, displayFlag, itemId, itemName, rewardType, i16
@@ -551,6 +556,9 @@ Minimum server fix:
   through object getter `+0x44` and only narrows `persentexp` after parsing.
 - include subtype 7 in the terminal action response by default; keep recovery
   `hp/mp` as explicit display deltas and default them to `0/0`.
+- when reward EXP or an EXP item raises the role level, refill persisted current
+  HP/MP to the newly derived maxima without treating it as ordinary battle
+  recovery panel text.
 - include `itemnum/iteminfo` for displayed ordinary item drops after the reward
   roll inserts the item into the role backpack.
 - use negative two's-complement HP deltas in subtype `4/6`; positive values heal
