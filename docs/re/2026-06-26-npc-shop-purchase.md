@@ -22,7 +22,8 @@ Status: implemented for shop open, DSH-backed catalog paging, shop-friendly cata
 | `mmShopMstarWqvga.cbm` | `sub_9DE` / `0x9DE` | shop-open/network parser | Iterates response objects. For kind `14`: subtype `14` reads `result` and `shopinfo`; subtype `4` reads `coolmoney` and `ticket`; subtype `5..13` calls the item-page parser; subtype `3` reads `seq` and `result` for buy completion. For kind `1` subtype `14`, it reads `revivetype` / `ruffianflag` / `type`, calls the shared `actorinfo` parser, clears the shop loading flag, and immediately returns, so this status object must be last when bundled with page objects. |
 | `江湖OL.CBE` | `parse_actorinfo_response` / `0x0100FA88` | actor-state payload parser | The `mmShop:0x9DE` `1/1/14` branch reaches this parser. If the response object has no `actorinfo` blob, the stream reader is initialized with a null buffer and crashes at `stream_read_i32_be_tagged_impl(0x01033A68)`. |
 | `mmShopMstarWqvga.cbm` | `sub_7BC` / `0x7BC` | shop item page parser | Reads `totalnum`, then raw `iteminfo`: row count, item id, item name, small flags, price, stock/count, another flag, and the shared item extra block. |
-| `mmShopMstarWqvga.cbm` | `sub_618` / `0x618` | shop page request builder | Builds `WT 1/14/<subtype>` with an `index` byte. This is the paging path for subtypes `5..13`; subtype `5` is the buy catalog used by this mock. |
+| `mmShopMstarWqvga.cbm` | `sub_618` / `0x618` | shop page request builder | Builds `WT 1/14/<subtype>` with an `index` byte. This is the paging path for subtypes `5..13`; subtype `5` is `秘宝道具`, while `6..13` are the `神兵利器` sub-tabs. |
+| `mmShopMstarWqvga.cbm` | `sub_2F6C` / `0x2F6C` | W-coin buy request builder | Sends `WT 1/14/3` with `type`, `id`, and `num`. `sub_2EB6` selects a row and `sub_2E88` stores row `+60` as the default purchase count/step; if that byte is zero, the W-coin purchase dialog can divide by zero while formatting `花费%dW币`. |
 | `mmGameMstarWqvga.cbm` | `sub_418C` / `0x418C` | shop/backpack item-list parser | The `17/1` branch opens `item.dsh` and `equip.dsh`, reads raw `iteminfo` as `row_count` followed by `itemId + common item-extra`, allocates `324 * row_count`, sorts rows by item id, and fills display data from local DSH rows. If the DSH open/lookup fails, the UI still has selectable rows but names/prices remain blank. |
 | `江湖OL.CBE` | `ParseEquipAttributes` / `0x010185C2` | shared item-extra parser | The vtable `+2452` helper first reads two i16-style fields, then one u8 `attr_count`; it only reads attr slots while `slot_index < attr_count`. The six arrays passed by callers are destination capacity, not fields that must always be sent. |
 | `mmShopMstarWqvga.cbm` | `sub_7BC` / `0x7BC` | shop page cursor and row parser | `sub_7BC` starts writing rows at the page-state start cursor (`[page+6]`) and advances it by `row_count`. The `14/5` row tail calls `ParseEquipAttributes`, so zero-attribute rows must stop after `i16, i16, u8 attr_count=0`. |
@@ -46,8 +47,8 @@ Status: implemented for shop open, DSH-backed catalog paging, shop-friendly cata
 - WT objects:
   - `1/14/14 { result=1, shopinfo="Codex Shop" }`
   - `1/14/4 { coolmoney=999999, ticket=0 }`
-  - `1/14/5 { totalnum=<catalog count>, iteminfo=<catalog page 0 rows> }`
-  - `1/14/6 { totalnum=0, iteminfo=<row_count 0> }`
+  - `1/14/5 { totalnum=<secret item count>, iteminfo=<秘宝道具 page 0 rows> }`
+  - `1/14/6 { totalnum=<weapon item count>, iteminfo=<神兵利器/武器 page 0 rows> }`
   - `1/1/14 { revivetype=0, ruffianflag=0, type=0, actorinfo=<current-role actorinfo blob> }`
 - Runtime negative after entering the shop and returning showed `WT 1/1/14(actorId)` followed by only the `builtin-shop-actor-query14` response, with no subsequent `1/14/5` or `1/14/6` page requests. IDA confirms `mmShop:0x162C` only sets the loading flag and calls `sub_11F0`, so the actor-query response now includes the first page inline.
 - The final `1/1/14` object is not an echo of the request. It is an actor-state status object for `mmShop:0x9DE`; placing it before the `14/5` page would stop the parser before item rows are consumed.
@@ -57,16 +58,15 @@ Status: implemented for shop open, DSH-backed catalog paging, shop-friendly cata
 
 ### Shop Catalog Source
 
-- `item.dsh`: 230 rows, parsed from `ID`, `名称`, `形象`, `价值`, and `堆叠数`.
-- `equip.dsh`: 1485 rows, parsed from `ID`, `名称`, and `价值`.
+- `item.dsh`: 230 rows, parsed from `ID`, `名称`, `形象`, `类别`, `价值`, and `堆叠数`.
+- `equip.dsh`: 1485 rows, parsed from `ID`, `名称`, `价值`, and `类别`.
 - Current max catalog capacity: `2048` rows; the local resources load the full `item.dsh` plus the first bounded slice of `equip.dsh`.
 - Runtime DSH visibility matters twice:
   - mock-server loads `JHOnlineData/item.dsh` and `JHOnlineData/equip.dsh` to build `14/5` rows with server-provided names;
   - `mmGame:0x418C` independently opens bare `item.dsh/equip.dsh` while rendering the `17/1` list, so host I/O must resolve those bare names to the same local resources.
-- The in-memory shop order is intentionally not raw DSH order:
-  - equipment ids `>=1000` first, because the current NPC purchase path is the equipment shop and `mmGame:0x418C` has a distinct `equip.dsh` display-fill branch;
-  - `800..999` item ids next, for shop-facing consumables such as `传送石`, `复活石`, experience cards, packs, and crystals;
-  - lower material/task ids last.
+- The in-memory shop rows retain source/category metadata. Do not classify mall
+  pages by ID ranges alone: `800..999` contains several `item.dsh` categories,
+  while the client mall tabs use the labels and category fields below.
 - Shop row names are capped at 12 bytes to match `sub_7BC`'s 13-byte destination including the NUL terminator.
 - Fallback, only if both DSH files are unavailable: one `Teleport Stone` row.
 
@@ -76,8 +76,21 @@ Status: implemented for shop open, DSH-backed catalog paging, shop-friendly cata
 - Supported fields:
   - `index` as u8 or u32
 - Response:
-  - subtype `5`: `1/14/5 { totalnum=<catalog count>, iteminfo=<catalog page index rows> }`
-  - subtypes `6..13`: empty page with `totalnum=0` and one raw row-count byte `0`
+  - subtype `5`: `秘宝道具`, filtered from `item.dsh` category `14` and capped
+    to one visible page for now.
+  - subtype `6`: `神兵利器/武器`, filtered from `equip.dsh` weapon categories
+    `7/8/9`.
+  - subtype `7`: `衣服`, `equip.dsh` category `1`.
+  - subtype `8`: `裤子`, `equip.dsh` category `4`.
+  - subtype `9`: `帽子`, `equip.dsh` category `0`.
+  - subtype `10`: `鞋子`, `equip.dsh` category `5`.
+  - subtype `11`: `束腰`, `equip.dsh` category `3`.
+  - subtype `12`: `披风`, `equip.dsh` category `2`.
+  - subtype `13`: `饰品`, `equip.dsh` category `6`.
+  - Static evidence: `mmShopMstarWqvga.cbm` contains the label sequence
+    `秘宝道具 / 神兵利器 / 武器 / 衣服 / 裤子 / 帽子 / 鞋子 / 束腰 / 披风 / 饰品`.
+    `sub_1BD6` calls `sub_17E8(1, selected + 6)` for the eight `神兵利器`
+    sub-tabs, so `14/6` must not be used for `秘宝道具`.
 
 ### Shop Info Refresh Request
 
@@ -103,27 +116,54 @@ Status: implemented for shop open, DSH-backed catalog paging, shop-friendly cata
   - requested safe scene/dialog follow-up objects (`2/10`, `27/11`, `27/4`, `7/42`) when present;
   - `1/14/14 { result=1, shopinfo="Codex Shop" }`
   - `1/14/4 { coolmoney=999999, ticket=0 }`
-  - `1/14/5 { totalnum=<catalog count>, iteminfo=<catalog page index rows> }`
-  - `1/14/6 { totalnum=0, iteminfo=<row_count 0> }`
+  - `1/14/5 { totalnum=<secret item count>, iteminfo=<秘宝道具 page index rows> }`
+  - `1/14/6 { totalnum=<weapon item count>, iteminfo=<神兵利器/武器 page index rows> }`
 - If `14/5/14/6` are batched in the same request, do not drop them. `mmShop:0x9DE` uses one local response-object counter and clears loading after the full four-object family is parsed.
 
 ### Purchase Request
 
-- WT object: `1/17/2`
-- Required detector fields:
-  - `shopId` as u32
-- Optional observed / inferred fields:
-  - item id
-  - count / `num`
+- W-coin mall page:
+  - WT object: `1/14/3`
+  - fields: `type`, `id`, `num`
+- NPC/list compatibility path:
+  - WT object: `1/17/2`
+  - required field: `shopId` as u32
+  - optional field: count / `num`
 
 ### Purchase Response
 
 - WT object: `1/14/3`
 - Fields:
-  - `seq = 2`
-  - `result = 1`
+  - `seq`
+  - `result`
 
-`seq=2` is intentionally distinct from the default backpack item `传送石` at `seq=1`.
+- The W-coin `14/3` request is handled by `builtin-shop-buy14`; the server
+  checks the shop W-coin balance, deducts `price * num`, adds the item to the
+  active role backpack, saves the role DB through the normal backpack add path,
+  then returns `seq/result`.
+- On successful buy, clear the one-shot shop `17/1` pending flag. That flag is
+  only for the shop list sync after open/page requests; leaving it set after a
+  completed purchase hijacks the next backpack `17/1`/open request and makes the
+  backpack appear stale until relogin.
+- The `17/1 + 7/42` combo must also be gated by that same pending flag and by a
+  nonempty `17/1` payload. Runtime after W-coin purchase showed that an
+  unconditional shop-list combo handler answered the normal backpack-open combo
+  with purchasable shop rows, so the visible backpack looked empty/wrong until
+  relogin rebuilt the role item grid.
+- Successful purchase also arms a one-shot role-backpack priority for the next
+  backpack-shaped request. This protects the return/open-backpack path even if
+  an intermediate shop page or return response re-arms the shop list pending
+  flag before the user opens the backpack UI.
+- Opening mmShop invalidates the one-login backpack grid seed guard. Runtime
+  after returning from the shop shows a fresh mmGame scene init followed by
+  `5/10 + 7/7`; if `30/21` is suppressed because the role was seeded earlier in
+  the login, the newly created client item manager stays empty until relogin.
+  Shop-open and successful-buy responses therefore clear the grid-seeded role id
+  so the next group/type1 response can resend the active role backpack grid.
+- Runtime negative: `14/13` page followed by local purchase crashed with
+  divide-by-zero before a buy packet was sent. The row byte after `stock`
+  must be `1` because the client copies row `+60` into its purchase count/step
+  field before rendering the `花费%dW币` dialog.
 
 ### NPC Shop 17/1 List Combo Request
 
@@ -143,7 +183,9 @@ Status: implemented for shop open, DSH-backed catalog paging, shop-friendly cata
     `i16 stack/runtime`, `i16 reserved`, `u8 attr_count`;
   - with `attr_count=0`, no attr slots follow;
   - low material/task-drop ids are omitted;
-  - equipment ids are emitted before `800..999` consumables because this NPC path is the equipment shop UI and `mmGame:0x418C` has a distinct `equip.dsh` branch for ids `>=1000`.
+  - the visible `17/1` shop-sync list can still prefer equipment ids for the
+    NPC equipment-shop compatibility path, but `14/5..13` page responses are
+    now filtered by the mall tab mapping above.
 - Shop context fallback:
   - after a shop open/page/interaction response, set a one-shot shop-list pending flag;
   - if the next request is empty `1/17/1`, return the same shop `17/1` item list instead of the backpack default;
@@ -161,9 +203,8 @@ Status: implemented for shop open, DSH-backed catalog paging, shop-friendly cata
   - ordinary read-only file open for bare `item.dsh/equip.dsh` tries `JHOnlineData/<name>`;
   - `vm_file_exists` uses the same fallback;
   - DF resource-name lookup performs a `.dsh`-only basename fallback after exact matching fails.
-- Added catalog ordering so the first buy page starts with equipment rows instead
-  of raw material rows like `木材` or shop-special consumables that do not match
-  this NPC's equipment-shop path.
+- Added DSH-backed category metadata so mall pages can be filtered by client tab
+  labels instead of raw item id ranges.
 - Capped row names to the mmShop display buffer size to avoid later long names
   overwriting the fixed 64-byte row slots parsed by `sub_7BC`.
 - DSH file lookup now also tries paths relative to the running `main.exe`
@@ -182,8 +223,9 @@ Status: implemented for shop open, DSH-backed catalog paging, shop-friendly cata
     two i16 fields plus `attr_count=0`.
 - Added `vm_net_mock_is_shop_page14_request()` and
   `vm_net_mock_build_shop_page14_response()`:
-  - responds to `1/14/5(index)` with the requested catalog page;
-  - returns empty pages for other shop list subtypes until their business meaning is needed;
+  - responds to `1/14/5(index)` with the bounded `秘宝道具` page;
+  - responds to `1/14/6..13(index)` with bounded `神兵利器` subcategory pages
+    based on `equip.dsh` category/slot metadata;
   - dispatch source: `builtin-shop-page14`;
   - logs `mock_shop_page14 ... evidence=mmShop:0x618/0x7BC`.
 - Added `vm_net_mock_is_shop_info14_request()` and
@@ -203,13 +245,22 @@ Status: implemented for shop open, DSH-backed catalog paging, shop-friendly cata
   - dispatch source: `builtin-shop-items-books-combo`;
   - returns the `mmGame:0x418C` `17/1` visible list instead of the normal backpack's single `传送石`;
   - logs `mock_shop_items_books_combo ... ids=... evidence=mmGame:0x418C runtime=npc-buy-wt17/1-len25`.
-- Updated the `17/1` visible list order after the blank-row negative:
+- The shop combo handler is only dispatched while `g_netMockShop17ListPending`
+  is set and the request's `17/1` object has a nonempty payload. Otherwise the
+  same request shape is a normal backpack-open combo and must be answered by
+  `builtin-backpack-items-books-combo`.
+- After a successful buy, `builtin-shop-buy-backpack-sync-*` takes precedence
+  over the shop-list handlers for exactly one backpack-shaped request and
+  returns the active role backpack (`17/1`, `17/1+7/42`, or `7/42` shape).
+- Shop entry and buy completion reset `g_netMockBackpackGridSeededRoleId`, so
+  the following map re-entry `builtin-group-type1` can include `30/21` again.
+  The trace line to expect is
+  `mock_backpack_grid role=<id> kind=30 subtype=21 gridnum=<rows>`.
+- Historical blank-row fix for the `17/1` visible list:
   - previous first rows were `800..809` from `item.dsh`;
   - current first rows are equipment ids such as `1001`, so the parser takes the `equip.dsh` display-fill branch used by this equipment NPC.
-- Updated the `14/5` buy-page catalog order to match the same equipment-first
-  sequence after runtime showed only one later `木制宽剑` row among otherwise
-  blank rows. This keeps the mmShop page parser and mmGame item sync parser on
-  the same first-page item family.
+- Do not apply that `17/1` equipment-first workaround to `14/5`: `14/5` is the
+  `秘宝道具` page, while `14/6..13` are the `神兵利器` equipment sub-tabs.
 - Negative runtime after the previous fixed-slot row-extra build produced
   selectable blank rows with `木制宽剑` only in the fifth visible slot. The
   root cause is row-tail misalignment: the client sorted zero/garbage ids ahead
@@ -252,11 +303,13 @@ Status: implemented for shop open, DSH-backed catalog paging, shop-friendly cata
 - Do not echo the shop-open request back. `1/1/14(actorId)` is request-side; the mmShop open parser expects kind-14 response objects.
 - Do not echo the purchase request back. The request carries client-side fields (`shopId`, item id, count); the parser expects kind `14` subtype `3` and will read `seq/result` from that response.
 - Do not route `14/*` through the main CBE business dispatcher. The main dispatcher has no kind-14 case; these objects are for `mmShopMstarWqvga.cbm`.
-- Do not restore raw DSH ordering or consumable-first ordering for this equipment
-  NPC buy page. The raw first rows are material/task items, and the
-  consumable-first page produced mostly blank rows while a later `1001`
-  `木制宽剑` row rendered.
+- Do not use raw DSH ordering for `14/5..13`; use the explicit mall tab filters.
+  Raw first rows are material/task items and do not match the mall category UI.
 - Do not pack the whole catalog into one `iteminfo` object. WT packet and object lengths are 16-bit, and `mmShop` already has a page request path; keep the catalog paged.
+- Do not map `秘宝道具` to `14/6`. Static string evidence shows `14/6..13`
+  belong to `神兵利器` sub-tabs. Putting `传送石/复活石` in `14/6` makes them
+  appear under `神兵利器`, which is a category mapping bug rather than a cursor
+  bug.
 - Do not send fixed empty attr slots when `attr_count=0`. IDA shows
   `ParseEquipAttributes(0x010185C2)` reads only as many slots as the count byte
   declares; unconditional empty slots shift the next row's itemId and create

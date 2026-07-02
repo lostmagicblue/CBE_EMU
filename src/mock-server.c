@@ -30,6 +30,8 @@ static u8 g_netMockShop17ListPending = 0;
 static u32 g_netMockTitleServerListTick = 0;
 static u32 g_netMockTitleServerSelectTick = 0;
 static u32 g_netMockTitleSelectedServerId = 0;
+static u32 g_netMockShopWCoinBalance = 0;
+static u8 g_netMockBackpackPreferRoleListAfterShopBuy = 0;
 static bool g_vm_net_mock_update_completed_reenter_pending = false;
 static char g_vm_net_mock_update_completed_name[64];
 
@@ -2874,7 +2876,10 @@ enum
     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_COUNT = 5,
     VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE = 1,
     VM_NET_MOCK_SHOP_DEFAULT_ITEM_STOCK = 99,
+    VM_NET_MOCK_SHOP_DEFAULT_WCOIN = 999999,
     VM_NET_MOCK_SHOP_PAGE_SIZE = 10,
+    VM_NET_MOCK_SHOP_SECRET_MAX_ITEMS = 8,
+    VM_NET_MOCK_SHOP_EQUIP_CATEGORY_MAX_ITEMS = 80,
     VM_NET_MOCK_SHOP17_MAX_CATALOG_ITEMS = 10,
     VM_NET_MOCK_SHOP_MAX_CATALOG_ITEMS = 2048,
     VM_NET_MOCK_ITEM_EFFECT_CATALOG_MAX_ITEMS = 2048,
@@ -3059,6 +3064,7 @@ static u32 vm_net_mock_role_next_level_start_exp(u32 exp);
 static u32 vm_net_mock_role_exp_percent(u32 exp);
 static u32 vm_net_mock_role_last_level_exp(u32 exp);
 static void vm_net_mock_role_db_save(const char *reason);
+static bool vm_net_mock_role_add_backpack_item(u32 itemId, u32 count, u16 *seqOut);
 static vm_net_mock_backpack_item_state *vm_net_mock_role_find_backpack_item(vm_net_mock_role_state *role,
                                                                             u32 itemId,
                                                                             u16 seq);
@@ -3105,6 +3111,8 @@ typedef struct
     u32 stock;
     u8 stack;
     u8 visual;
+    u8 isEquip;
+    u8 category;
 } vm_net_mock_shop_catalog_item;
 
 typedef struct
@@ -3691,7 +3699,8 @@ static u32 vm_net_mock_build_role_learned_skill_blob(const vm_net_mock_role_stat
 }
 
 static bool vm_net_mock_add_shop_catalog_item(u32 itemId, const u8 *name, u32 nameLen,
-                                              u32 price, u32 stock, u8 stack, u8 visual)
+                                              u32 price, u32 stock, u8 stack, u8 visual,
+                                              bool equip, u32 category)
 {
     vm_net_mock_shop_catalog_item *item = NULL;
     u32 copyLen = 0;
@@ -3712,6 +3721,8 @@ static bool vm_net_mock_add_shop_catalog_item(u32 itemId, const u8 *name, u32 na
     item->stock = stock ? stock : VM_NET_MOCK_SHOP_DEFAULT_ITEM_STOCK;
     item->stack = stack ? stack : 1;
     item->visual = visual ? visual : 1;
+    item->isEquip = equip ? 1 : 0;
+    item->category = (u8)(category > 255 ? 255 : category);
     return true;
 }
 
@@ -3751,6 +3762,7 @@ static u32 vm_net_mock_load_shop_catalog_dsh(const char *path, bool equip)
         u32 price = 0;
         u32 stock = equip ? 1 : VM_NET_MOCK_SHOP_DEFAULT_ITEM_STOCK;
         u32 visual = 1;
+        u32 category = 0xff;
         const u8 *name = NULL;
         u32 nameLen = 0;
 
@@ -3773,6 +3785,8 @@ static u32 vm_net_mock_load_shop_catalog_dsh(const char *path, bool equip)
             }
             else if (!equip && col == 3)
                 visual = vm_net_mock_parse_dsh_u32(value, valueLen, 1);
+            else if ((!equip && col == 5) || (equip && col == 7))
+                category = vm_net_mock_parse_dsh_u32(value, valueLen, 0xff);
             else if ((!equip && col == 8) || (equip && col == 5))
                 price = vm_net_mock_parse_dsh_u32(value, valueLen, VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE);
             else if (!equip && col == 10)
@@ -3787,7 +3801,9 @@ static u32 vm_net_mock_load_shop_catalog_dsh(const char *path, bool equip)
                                              price,
                                              stock,
                                              (u8)(stock > 255 ? 255 : stock),
-                                             (u8)(visual > 255 ? 1 : visual)))
+                                             (u8)(visual > 255 ? 1 : visual),
+                                             equip,
+                                             category))
         {
             ++added;
         }
@@ -3826,7 +3842,9 @@ static u32 vm_net_mock_load_shop_catalog(void)
                                                 VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE,
                                                 VM_NET_MOCK_SHOP_DEFAULT_ITEM_STOCK,
                                                 VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_COUNT,
-                                                1);
+                                                1,
+                                                false,
+                                                14);
     }
     else
     {
@@ -4239,11 +4257,120 @@ static void vm_net_mock_append_preview_u32(char *out, u32 outCap, u32 *pos, u32 
         *pos += (u32)written;
 }
 
-static void vm_net_mock_format_shop_page_ids(u32 pageIndex, u32 maxRows,
+static u32 vm_net_mock_shop_page_item_limit(u8 subtype)
+{
+    if (subtype == 5)
+        return VM_NET_MOCK_SHOP_SECRET_MAX_ITEMS;
+    if (subtype >= 6 && subtype <= 13)
+        return VM_NET_MOCK_SHOP_EQUIP_CATEGORY_MAX_ITEMS;
+    return VM_NET_MOCK_SHOP_MAX_CATALOG_ITEMS;
+}
+
+static u8 vm_net_mock_shop_page_equipment_slot(const vm_net_mock_shop_catalog_item *item)
+{
+    if (item == NULL || !item->isEquip)
+        return 0xff;
+    return vm_net_mock_equipment_slot_for_category(item->category);
+}
+
+static bool vm_net_mock_shop_page_item_matches_subtype(u8 subtype,
+                                                       const vm_net_mock_shop_catalog_item *item)
+{
+    u8 slot = vm_net_mock_shop_page_equipment_slot(item);
+
+    if (item == NULL)
+        return false;
+    switch (subtype)
+    {
+    case 5:  /* 秘宝道具 */
+        return !item->isEquip && item->category == 14;
+    case 6:  /* 神兵利器 -> 武器 */
+        return slot == 0;
+    case 7:  /* 衣服 */
+        return slot == 2;
+    case 8:  /* 裤子 */
+        return slot == 5;
+    case 9:  /* 帽子 */
+        return slot == 1;
+    case 10: /* 鞋子 */
+        return slot == 6;
+    case 11: /* 束腰 */
+        return slot == 4;
+    case 12: /* 披风 */
+        return slot == 3;
+    case 13: /* 饰品 */
+        return slot == 7;
+    default:
+        return false;
+    }
+}
+
+static u32 vm_net_mock_shop_page_filtered_total(u8 subtype)
+{
+    u32 total = vm_net_mock_load_shop_catalog();
+    u32 limit = vm_net_mock_shop_page_item_limit(subtype);
+    u32 count = 0;
+
+    for (u32 i = 0; i < total && count < limit; ++i)
+    {
+        if (vm_net_mock_shop_page_item_matches_subtype(subtype, &g_vm_net_mock_shop_catalog[i]))
+            ++count;
+    }
+    return count;
+}
+
+static const vm_net_mock_shop_catalog_item *vm_net_mock_shop_page_item_at(u8 subtype, u32 ordinal)
+{
+    u32 total = vm_net_mock_load_shop_catalog();
+    u32 limit = vm_net_mock_shop_page_item_limit(subtype);
+    u32 seen = 0;
+
+    if (ordinal >= limit)
+        return NULL;
+    for (u32 i = 0; i < total && seen < limit; ++i)
+    {
+        const vm_net_mock_shop_catalog_item *item = &g_vm_net_mock_shop_catalog[i];
+        if (!vm_net_mock_shop_page_item_matches_subtype(subtype, item))
+            continue;
+        if (seen == ordinal)
+            return item;
+        ++seen;
+    }
+    return NULL;
+}
+
+static const char *vm_net_mock_shop_page_subtype_name(u8 subtype)
+{
+    switch (subtype)
+    {
+    case 5:
+        return "secret";
+    case 6:
+        return "weapon";
+    case 7:
+        return "chest";
+    case 8:
+        return "leggings";
+    case 9:
+        return "helmet";
+    case 10:
+        return "boots";
+    case 11:
+        return "belt";
+    case 12:
+        return "cloak";
+    case 13:
+        return "accessory";
+    default:
+        return "unknown";
+    }
+}
+
+static void vm_net_mock_format_shop_page_ids(u8 subtype, u32 pageIndex, u32 maxRows,
                                              char *out, u32 outCap)
 {
     u32 pos = 0;
-    u32 total = vm_net_mock_load_shop_catalog();
+    u32 total = vm_net_mock_shop_page_filtered_total(subtype);
     u32 start = pageIndex * VM_NET_MOCK_SHOP_PAGE_SIZE;
     u32 rowCount = 0;
 
@@ -4258,8 +4385,13 @@ static void vm_net_mock_format_shop_page_ids(u32 pageIndex, u32 maxRows,
     if (rowCount > maxRows)
         rowCount = maxRows;
     for (u32 i = 0; i < rowCount; ++i)
-        vm_net_mock_append_preview_u32(out, outCap, &pos,
-                                       g_vm_net_mock_shop_catalog[start + i].itemId);
+    {
+        const vm_net_mock_shop_catalog_item *item =
+            vm_net_mock_shop_page_item_at(subtype, start + i);
+        if (item == NULL)
+            break;
+        vm_net_mock_append_preview_u32(out, outCap, &pos, item->itemId);
+    }
 }
 
 static void vm_net_mock_format_shop17_ids(u32 maxRows, char *out, u32 outCap)
@@ -4480,10 +4612,11 @@ static bool vm_net_mock_build_backpack_grid_iteminfo_blob(u8 *out, u32 outCap,
 }
 
 static bool vm_net_mock_build_shop_iteminfo_page_blob(u8 *out, u32 outCap, u32 *blobLenOut,
-                                                      u32 pageIndex, u32 *rowCountOut)
+                                                      u8 subtype, u32 pageIndex,
+                                                      u32 *rowCountOut)
 {
     u32 pos = 0;
-    u32 total = vm_net_mock_load_shop_catalog();
+    u32 total = vm_net_mock_shop_page_filtered_total(subtype);
     u32 start = pageIndex * VM_NET_MOCK_SHOP_PAGE_SIZE;
     u32 rowCount = 0;
     if (out == NULL || blobLenOut == NULL)
@@ -4508,7 +4641,10 @@ static bool vm_net_mock_build_shop_iteminfo_page_blob(u8 *out, u32 outCap, u32 *
         return false;
     for (u32 i = 0; i < rowCount; ++i)
     {
-        const vm_net_mock_shop_catalog_item *item = &g_vm_net_mock_shop_catalog[start + i];
+        const vm_net_mock_shop_catalog_item *item =
+            vm_net_mock_shop_page_item_at(subtype, start + i);
+        if (item == NULL)
+            return false;
         if (!vm_net_mock_seq_put_u32(out, outCap, &pos, item->itemId))
             return false;
         if (!vm_net_mock_seq_put_string(out, outCap, &pos, item->name))
@@ -4521,7 +4657,13 @@ static bool vm_net_mock_build_shop_iteminfo_page_blob(u8 *out, u32 outCap, u32 *
             return false;
         if (!vm_net_mock_seq_put_u32(out, outCap, &pos, item->stock))
             return false;
-        if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 0))
+        /*
+         * sub_2EB6 copies row+16..row+63 into the call stack, and sub_2E88
+         * reads row+60 back as the initial purchase count/step. A zero here
+         * makes the W-coin purchase dialog divide by zero while formatting
+         * "花费%dW币".
+         */
+        if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 1))
             return false;
         if (!vm_net_mock_seq_put_shop_page_item_extra(out, outCap, &pos, item->stack))
             return false;
@@ -4542,11 +4684,12 @@ static bool vm_net_mock_append_shop_catalog_page_object(u8 *out, u32 outCap, u32
     u8 itemInfo[4096];
     u32 itemInfoLen = 0;
     u32 rowCount = 0;
-    u32 total = vm_net_mock_load_shop_catalog();
+    u32 total = vm_net_mock_shop_page_filtered_total(subtype);
 
     memset(itemInfo, 0, sizeof(itemInfo));
     if (!vm_net_mock_build_shop_iteminfo_page_blob(itemInfo, sizeof(itemInfo),
-                                                  &itemInfoLen, pageIndex, &rowCount))
+                                                  &itemInfoLen, subtype,
+                                                  pageIndex, &rowCount))
     {
         return false;
     }
@@ -4583,11 +4726,17 @@ static bool vm_net_mock_append_shop_open_status14_object(u8 *out, u32 outCap, u3
     return true;
 }
 
+static u32 vm_net_mock_shop_wcoin_balance(void)
+{
+    if (g_netMockShopWCoinBalance == 0)
+        g_netMockShopWCoinBalance = VM_NET_MOCK_SHOP_DEFAULT_WCOIN;
+    return g_netMockShopWCoinBalance;
+}
+
 static bool vm_net_mock_append_shop_money4_object(u8 *out, u32 outCap, u32 *pos)
 {
     u32 objectStart = 0;
-    vm_net_mock_role_state *role = vm_net_mock_active_role();
-    u32 money = role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY;
+    u32 money = vm_net_mock_shop_wcoin_balance();
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 14, 4, &objectStart))
         return false;
     if (!vm_net_mock_put_object_u32(out, outCap, pos, "coolmoney", money))
@@ -4758,6 +4907,14 @@ typedef struct
     u8 type;
     bool haveItemSelector;
 } vm_net_mock_item_discard_request;
+
+typedef struct
+{
+    u32 itemId;
+    u16 seq;
+    u8 type;
+    bool haveItemSelector;
+} vm_net_mock_item_equip_request;
 
 typedef struct
 {
@@ -4951,6 +5108,88 @@ static bool vm_net_mock_parse_item_discard_request(const u8 *request, u32 reques
 
     if (!parsed.haveItemSelector)
         return false;
+    if (parsedOut)
+        *parsedOut = parsed;
+    return true;
+}
+
+static bool vm_net_mock_parse_item_equip_request(const u8 *request, u32 requestLen,
+                                                 vm_net_mock_item_equip_request *parsedOut)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+    vm_net_mock_item_equip_request parsed;
+    u32 value = 0;
+    u32 candidate = 0;
+    u8 kind = 0;
+    u8 subtype = 0;
+
+    if (parsedOut)
+        memset(parsedOut, 0, sizeof(*parsedOut));
+    memset(&parsed, 0, sizeof(parsed));
+
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T')
+        return false;
+    if (!vm_net_mock_get_wt_header_kind_subtype(request, requestLen, &kind, &subtype) ||
+        kind != 7 || subtype != 8)
+        return false;
+
+    if (!vm_net_mock_get_object_u8_field(request, requestLen, "type", &parsed.type))
+    {
+        if (vm_net_mock_get_object_number_field(request, requestLen, "type", &value) &&
+            value <= 0xffu)
+        {
+            parsed.type = (u8)value;
+        }
+    }
+    if (parsed.type != 3 && parsed.type != 4)
+        return false;
+
+    if (vm_net_mock_get_object_number_field(request, requestLen, "seq", &value) ||
+        vm_net_mock_get_object_number_field(request, requestLen, "itemseq", &value) ||
+        vm_net_mock_get_object_number_field(request, requestLen, "itemSeq", &value))
+    {
+        if (value <= 0xffffu)
+        {
+            parsed.seq = (u16)value;
+            parsed.haveItemSelector = true;
+        }
+    }
+
+    if (vm_net_mock_get_object_number_field(request, requestLen, "itemId", &candidate) ||
+        vm_net_mock_get_object_number_field(request, requestLen, "itemID", &candidate) ||
+        vm_net_mock_get_object_number_field(request, requestLen, "itemid", &candidate) ||
+        vm_net_mock_get_object_number_field(request, requestLen, "id", &candidate))
+    {
+        parsed.itemId = candidate;
+        parsed.haveItemSelector = true;
+    }
+
+    if (vm_net_mock_next_request_object(request, requestLen, &offset, &object) &&
+        object.kind == 7 && object.subtype == 8 && object.payloadLen != 0)
+    {
+        if (!parsed.haveItemSelector &&
+            (vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "seq", &value) ||
+             vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "itemseq", &value) ||
+             vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "itemSeq", &value)))
+        {
+            if (value <= 0xffffu)
+            {
+                parsed.seq = (u16)value;
+                parsed.haveItemSelector = true;
+            }
+        }
+        if (parsed.itemId == 0 &&
+            (vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "itemId", &candidate) ||
+             vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "itemID", &candidate) ||
+             vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "itemid", &candidate) ||
+             vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "id", &candidate)))
+        {
+            parsed.itemId = candidate;
+            parsed.haveItemSelector = true;
+        }
+    }
+
     if (parsedOut)
         *parsedOut = parsed;
     return true;
@@ -5332,6 +5571,11 @@ static bool vm_net_mock_append_backpack_items_object(u8 *out, u32 outCap, u32 *p
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
 
+    printf("[info][network] mock_backpack_items role=%u capacity=%u rows=%u iteminfo_len=%u\n",
+           role ? role->roleId : 0,
+           capacity,
+           rowCount,
+           itemInfoLen);
     vm_autotest_note("mock_backpack_items role=%u capacity=%u rows=%u iteminfo_len=%u evidence=mmGame:0x418C\n",
                      role ? role->roleId : 0,
                      capacity,
@@ -5400,6 +5644,10 @@ static bool vm_net_mock_append_backpack_grid_object(u8 *out, u32 outCap, u32 *po
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
 
+    printf("[info][network] mock_backpack_grid role=%u kind=30 subtype=21 gridnum=%u iteminfo_len=%u\n",
+           role ? role->roleId : 0,
+           gridCount,
+           itemInfoLen);
     vm_autotest_note("mock_backpack_grid role=%u kind=30 subtype=21 gridnum=%u iteminfo_len=%u evidence=JianghuOL:0x1039952\n",
                      role ? role->roleId : 0,
                      gridCount,
@@ -5472,6 +5720,9 @@ static u32 vm_net_mock_build_backpack_items_books_combo_response(const u8 *reque
     responseLen = vm_net_mock_build_backpack_open_response(out, outCap);
     if (responseLen)
     {
+        printf("[info][network] mock_backpack_items_books_combo len=%u items_payload=%u response=17/1+7/42\n",
+               requestLen,
+               itemsPayloadLen);
         vm_autotest_note("mock_backpack_items_books_combo len=%u items_payload=%u response=17/1+7/42 evidence=mmGame:0x418C runtime=wt17/1-len25\n",
                          requestLen,
                          itemsPayloadLen);
@@ -5492,6 +5743,8 @@ static u32 vm_net_mock_build_shop_items_books_combo_response(const u8 *request, 
     if (outCap < pos)
         return 0;
     if (!vm_net_mock_is_backpack_items_books_combo_request(request, requestLen, &itemsPayloadLen))
+        return 0;
+    if (itemsPayloadLen == 0)
         return 0;
 
     /*
@@ -7357,6 +7610,311 @@ static bool vm_net_mock_role_consume_backpack_item(vm_net_mock_role_state *role,
     }
     vm_net_mock_role_normalize_backpack(role);
     return true;
+}
+
+static bool vm_net_mock_role_equip_backpack_item(vm_net_mock_role_state *role,
+                                                 u32 requestedItemId,
+                                                 u16 requestedSeq,
+                                                 u32 *equippedItemIdOut,
+                                                 u16 *equippedSeqOut,
+                                                 u8 *slotOut,
+                                                 u32 *oldItemIdOut,
+                                                 const char **reasonOut)
+{
+    vm_net_mock_backpack_item_state *item = NULL;
+    const vm_net_mock_equipment_catalog_item *equip = NULL;
+    u32 itemId = 0;
+    u16 seq = 0;
+    u32 oldItemId = 0;
+    u8 slot = 0xff;
+    u32 remaining = 0;
+    bool selectedFreesSlot = false;
+
+    if (equippedItemIdOut)
+        *equippedItemIdOut = 0;
+    if (equippedSeqOut)
+        *equippedSeqOut = 0;
+    if (slotOut)
+        *slotOut = 0xff;
+    if (oldItemIdOut)
+        *oldItemIdOut = 0;
+    if (reasonOut)
+        *reasonOut = "ok";
+
+    if (role == NULL)
+    {
+        if (reasonOut)
+            *reasonOut = "no-role";
+        return false;
+    }
+
+    item = vm_net_mock_role_find_backpack_item(role, requestedItemId, requestedSeq);
+    if (item == NULL && requestedSeq != 0)
+        item = vm_net_mock_role_find_backpack_item(role, 0, requestedSeq);
+    if (item == NULL && requestedItemId != 0)
+        item = vm_net_mock_role_find_backpack_item(role, requestedItemId, 0);
+    if (item == NULL)
+    {
+        if (reasonOut)
+            *reasonOut = "item-not-found";
+        return false;
+    }
+
+    itemId = item->itemId;
+    seq = item->seq;
+    selectedFreesSlot = item->count <= 1;
+    equip = vm_net_mock_find_equipment_catalog_item(itemId);
+    if (equip == NULL || equip->slot >= VM_NET_MOCK_EQUIP_SLOT_COUNT)
+    {
+        if (reasonOut)
+            *reasonOut = "not-equipment";
+        return false;
+    }
+    if (role->level == 0)
+        role->level = vm_net_mock_role_level_from_exp(role->exp);
+    if (role->level < equip->levelRequired)
+    {
+        if (reasonOut)
+            *reasonOut = "level-too-low";
+        return false;
+    }
+
+    slot = equip->slot;
+    oldItemId = role->equippedItemIds[slot];
+    if (oldItemId != 0)
+    {
+        bool oldAlreadyStacked = vm_net_mock_role_find_backpack_item(role, oldItemId, 0) != NULL;
+        u8 itemCount = vm_net_mock_role_backpack_count(role);
+        if (!oldAlreadyStacked && !selectedFreesSlot && itemCount >= role->backpackCapacity)
+        {
+            if (reasonOut)
+                *reasonOut = "bag-full-for-old";
+            return false;
+        }
+    }
+
+    if (!vm_net_mock_role_consume_backpack_item(role, itemId, seq, 1, &remaining))
+    {
+        if (reasonOut)
+            *reasonOut = "consume-failed";
+        return false;
+    }
+    role->equippedItemIds[slot] = itemId;
+    if (oldItemId != 0)
+    {
+        u16 oldSeq = 0;
+        if (!vm_net_mock_role_add_backpack_item(oldItemId, 1, &oldSeq))
+        {
+            role->equippedItemIds[slot] = oldItemId;
+            (void)vm_net_mock_role_add_backpack_item(itemId, 1, NULL);
+            if (reasonOut)
+                *reasonOut = "old-return-failed";
+            return false;
+        }
+    }
+
+    vm_net_mock_role_sync_derived_vitals(role);
+    vm_net_mock_role_db_save("item-equip");
+
+    if (equippedItemIdOut)
+        *equippedItemIdOut = itemId;
+    if (equippedSeqOut)
+        *equippedSeqOut = seq;
+    if (slotOut)
+        *slotOut = slot;
+    if (oldItemIdOut)
+        *oldItemIdOut = oldItemId;
+    if (reasonOut)
+        *reasonOut = "ok";
+    (void)remaining;
+    return true;
+}
+
+static bool vm_net_mock_role_unequip_item(vm_net_mock_role_state *role,
+                                          u32 requestedItemId,
+                                          u16 requestedSeq,
+                                          u32 *unequippedItemIdOut,
+                                          u16 *backpackSeqOut,
+                                          u8 *slotOut,
+                                          const char **reasonOut)
+{
+    u8 slot = 0xff;
+    u32 itemId = 0;
+    u16 seq = 0;
+    const vm_net_mock_equipment_catalog_item *equip = NULL;
+
+    if (unequippedItemIdOut)
+        *unequippedItemIdOut = 0;
+    if (backpackSeqOut)
+        *backpackSeqOut = 0;
+    if (slotOut)
+        *slotOut = 0xff;
+    if (reasonOut)
+        *reasonOut = "ok";
+
+    if (role == NULL)
+    {
+        if (reasonOut)
+            *reasonOut = "no-role";
+        return false;
+    }
+
+    if (requestedItemId != 0)
+    {
+        for (u8 i = 0; i < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++i)
+        {
+            if (role->equippedItemIds[i] == requestedItemId)
+            {
+                slot = i;
+                itemId = requestedItemId;
+                break;
+            }
+        }
+    }
+
+    if (slot == 0xff && requestedItemId != 0)
+    {
+        equip = vm_net_mock_find_equipment_catalog_item(requestedItemId);
+        if (equip != NULL && equip->slot < VM_NET_MOCK_EQUIP_SLOT_COUNT &&
+            role->equippedItemIds[equip->slot] != 0)
+        {
+            slot = equip->slot;
+            itemId = role->equippedItemIds[slot];
+        }
+    }
+
+    if (slot == 0xff && requestedSeq != 0)
+    {
+        /*
+         * The server state keeps equipped item ids, while the client request may
+         * only carry the item seq assigned when it was equipped.  If there is a
+         * single equipped item, the selector is still unambiguous.
+         */
+        u8 foundSlot = 0xff;
+        for (u8 i = 0; i < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++i)
+        {
+            if (role->equippedItemIds[i] == 0)
+                continue;
+            if (foundSlot != 0xff)
+            {
+                if (reasonOut)
+                    *reasonOut = "ambiguous-seq";
+                return false;
+            }
+            foundSlot = i;
+        }
+        if (foundSlot != 0xff)
+        {
+            slot = foundSlot;
+            itemId = role->equippedItemIds[slot];
+        }
+    }
+
+    if (slot == 0xff || itemId == 0)
+    {
+        if (reasonOut)
+            *reasonOut = "equipped-item-not-found";
+        return false;
+    }
+
+    if (!vm_net_mock_role_add_backpack_item(itemId, 1, &seq))
+    {
+        if (reasonOut)
+            *reasonOut = "bag-full";
+        return false;
+    }
+
+    role->equippedItemIds[slot] = 0;
+    vm_net_mock_role_sync_derived_vitals(role);
+    vm_net_mock_role_db_save("item-unequip");
+
+    if (unequippedItemIdOut)
+        *unequippedItemIdOut = itemId;
+    if (backpackSeqOut)
+        *backpackSeqOut = seq;
+    if (slotOut)
+        *slotOut = slot;
+    if (reasonOut)
+        *reasonOut = "ok";
+    return true;
+}
+
+static u32 vm_net_mock_build_item_equip_response(const u8 *request, u32 requestLen,
+                                                 u8 *out, u32 outCap)
+{
+    vm_net_mock_item_equip_request parsed;
+    vm_net_mock_role_state *role = NULL;
+    u32 itemId = 0;
+    u16 seq = 0;
+    u8 slot = 0xff;
+    u32 oldItemId = 0;
+    const char *reason = "not-matched";
+    u8 result = 0;
+    u32 pos = 5;
+    u32 objectStart = 0;
+
+    if (out == NULL || outCap < pos)
+        return 0;
+    if (!vm_net_mock_parse_item_equip_request(request, requestLen, &parsed))
+        return 0;
+
+    role = vm_net_mock_active_role();
+    if (parsed.type == 3 && parsed.haveItemSelector &&
+        vm_net_mock_role_equip_backpack_item(role, parsed.itemId, parsed.seq,
+                                             &itemId, &seq, &slot, &oldItemId,
+                                             &reason))
+    {
+        result = 1;
+    }
+    else if (parsed.type == 4 &&
+             vm_net_mock_role_unequip_item(role, parsed.itemId, parsed.seq,
+                                           &itemId, &seq, &slot, &reason))
+    {
+        result = 1;
+    }
+    else if (!parsed.haveItemSelector)
+    {
+        reason = "missing-selector";
+    }
+
+    /*
+     * JianghuOL.CBE:0x01033544 subtype 8 reads type first.  For type=3,
+     * result=1 moves the pending backpack item to the equipment manager. For
+     * type=4, it moves the pending equipped item back into the backpack. Both
+     * branches read the server-provided seq into item+276 before clearing wait.
+     */
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 8, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "type", parsed.type))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", result))
+        return 0;
+    if (!vm_net_mock_put_object_u16(out, outCap, &pos, "seq", seq ? seq : parsed.seq))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+
+    printf("[info][network] mock_item_equip type=%u requested_item=%u requested_seq=%u item=%u seq=%u slot=%u old=%u result=%u reason=%s resp=7/8 evidence=JianghuOL.CBE:0x01033544\n",
+           parsed.type,
+           parsed.itemId,
+           parsed.seq,
+           itemId,
+           seq ? seq : parsed.seq,
+           slot,
+           oldItemId,
+           result,
+           reason ? reason : "-");
+    vm_autotest_note("mock_item_equip type=%u requested_item=%u requested_seq=%u item=%u seq=%u slot=%u old=%u result=%u reason=%s response=7/8 evidence=JianghuOL.CBE:0x01033544(type3-result-seq)\n",
+                     parsed.type,
+                     parsed.itemId,
+                     parsed.seq,
+                     itemId,
+                     seq ? seq : parsed.seq,
+                     slot,
+                     oldItemId,
+                     result,
+                     reason ? reason : "-");
+    return pos;
 }
 
 static u32 vm_net_mock_battle_reward_rand(void)
@@ -16568,7 +17126,11 @@ static u32 vm_net_mock_build_scene_interaction_followup_response(const u8 *reque
     u32 totalItems = 0;
     u32 pageRows = 0;
     u32 itemInfoLen = 0;
+    u32 page6TotalItems = 0;
+    u32 page6Rows = 0;
+    u32 page6ItemInfoLen = 0;
     char page5Ids[160];
+    char page6Ids[160];
     bool needActorOther = false;
     bool needFb11 = false;
     bool needFb4 = false;
@@ -16625,29 +17187,40 @@ static u32 vm_net_mock_build_scene_interaction_followup_response(const u8 *reque
                                                     &totalItems, &pageRows, &itemInfoLen))
         return 0;
     ++objectCount;
-    if (!vm_net_mock_append_shop_empty_page14_object(out, outCap, &pos, 6))
+    if (!vm_net_mock_append_shop_catalog_page_object(out, outCap, &pos, 6, page6Index,
+                                                    &page6TotalItems, &page6Rows,
+                                                    &page6ItemInfoLen))
         return 0;
     ++objectCount;
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
     g_netMockShop17ListPending = 1;
-    vm_net_mock_format_shop_page_ids(page5Index, 8, page5Ids, sizeof(page5Ids));
-    printf("[info][network] mock_shop_scene_interaction_combo page5=%u page6=%u total=%u rows=%u iteminfo_len=%u ids=%s actorOther=%u fb11=%u fb4=%u books=%u\n",
+    g_netMockBackpackGridSeededRoleId = 0;
+    vm_net_mock_format_shop_page_ids(5, page5Index, 8, page5Ids, sizeof(page5Ids));
+    vm_net_mock_format_shop_page_ids(6, page6Index, 8, page6Ids, sizeof(page6Ids));
+    printf("[info][network] mock_shop_scene_interaction_combo page5=%u page6=%u secret_total=%u secret_rows=%u secret_iteminfo_len=%u secret_ids=%s weapon_total=%u weapon_rows=%u weapon_iteminfo_len=%u weapon_ids=%s actorOther=%u fb11=%u fb4=%u books=%u grid_reseed=1\n",
            page5Index,
            page6Index,
            totalItems,
            pageRows,
            itemInfoLen,
            page5Ids,
+           page6TotalItems,
+           page6Rows,
+           page6ItemInfoLen,
+           page6Ids,
            needActorOther ? 1 : 0,
            needFb11 ? 1 : 0,
            needFb4 ? 1 : 0,
            needBooks ? 1 : 0);
-    vm_autotest_note("mock_shop_scene_interaction_combo page5=%u page6=%u items_total=%u page_rows=%u iteminfo_len=%u actorOther=%u fb11=%u fb4=%u books=%u evidence=runtime:npc-buy-shop-family mmShop:0x1038/0x618/0x9DE\n",
+    vm_autotest_note("mock_shop_scene_interaction_combo page5=%u page6=%u secret_total=%u secret_rows=%u secret_iteminfo_len=%u weapon_total=%u weapon_rows=%u weapon_iteminfo_len=%u actorOther=%u fb11=%u fb4=%u books=%u grid_reseed=1 evidence=runtime:npc-buy-shop-family mmShop:0x1038/0x618/0x9DE\n",
                      page5Index,
                      page6Index,
                      totalItems,
                      pageRows,
                      itemInfoLen,
+                     page6TotalItems,
+                     page6Rows,
+                     page6ItemInfoLen,
                      needActorOther ? 1 : 0,
                      needFb11 ? 1 : 0,
                      needFb4 ? 1 : 0,
@@ -17360,8 +17933,12 @@ static u32 vm_net_mock_build_shop_actor_query14_response(const u8 *request, u32 
     u32 totalItems = 0;
     u32 pageRows = 0;
     u32 itemInfoLen = 0;
+    u32 secretTotalItems = 0;
+    u32 secretRows = 0;
+    u32 secretItemInfoLen = 0;
     u32 actorInfoLen = 0;
     char page5Ids[160];
+    char secretIds[160];
     vm_net_mock_request_object object;
 
     /*
@@ -17391,7 +17968,9 @@ static u32 vm_net_mock_build_shop_actor_query14_response(const u8 *request, u32 
     if (!vm_net_mock_append_shop_catalog_page_object(out, outCap, &pos, 5, page5Index,
                                                     &totalItems, &pageRows, &itemInfoLen))
         return 0;
-    if (!vm_net_mock_append_shop_empty_page14_object(out, outCap, &pos, 6))
+    if (!vm_net_mock_append_shop_catalog_page_object(out, outCap, &pos, 6, 0,
+                                                    &secretTotalItems, &secretRows,
+                                                    &secretItemInfoLen))
         return 0;
     /*
      * mmShop:0x9DE returns immediately after the 1/1/14 actor-state branch and
@@ -17402,21 +17981,35 @@ static u32 vm_net_mock_build_shop_actor_query14_response(const u8 *request, u32 
 
     vm_net_mock_finish_wt_packet(out, pos, 5);
     g_netMockShop17ListPending = 1;
-    vm_net_mock_format_shop_page_ids(page5Index, 8, page5Ids, sizeof(page5Ids));
-    printf("[info][network] mock_shop_open14 actorId=%u pages=inline actor_state=last page5=%u page6=0 total=%u rows=%u iteminfo_len=%u actorinfo_len=%u ids=%s\n",
+    /*
+     * Entering mmShop can return through a fresh mmGame scene init.  The main
+     * item manager is then recreated client-side, so the next group/type1
+     * response must be allowed to seed the active role backpack again.
+     */
+    g_netMockBackpackGridSeededRoleId = 0;
+    vm_net_mock_format_shop_page_ids(5, page5Index, 8, page5Ids, sizeof(page5Ids));
+    vm_net_mock_format_shop_page_ids(6, 0, 8, secretIds, sizeof(secretIds));
+    printf("[info][network] mock_shop_open14 actorId=%u pages=inline actor_state=last page5=%u page6=0 secret_total=%u secret_rows=%u secret_iteminfo_len=%u weapon_total=%u weapon_rows=%u weapon_iteminfo_len=%u actorinfo_len=%u grid_reseed=1 secret_ids=%s weapon_ids=%s\n",
            actorId,
            page5Index,
            totalItems,
            pageRows,
            itemInfoLen,
+           secretTotalItems,
+           secretRows,
+           secretItemInfoLen,
            actorInfoLen,
-           page5Ids);
-    vm_autotest_note("mock_shop_open14 actorId=%u pages=inline actor_state=last page5=%u items_total=%u page_rows=%u iteminfo_len=%u actorinfo_len=%u evidence=runtime:no-page-followup-after-1/1/14 mmShop:0x162C/0x11F0/0x9DE/0x7BC\n",
+           page5Ids,
+           secretIds);
+    vm_autotest_note("mock_shop_open14 actorId=%u pages=inline actor_state=last page5=%u secret_total=%u secret_rows=%u secret_iteminfo_len=%u weapon_total=%u weapon_rows=%u weapon_iteminfo_len=%u actorinfo_len=%u grid_reseed=1 evidence=runtime:no-page-followup-after-1/1/14 mmShop:0x162C/0x11F0/0x9DE/0x7BC\n",
                      actorId,
                      page5Index,
                      totalItems,
                      pageRows,
                      itemInfoLen,
+                     secretTotalItems,
+                     secretRows,
+                     secretItemInfoLen,
                      actorInfoLen);
     return pos;
 }
@@ -17512,13 +18105,11 @@ static u32 vm_net_mock_build_shop_page14_response(const u8 *request, u32 request
                                                   u8 *out, u32 outCap)
 {
     u32 pos = 5;
-    u32 objectStart = 0;
     u32 pageIndex = 0;
     u32 totalItems = 0;
     u32 pageRows = 0;
     u32 itemInfoLen = 0;
     u8 subtype = 0;
-    const u8 emptyItemInfo[] = {0};
     char ids[160];
 
     if (out == NULL || outCap < pos)
@@ -17526,40 +18117,154 @@ static u32 vm_net_mock_build_shop_page14_response(const u8 *request, u32 request
     if (!vm_net_mock_is_shop_page14_request(request, requestLen, &subtype, &pageIndex))
         return 0;
 
-    if (subtype == 5)
-    {
-        if (!vm_net_mock_append_shop_catalog_page_object(out, outCap, &pos, subtype, pageIndex,
-                                                        &totalItems, &pageRows, &itemInfoLen))
-            return 0;
-    }
-    else
-    {
-        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 14, subtype, &objectStart))
-            return 0;
-        if (!vm_net_mock_put_object_u32(out, outCap, &pos, "totalnum", 0))
-            return 0;
-        if (!vm_net_mock_put_object_raw(out, outCap, &pos, "iteminfo",
-                                        emptyItemInfo, (u16)sizeof(emptyItemInfo)))
-            return 0;
-        vm_net_mock_finish_wt_object(out, objectStart, pos);
-        itemInfoLen = (u32)sizeof(emptyItemInfo);
-    }
+    if (!vm_net_mock_append_shop_catalog_page_object(out, outCap, &pos, subtype, pageIndex,
+                                                    &totalItems, &pageRows, &itemInfoLen))
+        return 0;
 
     vm_net_mock_finish_wt_packet(out, pos, 1);
     g_netMockShop17ListPending = 1;
     ids[0] = 0;
-    if (subtype == 5)
-        vm_net_mock_format_shop_page_ids(pageIndex, 8, ids, sizeof(ids));
-    printf("[info][network] mock_shop_page14 subtype=%u index=%u total=%u rows=%u iteminfo_len=%u first=%u ids=%s\n",
+    vm_net_mock_format_shop_page_ids(subtype, pageIndex, 8, ids, sizeof(ids));
+    printf("[info][network] mock_shop_page14 subtype=%u category=%s index=%u total=%u rows=%u iteminfo_len=%u first=%u ids=%s\n",
            subtype,
+           vm_net_mock_shop_page_subtype_name(subtype),
            pageIndex,
            totalItems,
            pageRows,
            itemInfoLen,
            g_vm_net_mock_shop_catalog_count > 0 ? g_vm_net_mock_shop_catalog[0].itemId : 0,
            ids);
-    vm_autotest_note("mock_shop_page14 subtype=%u index=%u items_total=%u page_rows=%u iteminfo_len=%u evidence=mmShop:0x618/0x7BC\n",
-                     subtype, pageIndex, totalItems, pageRows, itemInfoLen);
+    vm_autotest_note("mock_shop_page14 subtype=%u category=%s index=%u items_total=%u page_rows=%u iteminfo_len=%u evidence=mmShop:0x618/0x7BC\n",
+                     subtype,
+                     vm_net_mock_shop_page_subtype_name(subtype),
+                     pageIndex, totalItems, pageRows, itemInfoLen);
+    return pos;
+}
+
+static bool vm_net_mock_is_shop_buy14_request(const u8 *request, u32 requestLen,
+                                              u8 *typeOut, u32 *itemIdOut,
+                                              u8 *countOut)
+{
+    u32 offset = 4;
+    u32 itemId = 0;
+    u32 count = 1;
+    u32 type = 0;
+    vm_net_mock_request_object object;
+
+    if (typeOut)
+        *typeOut = 0;
+    if (itemIdOut)
+        *itemIdOut = 0;
+    if (countOut)
+        *countOut = 1;
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T')
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        return false;
+    if (offset != requestLen)
+        return false;
+    if (object.major != 1 || object.kind != 14 || object.subtype != 3)
+        return false;
+    if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "id", &itemId))
+        return false;
+    (void)vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "num", &count);
+    (void)vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "type", &type);
+    if (itemId == 0)
+        return false;
+    if (count == 0)
+        count = 1;
+    if (count > 255)
+        count = 255;
+
+    if (typeOut)
+        *typeOut = (u8)(type > 255 ? 255 : type);
+    if (itemIdOut)
+        *itemIdOut = itemId;
+    if (countOut)
+        *countOut = (u8)count;
+    return true;
+}
+
+static bool vm_net_mock_shop_calculate_cost(u32 itemId, u32 count,
+                                            u32 *unitPriceOut, u32 *costOut)
+{
+    const vm_net_mock_shop_catalog_item *item = vm_net_mock_find_shop_catalog_item(itemId);
+    u32 unitPrice = item ? item->price : VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE;
+    u32 cost = 0;
+
+    if (unitPrice == 0)
+        unitPrice = VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE;
+    if (count == 0)
+        count = 1;
+    if (unitPrice != 0 && count > 0xffffffffu / unitPrice)
+        cost = 0xffffffffu;
+    else
+        cost = unitPrice * count;
+
+    if (unitPriceOut)
+        *unitPriceOut = unitPrice;
+    if (costOut)
+        *costOut = cost;
+    return item != NULL;
+}
+
+static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestLen,
+                                                 u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u8 type = 0;
+    u32 itemId = 0;
+    u8 count = 1;
+    u32 unitPrice = 0;
+    u32 cost = 0;
+    u32 wcoinBefore = 0;
+    u32 wcoinAfter = 0;
+    u16 seq = 0;
+    u8 result = 0;
+    bool knownItem = false;
+    vm_net_mock_role_state *role = NULL;
+
+    if (out == NULL || outCap < pos)
+        return 0;
+    if (!vm_net_mock_is_shop_buy14_request(request, requestLen, &type, &itemId, &count))
+        return 0;
+
+    role = vm_net_mock_active_role();
+    knownItem = vm_net_mock_shop_calculate_cost(itemId, count, &unitPrice, &cost);
+    wcoinBefore = vm_net_mock_shop_wcoin_balance();
+    wcoinAfter = wcoinBefore;
+
+    if (role != NULL && knownItem && wcoinBefore >= cost &&
+        vm_net_mock_role_add_backpack_item(itemId, count, &seq))
+    {
+        g_netMockShopWCoinBalance = wcoinBefore - cost;
+        wcoinAfter = g_netMockShopWCoinBalance;
+        g_netMockShop17ListPending = 0;
+        g_netMockBackpackPreferRoleListAfterShopBuy = 1;
+        g_netMockBackpackGridSeededRoleId = 0;
+        result = 1;
+    }
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 14, 3, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_u16(out, outCap, &pos, "seq", seq))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", result))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+
+    printf("[info][network] mock_shop_buy14 type=%u item=%u count=%u unit=%u cost=%u wcoin=%u/%u seq=%u result=%u known=%u shop_pending=%u backpack_prefer_role=%u grid_reseed=%u resp=14/3\n",
+           type, itemId, count, unitPrice, cost, wcoinBefore, wcoinAfter, seq,
+           result, knownItem ? 1 : 0, g_netMockShop17ListPending,
+           g_netMockBackpackPreferRoleListAfterShopBuy,
+           result ? 1 : 0);
+    vm_autotest_note("mock_shop_buy14 type=%u item=%u count=%u unit=%u cost=%u wcoin=%u/%u seq=%u result=%u shop_pending=%u backpack_prefer_role=%u grid_reseed=%u response=14/3 evidence=mmShop:0x2F6C/0x9DE\n",
+                     type, itemId, count, unitPrice, cost, wcoinBefore, wcoinAfter,
+                     seq, result, g_netMockShop17ListPending,
+                     g_netMockBackpackPreferRoleListAfterShopBuy,
+                     result ? 1 : 0);
     return pos;
 }
 
@@ -17611,6 +18316,12 @@ static u32 vm_net_mock_build_shop_buy17_response(const u8 *request, u32 requestL
     if (!vm_net_mock_is_shop_buy17_request(request, requestLen, &shopId, &count))
         return 0;
     result = vm_net_mock_role_add_backpack_item(shopId, count, &seq) ? 1 : 0;
+    if (result)
+    {
+        g_netMockShop17ListPending = 0;
+        g_netMockBackpackPreferRoleListAfterShopBuy = 1;
+        g_netMockBackpackGridSeededRoleId = 0;
+    }
 
     /*
      * The buy button sends WT 17/2 with shopId, but mmShopMstarWqvga.cbm:sub_9DE
@@ -17627,8 +18338,10 @@ static u32 vm_net_mock_build_shop_buy17_response(const u8 *request, u32 requestL
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);
 
-    vm_autotest_note("mock_shop_buy17 shopId=%u count=%u resp=14/3 seq=%u result=%u evidence=mmShop:0x9DE(seq/result)\n",
-                     shopId, count, seq, result);
+    vm_autotest_note("mock_shop_buy17 shopId=%u count=%u resp=14/3 seq=%u result=%u shop_pending=%u backpack_prefer_role=%u grid_reseed=%u evidence=mmShop:0x9DE(seq/result)\n",
+                     shopId, count, seq, result, g_netMockShop17ListPending,
+                     g_netMockBackpackPreferRoleListAfterShopBuy,
+                     result ? 1 : 0);
     return pos;
 }
 
@@ -19102,6 +19815,13 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_shop_buy14_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-shop-buy14", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
     hookedLen = vm_net_mock_build_shop_buy17_response(request, requestLen, out, outCap);
     if (hookedLen)
     {
@@ -19109,11 +19829,51 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
-    hookedLen = vm_net_mock_build_shop_items_books_combo_response(request, requestLen, out, outCap);
-    if (hookedLen)
+    if (g_netMockBackpackPreferRoleListAfterShopBuy)
     {
-        vm_net_log_handled_packet("builtin-shop-items-books-combo", request, requestLen, hookedLen);
-        return hookedLen;
+        hookedLen = vm_net_mock_build_backpack_items_books_combo_response(request, requestLen, out, outCap);
+        if (hookedLen)
+        {
+            g_netMockBackpackPreferRoleListAfterShopBuy = 0;
+            g_netMockShop17ListPending = 0;
+            printf("[info][network] mock_shop_buy_backpack_sync shape=17/1+7/42 response=role-backpack pending=0\n");
+            vm_net_log_handled_packet("builtin-shop-buy-backpack-sync-combo", request, requestLen, hookedLen);
+            return hookedLen;
+        }
+        if (vm_net_mock_is_backpack_open_request(request, requestLen))
+        {
+            hookedLen = vm_net_mock_build_backpack_open_response(out, outCap);
+            if (hookedLen)
+            {
+                g_netMockBackpackPreferRoleListAfterShopBuy = 0;
+                g_netMockShop17ListPending = 0;
+                printf("[info][network] mock_shop_buy_backpack_sync shape=7/42 response=role-backpack pending=0\n");
+                vm_net_log_handled_packet("builtin-shop-buy-backpack-sync-open", request, requestLen, hookedLen);
+                return hookedLen;
+            }
+        }
+        if (vm_net_mock_is_backpack_items_request(request, requestLen))
+        {
+            hookedLen = vm_net_mock_build_backpack_items_response(out, outCap);
+            if (hookedLen)
+            {
+                g_netMockBackpackPreferRoleListAfterShopBuy = 0;
+                g_netMockShop17ListPending = 0;
+                printf("[info][network] mock_shop_buy_backpack_sync shape=17/1 response=role-backpack pending=0\n");
+                vm_net_log_handled_packet("builtin-shop-buy-backpack-sync-items", request, requestLen, hookedLen);
+                return hookedLen;
+            }
+        }
+    }
+
+    if (g_netMockShop17ListPending)
+    {
+        hookedLen = vm_net_mock_build_shop_items_books_combo_response(request, requestLen, out, outCap);
+        if (hookedLen)
+        {
+            vm_net_log_handled_packet("builtin-shop-items-books-combo", request, requestLen, hookedLen);
+            return hookedLen;
+        }
     }
 
     if (g_netMockShop17ListPending && vm_net_mock_is_backpack_open_request(request, requestLen))
@@ -19134,6 +19894,13 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
             vm_net_log_handled_packet("builtin-shop-items17", request, requestLen, hookedLen);
             return hookedLen;
         }
+    }
+
+    hookedLen = vm_net_mock_build_backpack_items_books_combo_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-backpack-items-books-combo", request, requestLen, hookedLen);
+        return hookedLen;
     }
 
     hookedLen = vm_net_mock_build_settings_unstuck_response(request, requestLen, out, outCap);
@@ -19291,6 +20058,13 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     if (hookedLen)
     {
         vm_net_log_handled_packet("builtin-item-discard", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_item_equip_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-item-equip", request, requestLen, hookedLen);
         return hookedLen;
     }
 
