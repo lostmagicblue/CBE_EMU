@@ -2885,6 +2885,7 @@ enum
     VM_NET_MOCK_ITEM_EFFECT_CATALOG_MAX_ITEMS = 2048,
     VM_NET_MOCK_SKILL_CATALOG_MAX_ITEMS = 256,
     VM_NET_MOCK_LEARNED_SKILL_MAX_ITEMS = 64,
+    VM_NET_MOCK_AUTO_MONSTER_CATALOG_MAX_ITEMS = 128,
     VM_NET_MOCK_SHOP_NAME_BYTES = 12,
     VM_NET_MOCK_SKILL_NAME_BYTES = 24,
     VM_NET_MOCK_TELEPORT_STONE_DEFAULT_EXIT_ID = 1,
@@ -3151,6 +3152,12 @@ typedef struct
     char name[VM_NET_MOCK_SKILL_NAME_BYTES + 1];
 } vm_net_mock_skill_catalog_item;
 
+typedef struct
+{
+    char scene[64];
+    u32 monsterIds[3];
+} vm_net_mock_auto_monster_catalog_item;
+
 static vm_net_mock_shop_catalog_item g_vm_net_mock_shop_catalog[VM_NET_MOCK_SHOP_MAX_CATALOG_ITEMS];
 static u32 g_vm_net_mock_shop_catalog_count = 0;
 static bool g_vm_net_mock_shop_catalog_loaded = false;
@@ -3163,6 +3170,9 @@ static bool g_vm_net_mock_item_effect_catalog_loaded = false;
 static vm_net_mock_skill_catalog_item g_vm_net_mock_skill_catalog[VM_NET_MOCK_SKILL_CATALOG_MAX_ITEMS];
 static u32 g_vm_net_mock_skill_catalog_count = 0;
 static bool g_vm_net_mock_skill_catalog_loaded = false;
+static vm_net_mock_auto_monster_catalog_item g_vm_net_mock_auto_monster_catalog[VM_NET_MOCK_AUTO_MONSTER_CATALOG_MAX_ITEMS];
+static u32 g_vm_net_mock_auto_monster_catalog_count = 0;
+static bool g_vm_net_mock_auto_monster_catalog_loaded = false;
 static bool g_vm_net_mock_eidolon_catalog_loaded = false;
 static bool g_vm_net_mock_eidolon_heal_effect_found = false;
 static u32 g_vm_net_mock_eidolon_heal_effect_index = 0;
@@ -6072,6 +6082,182 @@ static bool vm_net_mock_scene_names_equal_loose(const char *a, const char *b)
     return normalizedA[0] != 0 &&
            normalizedB[0] != 0 &&
            strcmp(normalizedA, normalizedB) == 0;
+}
+
+static bool vm_net_mock_add_auto_monster_catalog_item(const u8 *scene,
+                                                      u32 sceneLen,
+                                                      u32 monster1,
+                                                      u32 monster2,
+                                                      u32 monster3)
+{
+    vm_net_mock_auto_monster_catalog_item *item = NULL;
+    u32 safeLen = 0;
+
+    if (scene == NULL || sceneLen == 0 ||
+        (monster1 == 0 && monster2 == 0 && monster3 == 0) ||
+        g_vm_net_mock_auto_monster_catalog_count >= VM_NET_MOCK_AUTO_MONSTER_CATALOG_MAX_ITEMS)
+    {
+        return false;
+    }
+
+    safeLen = vm_net_mock_shop_safe_name_len(scene, sceneLen,
+                                             sizeof(g_vm_net_mock_auto_monster_catalog[0].scene) - 1);
+    if (safeLen == 0)
+        return false;
+
+    item = &g_vm_net_mock_auto_monster_catalog[g_vm_net_mock_auto_monster_catalog_count++];
+    memset(item, 0, sizeof(*item));
+    memcpy(item->scene, scene, safeLen);
+    item->scene[safeLen] = 0;
+    item->monsterIds[0] = monster1;
+    item->monsterIds[1] = monster2;
+    item->monsterIds[2] = monster3;
+    return true;
+}
+
+static u32 vm_net_mock_load_auto_monster_catalog_dsh(const char *path)
+{
+    static u8 data[16384];
+    u32 len = vm_net_mock_load_response_file(path, data, sizeof(data));
+    u32 columnCount = 0;
+    u32 rowCount = 0;
+    u32 pos = 16;
+    u32 added = 0;
+
+    if (len < 16)
+        return 0;
+    columnCount = vm_net_mock_read_le32_at(data, 4);
+    rowCount = vm_net_mock_read_le32_at(data, 8);
+    if (columnCount < 4 || columnCount > 16 || rowCount > 512)
+        return 0;
+
+    for (u32 i = 0; i < columnCount; ++i)
+    {
+        u32 fieldLen = 0;
+        if (pos >= len)
+            return added;
+        fieldLen = data[pos++];
+        if (pos + fieldLen > len)
+            return added;
+        pos += fieldLen;
+    }
+
+    for (u32 row = 0; row < rowCount && pos + 4 <= len; ++row)
+    {
+        u32 rowLen = vm_net_mock_read_le32_at(data, pos);
+        u32 rowPos = pos + 4;
+        u32 rowEnd = rowPos + rowLen;
+        const u8 *scene = NULL;
+        u32 sceneLen = 0;
+        u32 monsterIds[3] = {0, 0, 0};
+
+        if (rowEnd > len || rowEnd < rowPos)
+            break;
+
+        for (u32 col = 0; col < columnCount && rowPos < rowEnd; ++col)
+        {
+            u32 valueLen = data[rowPos++];
+            const u8 *value = data + rowPos;
+
+            if (rowPos + valueLen > rowEnd)
+                break;
+            if (col == 0)
+            {
+                scene = value;
+                sceneLen = valueLen;
+            }
+            else if (col >= 1 && col <= 3)
+            {
+                monsterIds[col - 1] = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+            }
+            rowPos += valueLen;
+        }
+
+        if (vm_net_mock_add_auto_monster_catalog_item(scene, sceneLen,
+                                                      monsterIds[0],
+                                                      monsterIds[1],
+                                                      monsterIds[2]))
+        {
+            ++added;
+        }
+        pos = rowEnd;
+    }
+
+    return added;
+}
+
+static u32 vm_net_mock_load_auto_monster_catalog(void)
+{
+    u32 added = 0;
+
+    if (g_vm_net_mock_auto_monster_catalog_loaded)
+        return g_vm_net_mock_auto_monster_catalog_count;
+
+    g_vm_net_mock_auto_monster_catalog_loaded = true;
+    g_vm_net_mock_auto_monster_catalog_count = 0;
+    added = vm_net_mock_load_auto_monster_catalog_dsh("JHOnlineData/automonster.dsh");
+    if (added == 0)
+        added = vm_net_mock_load_auto_monster_catalog_dsh("bin/JHOnlineData/automonster.dsh");
+    if (added == 0)
+        added = vm_net_mock_load_auto_monster_catalog_dsh("web/fs/JHOnlineData/automonster.dsh");
+
+    if (added == 0)
+    {
+        printf("[warn][network] mock_auto_monster_catalog missing source=automonster.dsh\n");
+    }
+    else
+    {
+        printf("[info][network] mock_auto_monster_catalog total=%u source=automonster.dsh\n",
+               g_vm_net_mock_auto_monster_catalog_count);
+    }
+    return g_vm_net_mock_auto_monster_catalog_count;
+}
+
+static bool vm_net_mock_select_auto_monster_for_scene(const char *scene,
+                                                      u32 *enemyIdOut,
+                                                      const char **matchedSceneOut)
+{
+    u32 total = vm_net_mock_load_auto_monster_catalog();
+    u32 overrideEnemyId = vm_net_mock_env_u32("CBE_HANGUP_BATTLE_ENEMY_ID", 0);
+
+    if (enemyIdOut)
+        *enemyIdOut = 0;
+    if (matchedSceneOut)
+        *matchedSceneOut = NULL;
+    if (overrideEnemyId != 0)
+    {
+        if (enemyIdOut)
+            *enemyIdOut = overrideEnemyId;
+        if (matchedSceneOut)
+            *matchedSceneOut = "env:CBE_HANGUP_BATTLE_ENEMY_ID";
+        return true;
+    }
+    if (scene == NULL || scene[0] == 0)
+        return false;
+
+    for (u32 i = 0; i < total; ++i)
+    {
+        const vm_net_mock_auto_monster_catalog_item *item = &g_vm_net_mock_auto_monster_catalog[i];
+        u32 choices[3] = {0, 0, 0};
+        u32 choiceCount = 0;
+
+        if (!vm_net_mock_scene_names_equal_loose(scene, item->scene))
+            continue;
+        for (u32 j = 0; j < 3; ++j)
+        {
+            if (item->monsterIds[j] != 0)
+                choices[choiceCount++] = item->monsterIds[j];
+        }
+        if (choiceCount == 0)
+            return false;
+        if (enemyIdOut)
+            *enemyIdOut = choices[g_schedulerTick % choiceCount];
+        if (matchedSceneOut)
+            *matchedSceneOut = item->scene;
+        return true;
+    }
+
+    return false;
 }
 
 static bool vm_net_mock_scene_is_c00_penglai03(const char *scene)
@@ -17259,6 +17445,271 @@ static u32 vm_net_mock_build_battle_auto12_cancel_response(const u8 *request, u3
     return pos;
 }
 
+static bool vm_net_mock_is_hangup_battle_start_request(const u8 *request, u32 requestLen)
+{
+    u8 kind = 0;
+    u8 subtype = 0;
+    u8 requestType = 0;
+    u32 offset = 4;
+    vm_net_mock_request_object actorOther;
+    vm_net_mock_request_object hangup;
+    vm_net_mock_request_object extra;
+
+    if (request == NULL || requestLen < 24 ||
+        !vm_net_mock_get_wt_header_kind_subtype(request, requestLen, &kind, &subtype) ||
+        kind != 2 || subtype != 10)
+    {
+        return false;
+    }
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &actorOther))
+        return false;
+    if (actorOther.major != 1 ||
+        actorOther.kind != 2 ||
+        actorOther.subtype != 10 ||
+        actorOther.payloadLen != 10)
+    {
+        return false;
+    }
+    if (!vm_net_mock_get_object_u8_field(actorOther.payload, actorOther.payloadLen,
+                                         "Type", &requestType) ||
+        requestType != 2)
+    {
+        return false;
+    }
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &hangup))
+        return false;
+    if (hangup.major != 1 ||
+        hangup.kind != 0x19 ||
+        hangup.subtype != 3 ||
+        hangup.payloadLen != 0)
+    {
+        return false;
+    }
+    if (vm_net_mock_next_request_object(request, requestLen, &offset, &extra))
+        return false;
+    return offset == requestLen;
+}
+
+static bool vm_net_mock_append_info_banner_text11_object(u8 *out, u32 outCap,
+                                                         u32 *pos,
+                                                         const char *info)
+{
+    u32 objectStart = 0;
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 0x19, 11, &objectStart))
+        return false;
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", 8))
+        return false;
+    if (!vm_net_mock_put_object_string(out, outCap, pos, "info", info ? info : ""))
+        return false;
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
+static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32 requestLen,
+                                                          u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u8 objectCount = 0;
+    u32 objectStart = 0;
+    const char *scene = NULL;
+    const char *matchedScene = NULL;
+    u32 requestedEnemyId = 0;
+    u32 sceneMonsterIndex = 0;
+    u32 sceneMonsterPosX = 0;
+    u32 sceneMonsterPosY = 0;
+    u8 battleInfo[160];
+    u32 battleInfoLen = 0;
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 roleHpDefault = VM_NET_MOCK_ROLE_DEFAULT_HP;
+    u32 roleMaxHpDefault = VM_NET_MOCK_ROLE_DEFAULT_HP;
+    u32 roleMpDefault = VM_NET_MOCK_ROLE_DEFAULT_MP;
+    u32 roleMaxMpDefault = VM_NET_MOCK_ROLE_DEFAULT_MP;
+    u32 roleId = 0;
+    u32 roleHp = 0;
+    u32 roleMaxHp = 0;
+    u32 roleMp = 0;
+    u32 roleMaxMp = 0;
+    bool playerOnRight = vm_net_mock_battle_player_on_right();
+    u8 battleSide = (u8)vm_net_mock_env_u32("CBE_BATTLE_SIDE",
+                                            vm_net_mock_battle_default_side(playerOnRight));
+    u8 battleEnemyCount = 1;
+    u8 autoFlagType = (u8)vm_net_mock_env_u32("CBE_HANGUP_BATTLE_AUTO_FLAG", 1);
+
+    if (outCap < pos || !vm_net_mock_is_hangup_battle_start_request(request, requestLen))
+        return 0;
+
+    scene = vm_net_mock_current_scene_name();
+    if (!vm_net_mock_select_auto_monster_for_scene(scene, &requestedEnemyId, &matchedScene))
+    {
+        if (!vm_net_mock_append_actor_other_empty10_object(out, outCap, &pos))
+            return 0;
+        ++objectCount;
+        if (!vm_net_mock_append_info_banner_text11_object(out, outCap, &pos,
+                                                         "No hangup monster"))
+            return 0;
+        ++objectCount;
+        vm_net_mock_finish_wt_packet(out, pos, objectCount);
+        printf("[warn][network] mock_hangup_battle_start scene=%s action=no-monster response=2/10+25/11 resp=%u evidence=JianghuOL.CBE:0x01015E14 Type=2 runtime=2/10+25/3\n",
+               scene ? scene : "-", pos);
+        vm_autotest_note("mock_hangup_battle_start scene=%s action=no-monster response=2/10+25/11 evidence=JianghuOL.CBE:0x01015E14+0x01010C7E\n",
+                         scene ? scene : "-");
+        return pos;
+    }
+
+    requestedEnemyId = vm_net_mock_normalize_battle_enemy_id(requestedEnemyId);
+    if (!vm_net_mock_select_scene_actor_moveinfo_target(requestedEnemyId,
+                                                        &sceneMonsterIndex,
+                                                        &sceneMonsterPosX,
+                                                        &sceneMonsterPosY))
+    {
+        if (!vm_net_mock_append_actor_other_empty10_object(out, outCap, &pos))
+            return 0;
+        ++objectCount;
+        if (!vm_net_mock_append_info_banner_text11_object(out, outCap, &pos,
+                                                         "Monster not ready"))
+            return 0;
+        ++objectCount;
+        vm_net_mock_finish_wt_packet(out, pos, objectCount);
+        printf("[warn][network] mock_hangup_battle_start scene=%s table_scene=%s enemy=%u action=no-active-scene-node response=2/10+25/11 resp=%u evidence=automonster.dsh + mmBattle:0x66CC subtype5\n",
+               scene ? scene : "-", matchedScene ? matchedScene : "-",
+               requestedEnemyId, pos);
+        vm_autotest_note("mock_hangup_battle_start scene=%s enemy=%u action=no-active-scene-node response=2/10+25/11\n",
+                         scene ? scene : "-", requestedEnemyId);
+        return pos;
+    }
+
+    vm_net_mock_role_default_vitals(role,
+                                    &roleHpDefault,
+                                    &roleMaxHpDefault,
+                                    &roleMpDefault,
+                                    &roleMaxMpDefault);
+    roleId = vm_net_mock_env_u32("CBE_BATTLE_ROLE_ID",
+                                 role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID);
+    roleHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP", roleHpDefault);
+    roleMaxHp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_HP", roleMaxHpDefault);
+    roleMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MP", roleMpDefault);
+    roleMaxMp = vm_net_mock_env_u32("CBE_BATTLE_ROLE_MAX_MP", roleMaxMpDefault);
+    if (roleMaxHp < roleMaxHpDefault)
+        roleMaxHp = roleMaxHpDefault;
+    if (roleMaxMp < roleMaxMpDefault)
+        roleMaxMp = roleMaxMpDefault;
+    if (roleHp == 0)
+    {
+        u32 revivedHp = vm_net_mock_role_revive_floor_after_death("hangup-battle-start-zero-hp-floor");
+        if (revivedHp != 0)
+        {
+            roleHp = revivedHp;
+            if (role != NULL && role->hpMax > roleMaxHp)
+                roleMaxHp = role->hpMax;
+        }
+    }
+    if (roleHp > roleMaxHp)
+        roleHp = roleMaxHp;
+    if (roleMp > roleMaxMp)
+        roleMp = roleMaxMp;
+
+    battleEnemyCount = vm_net_mock_battle_roll_enemy_count(true);
+    battleInfoLen = vm_net_mock_build_battle_scene_start_info_blob(battleInfo, sizeof(battleInfo),
+                                                                   sceneMonsterIndex,
+                                                                   sceneMonsterPosX,
+                                                                   sceneMonsterPosY,
+                                                                   battleEnemyCount,
+                                                                   roleId);
+    if (battleInfoLen == 0 || battleInfoLen > 0xffff)
+        return 0;
+
+    if (!vm_net_mock_append_actor_other_empty10_object(out, outCap, &pos))
+        return 0;
+    ++objectCount;
+    if (!vm_net_mock_append_scene_monster_moveinfo2_object(out, outCap, &pos,
+                                                          requestedEnemyId,
+                                                          sceneMonsterPosX,
+                                                          sceneMonsterPosY))
+        return 0;
+    ++objectCount;
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 4, 5, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "side", battleSide))
+        return 0;
+    if (!vm_net_mock_put_object_raw(out, outCap, &pos, "battleinfo", battleInfo, (u16)battleInfoLen))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    ++objectCount;
+    if (autoFlagType != 0)
+    {
+        if (!vm_net_mock_append_battle_case11_auto_flag_object(out, outCap, &pos, autoFlagType))
+            return 0;
+        ++objectCount;
+    }
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+
+    g_mockBattleOperateSessionArmed = 1;
+    g_mockBattleOperateSessionFinished = 0;
+    g_mockBattlePendingEnemyTurn = 0;
+    g_mockBattleAwaitingSettlement = 0;
+    g_mockBattleSceneMonsterStartActive = 1;
+    g_mockBattleEnemyCountCurrent = battleEnemyCount;
+    g_mockBattleOperateTurnCounter = 0;
+    ++g_mockBattleOperateSessionSerial;
+    g_vm_net_mock_battle_rewarded_exp = 0;
+    g_vm_net_mock_battle_rewarded_drop_item = 0;
+    g_vm_net_mock_battle_rewarded_drop_seq = 0;
+    g_vm_net_mock_battle_rewarded_drop_count = 0;
+    g_vm_net_mock_battle_settlement_sent_serial = 0;
+    g_vm_net_mock_battle_drop_refresh_sent_serial = 0;
+    g_vm_net_mock_battle_recovered_serial = 0;
+    g_vm_net_mock_battle_role_id_current = roleId != 0 ? roleId :
+                                           (role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID);
+    g_mockBattleRoleHpCurrent = roleHp;
+    g_mockBattleRoleHpMax = roleMaxHp;
+    if (g_mockBattleRoleHpMax < g_mockBattleRoleHpCurrent)
+        g_mockBattleRoleHpMax = g_mockBattleRoleHpCurrent;
+    g_mockBattleRoleMpCurrent = roleMp;
+    g_mockBattleRoleMpMax = roleMaxMp;
+    if (g_mockBattleRoleMpMax < g_mockBattleRoleMpCurrent)
+        g_mockBattleRoleMpMax = g_mockBattleRoleMpCurrent;
+    g_vm_net_mock_battle_enemy_id_current = requestedEnemyId;
+    vm_net_mock_battle_reset_enemy_hp_from_stats(requestedEnemyId);
+
+    {
+        vm_net_mock_monster_stats stats = vm_net_mock_monster_stats_for_enemy(requestedEnemyId);
+        u32 perEnemyHp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", stats.hp);
+        u32 perEnemyMaxHp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MAX_HP", perEnemyHp);
+        if (perEnemyMaxHp < perEnemyHp)
+            perEnemyMaxHp = perEnemyHp;
+        printf("[info][network] mock_hangup_battle_start scene=%s table_scene=%s enemy=%u enemies=%u roleid=%u rolehp=%u/%u rolemp=%u/%u enemyhp=%u/%u per_enemy_hp=%u/%u index=%u pos=(%u,%u) auto=%u objects=%u resp=%u evidence=JianghuOL.CBE:0x01015E14 Type=2 + runtime:2/10+25/3 + automonster.dsh + mmBattle:0x66CC\n",
+               scene ? scene : "-",
+               matchedScene ? matchedScene : "-",
+               requestedEnemyId,
+               battleEnemyCount,
+               g_vm_net_mock_battle_role_id_current,
+               g_mockBattleRoleHpCurrent,
+               g_mockBattleRoleHpMax,
+               g_mockBattleRoleMpCurrent,
+               g_mockBattleRoleMpMax,
+               g_mockBattleEnemyHpCurrent,
+               g_mockBattleEnemyHpMax,
+               perEnemyHp,
+               perEnemyMaxHp,
+               sceneMonsterIndex,
+               sceneMonsterPosX,
+               sceneMonsterPosY,
+               autoFlagType,
+               objectCount,
+               pos);
+        vm_autotest_note("mock_hangup_battle_start scene=%s enemy=%u enemies=%u index=%u pos=(%u,%u) auto=%u response=2/10+2/2+4/5+4/11 evidence=JianghuOL.CBE:0x01015E14 mmBattle:0x66CC\n",
+                         scene ? scene : "-",
+                         requestedEnemyId,
+                         battleEnemyCount,
+                         sceneMonsterIndex,
+                         sceneMonsterPosX,
+                         sceneMonsterPosY,
+                         autoFlagType);
+    }
+    return pos;
+}
+
 static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u32 requestLen,
                                                             u8 *out, u32 outCap)
 {
@@ -20697,6 +21148,13 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     if (hookedLen)
     {
         vm_net_log_handled_packet("builtin-challenge-interaction", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_hangup_battle_start_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-hangup-battle-start", request, requestLen, hookedLen);
         return hookedLen;
     }
 
