@@ -2893,6 +2893,7 @@ enum
     VM_NET_MOCK_ROLE_DB_LEGACY_VERSION = 1,
     VM_NET_MOCK_ROLE_DB_BACKPACK_VERSION = 2,
     VM_NET_MOCK_ROLE_DB_VERSION = 3,
+    VM_NET_MOCK_ROLE_DESIGNATION_COUNT = 10,
     VM_NET_MOCK_ROLE_EXP_PER_LEVEL = 100,
     VM_NET_MOCK_EQUIP_SLOT_COUNT = 8,
     VM_NET_MOCK_EQUIP_CATALOG_MAX_ITEMS = 2048,
@@ -2941,7 +2942,7 @@ typedef struct
     u16 x;
     u16 y;
     u8 backpackItemCount;
-    u8 reserved1;
+    u8 designationId;
     u16 nextBackpackSeq;
     u32 equippedItemIds[VM_NET_MOCK_EQUIP_SLOT_COUNT];
     vm_net_mock_backpack_item_state backpackItems[VM_NET_MOCK_BACKPACK_MAX_ITEMS];
@@ -6204,16 +6205,149 @@ static const char *vm_net_mock_default_role_name(void)
     return "\xcf\xc0\xbd\xa3\xbd\xad\xba\xfe"; /* GBK: xia jian jiang hu */
 }
 
-static const char *vm_net_mock_role_title(const vm_net_mock_role_state *role)
+typedef struct
+{
+    u8 id;
+    u8 fieldB;
+    u32 minMoney;
+    const char *name;
+    const char *description;
+    const char *overheadResource;
+} vm_net_mock_designation_entry;
+
+static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] = {
+    {
+        0,
+        0,
+        0,
+        "\xd2\xbb\xc6\xb6\xc8\xe7\xcf\xb4", /* GBK: yi pin ru xi */
+        "\xc5\xcc\xb2\xf8\xb2\xbb\xd7\xe3", /* GBK: pan chan bu zu */
+        "riches_name0.gif",
+    },
+    {
+        1,
+        0,
+        5000,
+        "\xd2\xc2\xca\xb3\xce\xde\xd3\xc7", /* GBK: yi shi wu you */
+        "\xc2\xd4\xd3\xd0\xbb\xfd\xd0\xee", /* GBK: lue you ji xu */
+        "riches_name1.gif",
+    },
+    {
+        2,
+        0,
+        20000,
+        "\xc9\xfa\xb2\xc6\xd3\xd0\xb5\xc0", /* GBK: sheng cai you dao */
+        "\xd0\xa1\xd3\xd0\xd7\xca\xb2\xfa", /* GBK: xiao you zi chan */
+        "riches_name2.gif",
+    },
+    {
+        3,
+        0,
+        50000,
+        "\xc0\xed\xb2\xc6\xd3\xd0\xb7\xbd", /* GBK: li cai you fang */
+        "\xb2\xc6\xc2\xb7\xbd\xa5\xbf\xed", /* GBK: cai lu jian kuan */
+        "riches_name3.gif",
+    },
+    {
+        4,
+        0,
+        100000,
+        "\xb2\xc6\xd4\xcb\xba\xe0\xcd\xa8", /* GBK: cai yun heng tong */
+        "\xc7\xae\xb2\xc6\xb7\xe1\xba\xf1", /* GBK: qian cai feng hou */
+        "riches_name4.gif",
+    },
+    {
+        5,
+        0,
+        300000,
+        "\xd1\xfc\xb2\xf8\xcd\xf2\xb9\xe1", /* GBK: yao chan wan guan */
+        "\xbb\xd3\xbd\xf0\xd3\xd0\xb6\xc8", /* GBK: hui jin you du */
+        "riches_name5.gif",
+    },
+    {
+        6,
+        0,
+        500000,
+        "\xbc\xd2\xb2\xc6\xcd\xf2\xb9\xe1", /* GBK: jia cai wan guan */
+        "\xb2\xc6\xb8\xbb\xbe\xaa\xc8\xcb", /* GBK: cai fu jing ren */
+        "riches_name6.gif",
+    },
+    {
+        7,
+        0,
+        1000000,
+        "\xb8\xbb\xc9\xcc\xbe\xde\xbc\xd6", /* GBK: fu shang ju gu */
+        "\xc9\xcc\xbc\xd6\xce\xc5\xc3\xfb", /* GBK: shang gu wen ming */
+        "riches_name7.gif",
+    },
+    {
+        8,
+        0,
+        3000000,
+        "\xb8\xbb\xbc\xd7\xd2\xbb\xb7\xbd", /* GBK: fu jia yi fang */
+        "\xb2\xc6\xb9\xda\xd2\xbb\xb7\xbd", /* GBK: cai guan yi fang */
+        "riches_name8.gif",
+    },
+    {
+        9,
+        0,
+        10000000,
+        "\xb8\xbb\xbf\xc9\xb5\xd0\xb9\xfa", /* GBK: fu ke di guo */
+        "\xcc\xec\xcf\xc2\xbe\xde\xb8\xbb", /* GBK: tian xia ju fu */
+        "riches_name9.gif",
+    },
+};
+
+static u32 vm_net_mock_designation_entry_count(void)
+{
+    return (u32)(sizeof(g_vm_net_mock_designation_entries) /
+                 sizeof(g_vm_net_mock_designation_entries[0]));
+}
+
+static const vm_net_mock_designation_entry *vm_net_mock_designation_by_id(u8 id)
+{
+    u32 count = vm_net_mock_designation_entry_count();
+    for (u32 i = 0; i < count; ++i)
+    {
+        if (g_vm_net_mock_designation_entries[i].id == id)
+            return &g_vm_net_mock_designation_entries[i];
+    }
+    return &g_vm_net_mock_designation_entries[0];
+}
+
+static bool vm_net_mock_designation_is_unlocked(const vm_net_mock_role_state *role,
+                                                const vm_net_mock_designation_entry *entry)
 {
     u32 money = role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY;
-    if (money >= 1000000)
-        return "\xb8\xbb\xbf\xc9\xb5\xd0\xb9\xfa"; /* GBK: fu ke di guo */
-    if (money >= 100000)
-        return "\xb8\xbb\xbc\xd7\xd2\xbb\xb7\xbd"; /* GBK: fu jia yi fang */
-    if (money >= 5000)
-        return "\xd0\xa1\xd3\xd0\xbb\xfd\xd0\xee"; /* GBK: xiao you ji xu */
-    return "\xd2\xbb\xc6\xb6\xc8\xe7\xcf\xb4";     /* GBK: yi pin ru xi */
+    if (entry == NULL)
+        return false;
+    return money >= entry->minMoney;
+}
+
+static const vm_net_mock_designation_entry *vm_net_mock_role_best_designation(const vm_net_mock_role_state *role)
+{
+    const vm_net_mock_designation_entry *best = &g_vm_net_mock_designation_entries[0];
+    u32 count = vm_net_mock_designation_entry_count();
+    for (u32 i = 0; i < count; ++i)
+    {
+        const vm_net_mock_designation_entry *entry = &g_vm_net_mock_designation_entries[i];
+        if (vm_net_mock_designation_is_unlocked(role, entry))
+            best = entry;
+    }
+    return best;
+}
+
+static const vm_net_mock_designation_entry *vm_net_mock_role_designation(const vm_net_mock_role_state *role)
+{
+    const vm_net_mock_designation_entry *entry = vm_net_mock_designation_by_id(role ? role->designationId : 0);
+    if (vm_net_mock_designation_is_unlocked(role, entry))
+        return entry;
+    return vm_net_mock_role_best_designation(role);
+}
+
+static const char *vm_net_mock_role_title(const vm_net_mock_role_state *role)
+{
+    return vm_net_mock_role_designation(role)->name;
 }
 
 static const char *vm_net_mock_role_sect_name(const vm_net_mock_role_state *role)
@@ -6908,6 +7042,7 @@ static void vm_net_mock_role_init_default(vm_net_mock_role_state *role)
     snprintf(role->scene, sizeof(role->scene), "%s", vm_net_mock_role_initial_scene_name());
     role->x = VM_NET_MOCK_ROLE_INITIAL_X;
     role->y = VM_NET_MOCK_ROLE_INITIAL_Y;
+    role->designationId = 0;
     vm_net_mock_role_init_default_equipment(role);
     vm_net_mock_role_init_default_backpack(role);
     vm_net_mock_role_sync_derived_vitals(role);
@@ -6960,7 +7095,7 @@ static void vm_net_mock_role_copy_from_v2(vm_net_mock_role_state *dst,
     dst->x = src->x;
     dst->y = src->y;
     dst->backpackItemCount = src->backpackItemCount;
-    dst->reserved1 = src->reserved1;
+    dst->designationId = 0;
     dst->nextBackpackSeq = src->nextBackpackSeq;
     memcpy(dst->backpackItems, src->backpackItems, sizeof(dst->backpackItems));
     vm_net_mock_role_init_default_equipment(dst);
@@ -7023,6 +7158,10 @@ static void vm_net_mock_role_normalize(vm_net_mock_role_state *role)
         role->sex = 0;
     if (role->backpackCapacity == 0 || role->backpackCapacity > VM_NET_MOCK_BACKPACK_CAPACITY)
         role->backpackCapacity = VM_NET_MOCK_BACKPACK_CAPACITY;
+    if (role->designationId >= VM_NET_MOCK_ROLE_DESIGNATION_COUNT)
+        role->designationId = 0;
+    if (!vm_net_mock_designation_is_unlocked(role, vm_net_mock_designation_by_id(role->designationId)))
+        role->designationId = vm_net_mock_role_best_designation(role)->id;
     role->level = vm_net_mock_role_level_from_exp(role->exp);
     vm_net_mock_role_sync_derived_vitals(role);
     role->scene[sizeof(role->scene) - 1] = 0;
@@ -11255,6 +11394,337 @@ static u32 vm_net_mock_build_role_action23_response(const u8 *request, u32 reque
     printf("[info][network] mock_role_action23 id=%u resp=%u\n", id, pos);
     vm_autotest_note("mock_role_action23 id=%u response=10/23 result=1 evidence=xxjh:0x103C830 field=id\n",
                      id);
+    return pos;
+}
+
+static bool vm_net_mock_is_role_designation23_request(const u8 *request, u32 requestLen,
+                                                      u8 *subtypeOut)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+    u8 subtype = 0;
+
+    if (subtypeOut)
+        *subtypeOut = 0;
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T')
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        return false;
+    if (object.major != 1 || object.kind != 0x17 ||
+        (object.subtype != 1 && object.subtype != 3))
+        return false;
+    subtype = object.subtype;
+    if (vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        return false;
+    if (subtypeOut)
+        *subtypeOut = subtype;
+    return offset == requestLen;
+}
+
+static bool vm_net_mock_parse_role_designation23_request_fields(const u8 *request, u32 requestLen,
+                                                                u8 *indexOut,
+                                                                u8 *typeOut,
+                                                                u8 *resultOut,
+                                                                u8 *pageOut,
+                                                                u32 *idOut,
+                                                                char *payloadHex,
+                                                                u32 payloadHexCap)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+    static const char hex[] = "0123456789ABCDEF";
+
+    if (indexOut)
+        *indexOut = 0xff;
+    if (typeOut)
+        *typeOut = 0xff;
+    if (resultOut)
+        *resultOut = 0xff;
+    if (pageOut)
+        *pageOut = 0xff;
+    if (idOut)
+        *idOut = 0;
+    if (payloadHex && payloadHexCap > 0)
+        payloadHex[0] = 0;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        return false;
+    if (object.major != 1 || object.kind != 0x17 ||
+        (object.subtype != 1 && object.subtype != 3))
+        return false;
+    if (payloadHex && payloadHexCap > 0)
+    {
+        u32 hexPos = 0;
+        u32 maxBytes = object.payloadLen < 16 ? object.payloadLen : 16;
+        for (u32 i = 0; i < maxBytes && hexPos + 3 < payloadHexCap; ++i)
+        {
+            payloadHex[hexPos++] = hex[object.payload[i] >> 4];
+            payloadHex[hexPos++] = hex[object.payload[i] & 0x0f];
+            if (i + 1 < maxBytes && hexPos + 1 < payloadHexCap)
+                payloadHex[hexPos++] = ' ';
+        }
+        payloadHex[hexPos] = 0;
+    }
+    (void)vm_net_mock_get_object_u8_field(object.payload, object.payloadLen, "index", indexOut);
+    (void)vm_net_mock_get_object_u8_field(object.payload, object.payloadLen, "type", typeOut);
+    (void)vm_net_mock_get_object_u8_field(object.payload, object.payloadLen, "result", resultOut);
+    (void)vm_net_mock_get_object_u8_field(object.payload, object.payloadLen, "page", pageOut);
+    (void)vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "id", idOut);
+    return true;
+}
+
+static bool vm_net_mock_append_role_designation_list_row(u8 *out, u32 outCap, u32 *pos,
+                                                         const vm_net_mock_designation_entry *entry)
+{
+    if (entry == NULL)
+        return false;
+
+    if (!vm_net_mock_seq_put_u8(out, outCap, pos, entry->id))
+        return false;
+    if (!vm_net_mock_seq_put_u8(out, outCap, pos, entry->fieldB))
+        return false;
+    if (!vm_net_mock_seq_put_string(out, outCap, pos, entry->name))
+        return false;
+    if (!vm_net_mock_seq_put_string(out, outCap, pos, entry->description))
+        return false;
+    if (!vm_net_mock_seq_put_string(out, outCap, pos, entry->overheadResource))
+        return false;
+    return true;
+}
+
+static bool vm_net_mock_build_role_designation_update_blob(u8 *out, u32 outCap, u32 *blobLenOut,
+                                                           u32 roleId,
+                                                           const vm_net_mock_designation_entry *entry)
+{
+    u32 pos = 0;
+
+    if (blobLenOut)
+        *blobLenOut = 0;
+    if (out == NULL || entry == NULL || roleId == 0)
+        return false;
+
+    /*
+     * net_handle_designationinfo_update(0x01010DB6) consumes each row as:
+     *   tagged u32 actorId,
+     *   tagged i8 fieldA,
+     *   tagged i8 fieldB,
+     *   len16 shortTitle,
+     *   len16 overheadResource.
+     * The resource slot is a named overhead badge/icon, so it must be a real
+     * local resource name rather than the human-readable GBK title.
+     */
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, roleId))
+        return false;
+    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, entry->id))
+        return false;
+    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, entry->fieldB))
+        return false;
+    if (!vm_net_mock_seq_put_string(out, outCap, &pos, entry->name))
+        return false;
+    if (!vm_net_mock_seq_put_string(out, outCap, &pos, entry->overheadResource))
+        return false;
+
+    if (blobLenOut)
+        *blobLenOut = pos;
+    return true;
+}
+
+static bool vm_net_mock_append_role_designation_update23_object(u8 *out, u32 outCap, u32 *pos,
+                                                                u32 roleId,
+                                                                const vm_net_mock_designation_entry *entry,
+                                                                u32 *designationInfoLenOut)
+{
+    u32 objectStart = 0;
+    u8 designationInfo[64];
+    u32 designationInfoLen = 0;
+
+    if (designationInfoLenOut)
+        *designationInfoLenOut = 0;
+    if (!vm_net_mock_build_role_designation_update_blob(designationInfo,
+                                                        sizeof(designationInfo),
+                                                        &designationInfoLen,
+                                                        roleId,
+                                                        entry))
+    {
+        return false;
+    }
+    if (designationInfoLen == 0 || designationInfoLen > 0xffffu)
+        return false;
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 0x17, 2, &objectStart))
+        return false;
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "count", 1))
+        return false;
+    if (!vm_net_mock_put_object_entry(out, outCap, pos, "designationinfo",
+                                      designationInfo, (u16)designationInfoLen))
+        return false;
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    if (designationInfoLenOut)
+        *designationInfoLenOut = designationInfoLen;
+    return true;
+}
+
+static u32 vm_net_mock_build_role_designation23_response(const u8 *request, u32 requestLen,
+                                                         u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u8 designationInfo[768];
+    u32 designationInfoLen = 0;
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 roleId = role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID;
+    const vm_net_mock_designation_entry *activeDesignation = vm_net_mock_role_designation(role);
+    u32 roleMoney = role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY;
+    u8 requestIndex = 0xff;
+    u8 requestType = 0xff;
+    u8 requestResult = 0xff;
+    u8 requestPage = 0xff;
+    u8 requestSubtype = 0;
+    u8 unlockedCount = 0;
+    u32 requestId = 0;
+    char titleUtf8[64];
+    char selectedTitleUtf8[64];
+    char requestPayloadHex[64];
+
+    if (outCap < pos || !vm_net_mock_is_role_designation23_request(request, requestLen, &requestSubtype))
+        return 0;
+    requestPayloadHex[0] = 0;
+    (void)vm_net_mock_parse_role_designation23_request_fields(request,
+                                                              requestLen,
+                                                              &requestIndex,
+                                                              &requestType,
+                                                              &requestResult,
+                                                              &requestPage,
+                                                              &requestId,
+                                                              requestPayloadHex,
+                                                              sizeof(requestPayloadHex));
+    if (role != NULL && role->designationId != activeDesignation->id)
+    {
+        role->designationId = activeDesignation->id;
+        vm_net_mock_role_db_save("role-designation-condition-refresh");
+    }
+    if (requestSubtype == 3)
+    {
+        const vm_net_mock_designation_entry *selectedDesignation =
+            vm_net_mock_designation_by_id(requestType == 0xff ? activeDesignation->id : requestType);
+        u32 updateInfoLen = 0;
+        if (!vm_net_mock_designation_is_unlocked(role, selectedDesignation))
+        {
+            if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x17, 3, &objectStart))
+                return 0;
+            if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 0))
+                return 0;
+            vm_net_mock_finish_wt_object(out, objectStart, pos);
+            vm_net_mock_finish_wt_packet(out, pos, 1);
+            vm_net_mock_gbk_label_to_utf8(selectedDesignation->name, selectedTitleUtf8, sizeof(selectedTitleUtf8));
+            printf("[info][network] mock_role_designation23_select role=%u result=0 locked=1 title=%s designation=%u money=%u min_money=%u req_index=%u req_type=%u req_payload=%s resp=%u\n",
+                   roleId,
+                   selectedTitleUtf8,
+                   selectedDesignation->id,
+                   roleMoney,
+                   selectedDesignation->minMoney,
+                   requestIndex,
+                   requestType,
+                   requestPayloadHex,
+                   pos);
+            vm_autotest_note("mock_role_designation23_select role=%u result=0 locked=1 designation=%u money=%u min_money=%u response=23/3 evidence=JianghuOL.CBE:0x0102A93E\n",
+                             roleId,
+                             selectedDesignation->id,
+                             roleMoney,
+                             selectedDesignation->minMoney);
+            return pos;
+        }
+        if (role != NULL)
+        {
+            role->designationId = selectedDesignation->id;
+            vm_net_mock_role_db_save("role-designation-select");
+            activeDesignation = selectedDesignation;
+        }
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x17, 3, &objectStart))
+            return 0;
+        if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
+            return 0;
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        if (!vm_net_mock_append_role_designation_update23_object(out,
+                                                                 outCap,
+                                                                 &pos,
+                                                                 roleId,
+                                                                 selectedDesignation,
+                                                                 &updateInfoLen))
+        {
+            return 0;
+        }
+        vm_net_mock_finish_wt_packet(out, pos, 2);
+        vm_net_mock_gbk_label_to_utf8(selectedDesignation->name, selectedTitleUtf8, sizeof(selectedTitleUtf8));
+        printf("[info][network] mock_role_designation23_select role=%u result=1 title=%s designation=%u field_b=%u money=%u min_money=%u overhead=%s update=23/2 designationinfo_len=%u req_index=%u req_type=%u req_payload=%s resp=%u\n",
+               roleId,
+               selectedTitleUtf8,
+               selectedDesignation->id,
+               selectedDesignation->fieldB,
+               roleMoney,
+               selectedDesignation->minMoney,
+               selectedDesignation->overheadResource[0] ? selectedDesignation->overheadResource : "-",
+               updateInfoLen,
+               requestIndex,
+               requestType,
+               requestPayloadHex,
+               pos);
+        vm_autotest_note("mock_role_designation23_select role=%u result=1 designation=%u response=23/3+23/2 evidence=JianghuOL.CBE:0x0102A93E select,0x01010DB6 scene-node-update\n",
+                         roleId,
+                         selectedDesignation->id);
+        return pos;
+    }
+
+    for (u32 i = 0; i < vm_net_mock_designation_entry_count(); ++i)
+    {
+        const vm_net_mock_designation_entry *entry = &g_vm_net_mock_designation_entries[i];
+        if (!vm_net_mock_designation_is_unlocked(role, entry))
+            continue;
+        if (!vm_net_mock_append_role_designation_list_row(designationInfo,
+                                                          sizeof(designationInfo),
+                                                          &designationInfoLen,
+                                                          entry))
+        {
+            return 0;
+        }
+        ++unlockedCount;
+    }
+    if (unlockedCount == 0 || designationInfoLen == 0 || designationInfoLen > 0xffffu)
+        return 0;
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x17, 1, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "equiptype", activeDesignation->id))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "count", unlockedCount))
+        return 0;
+    if (!vm_net_mock_put_object_entry(out, outCap, &pos, "designationinfo",
+                                      designationInfo, (u16)designationInfoLen))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    vm_net_mock_gbk_label_to_utf8(activeDesignation->name, titleUtf8, sizeof(titleUtf8));
+    printf("[info][network] mock_role_designation23_list role=%u count=%u catalog=%u active=%u title=%s money=%u overhead=%s req_index=%u req_type=%u req_result=%u req_page=%u req_id=%u req_payload=%s designationinfo_len=%u resp=%u\n",
+           roleId,
+           unlockedCount,
+           vm_net_mock_designation_entry_count(),
+           activeDesignation->id,
+           titleUtf8,
+           roleMoney,
+           activeDesignation->overheadResource[0] ? activeDesignation->overheadResource : "-",
+           requestIndex,
+           requestType,
+           requestResult,
+           requestPage,
+           requestId,
+           requestPayloadHex,
+           designationInfoLen,
+           pos);
+    vm_autotest_note("mock_role_designation23_list role=%u count=%u active=%u designationinfo_len=%u response=23/1 evidence=JianghuOL.CBE:0x0102A93E runtime=wt23/1-index\n",
+                     roleId,
+                     unlockedCount,
+                     activeDesignation->id,
+                     designationInfoLen);
     return pos;
 }
 
@@ -18414,11 +18884,12 @@ static const char *vm_net_mock_actor_resource_name(u8 actorJob, u8 actorSex)
 static const char *vm_net_mock_actor_preview_image_name(u8 actorJob, u8 actorSex)
 {
     const char *overrideName = vm_net_mock_env_str("CBE_ACTOR_PREVIEW_IMAGE", "");
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
     (void)actorJob;
     (void)actorSex;
     if (overrideName != NULL && overrideName[0] != 0)
         return overrideName;
-    return "";
+    return vm_net_mock_role_designation(role)->overheadResource;
 }
 
 static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
@@ -19907,6 +20378,13 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     if (hookedLen)
     {
         vm_net_log_handled_packet("builtin-settings-unstuck", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_role_designation23_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-role-designation23", request, requestLen, hookedLen);
         return hookedLen;
     }
 

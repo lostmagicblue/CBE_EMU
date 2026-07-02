@@ -186,8 +186,9 @@ Login and scene enter:
   name so map-side role information matches title selection.
 - scene/login actorinfo now derives display-only RPG properties from the active
   role instead of writing zeros:
-  - title is wealth based: `<5000` `一贫如洗`, `<100000` `小有积蓄`,
-    `<1000000` `富甲一方`, otherwise `富可敌国`;
+  - title is wealth based through the designation catalog documented in
+    `2026-07-02-role-designation-page.md`; only titles whose money requirement
+    is met are returned by the `23/1` title page list;
   - display/sect defaults to `散人`;
   - spouse defaults to `无` through the group/type-1 `name` field instead of the
     old hard-coded `Codex`;
