@@ -5948,9 +5948,9 @@ static bool vm_net_mock_scene_name_has_path_separator(const char *scene)
 
 static bool vm_net_mock_scene_name_is_download_key(const char *scene)
 {
-    return scene != NULL &&
-           scene[0] != 0 &&
-           !vm_net_mock_scene_name_has_path_separator(scene);
+    return false;
+    //return scene != NULL &&
+     //      scene[0] != 0 && !vm_net_mock_scene_name_has_path_separator(scene);
 }
 
 static bool vm_net_mock_open_server_scene_resource(const char *scene,
@@ -9190,15 +9190,40 @@ static bool vm_net_mock_prepare_scene_enter_resources(vm_net_mock_scene_change_t
     return true;
 }
 
+static bool vm_net_mock_get_scene_center_spawn_from_sce(const char *scene,
+                                                         u16 *xOut,
+                                                         u16 *yOut);
+
 static void vm_net_mock_defer_scene_enter_completion(const vm_net_mock_scene_change_target *target,
-                                                     const char *phase,
-                                                     const char *missingResource)
+                                                      const char *phase,
+                                                      const char *missingResource)
 {
     char missingUtf8[128];
 
     if (target == NULL || target->scene[0] == 0)
         return;
     g_vm_net_mock_last_scene_change_target = *target;
+    /*
+     * Same fix as remember_target: if the scene exists locally the download
+     * flag is stale and will cause the 25/5 follow-up to defer again.
+     */
+    if (g_vm_net_mock_last_scene_change_target.needsSceneDownload &&
+        vm_net_mock_scene_resource_exists(g_vm_net_mock_last_scene_change_target.scene))
+    {
+        g_vm_net_mock_last_scene_change_target.needsSceneDownload = false;
+        if (g_vm_net_mock_last_scene_change_target.x == 0 &&
+            g_vm_net_mock_last_scene_change_target.y == 0)
+        {
+            u16 cx = 0, cy = 0;
+            if (vm_net_mock_get_scene_center_spawn_from_sce(
+                    g_vm_net_mock_last_scene_change_target.scene, &cx, &cy))
+            {
+                g_vm_net_mock_last_scene_change_target.x = cx;
+                g_vm_net_mock_last_scene_change_target.y = cy;
+                g_vm_net_mock_last_scene_change_target.hasSceEntry = true;
+            }
+        }
+    }
     g_vm_net_mock_last_scene_change_target_valid = true;
     vm_net_mock_gbk_label_to_utf8((missingResource != NULL && missingResource[0] != 0) ?
                                       missingResource :
@@ -9880,6 +9905,33 @@ static void vm_net_mock_remember_scene_change_target(const vm_net_mock_scene_cha
     if (target == NULL || target->scene[0] == 0)
         return;
     g_vm_net_mock_last_scene_change_target = *target;
+    /*
+     * Clear needsSceneDownload when the scene file already exists locally.
+     * Stale download flags from earlier resolution paths (e.g. edge-portal
+     * target-entry mismatch) cause prepare_scene_enter_resources to return
+     * false, which defers completion and triggers a re-entry loop.
+     */
+    if (g_vm_net_mock_last_scene_change_target.needsSceneDownload &&
+        vm_net_mock_scene_resource_exists(g_vm_net_mock_last_scene_change_target.scene))
+    {
+        g_vm_net_mock_last_scene_change_target.needsSceneDownload = false;
+        if (g_vm_net_mock_last_scene_change_target.x == 0 &&
+            g_vm_net_mock_last_scene_change_target.y == 0)
+        {
+            u16 cx = 0, cy = 0;
+            if (vm_net_mock_get_scene_center_spawn_from_sce(
+                    g_vm_net_mock_last_scene_change_target.scene, &cx, &cy))
+            {
+                g_vm_net_mock_last_scene_change_target.x = cx;
+                g_vm_net_mock_last_scene_change_target.y = cy;
+                g_vm_net_mock_last_scene_change_target.hasSceEntry = true;
+            }
+        }
+        printf("[info][network] remember_target cleared needsDownload scene=%s pos=(%u,%u)\n",
+               g_vm_net_mock_last_scene_change_target.scene,
+               g_vm_net_mock_last_scene_change_target.x,
+               g_vm_net_mock_last_scene_change_target.y);
+    }
     g_vm_net_mock_last_scene_change_target_valid = true;
     ++g_vm_net_mock_last_scene_change_target_serial;
     if (g_vm_net_mock_last_scene_change_target_serial == 0)
@@ -10243,14 +10295,32 @@ static void vm_net_mock_get_scene_change_target(const u8 *request, u32 requestLe
 
     if (vm_net_mock_scene_resource_exists(mapId))
     {
+        u16 centerX = 0;
+        u16 centerY = 0;
         snprintf(target->scene, sizeof(target->scene), "%s",
                  vm_net_mock_normalize_scene_name_for_enter(mapId));
         target->x = 0;
         target->y = 0;
         target->hasSceEntry = false;
-        target->needsSceneDownload = true;
-        printf("[warn][network] mock_scene_entry_missing scene=%s exit=%u action=no-center-fallback\n",
-               mapId, exitId);
+        /*
+         * The scene file already exists on disk — it is not a download-key
+         * resource that needs network transfer.  Falling back to
+         * needsSceneDownload=true here forces prepare_scene_enter_resources
+         * to return false, which defers completion and keeps the scene-change
+         * target pending; the subsequent 25/5 follow-up then re-sends 30/2 +
+         * 30/1 and the client re-enters the same screen in a loop.
+         *
+         * Use the SCE centre spawn when available so the client lands at a
+         * valid position instead of (0,0).
+         */
+        if (vm_net_mock_get_scene_center_spawn_from_sce(mapId, &centerX, &centerY))
+        {
+            target->x = centerX;
+            target->y = centerY;
+            target->hasSceEntry = true;
+        }
+        printf("[info][network] mock_scene_entry_local_fallback scene=%s exit=%u pos=(%u,%u) action=use-center-spawn\n",
+               mapId, exitId, target->x, target->y);
         return;
     }
 
@@ -13434,6 +13504,9 @@ static u32 vm_net_mock_build_mmgame_scene_transfer_followup_response(const u8 *r
     if (outCap < pos || !vm_net_mock_is_mmgame_scene_transfer_followup_request(request, requestLen))
         return 0;
     target = g_vm_net_mock_last_scene_change_target;
+    printf("[info][network] mmgame-transfer-followup target scene=%s needsDownload=%u x=%u y=%u exit=%u valid=%u\n",
+           target.scene, target.needsSceneDownload ? 1 : 0, target.x, target.y, target.exitId,
+           g_vm_net_mock_last_scene_change_target_valid ? 1 : 0);
     if (vm_net_mock_scene_change_target_is_unresolved_existing_scene(&target))
     {
         u32 ackLen = vm_net_mock_build_scene_default_event_response(out, outCap);
@@ -13451,6 +13524,29 @@ static u32 vm_net_mock_build_mmgame_scene_transfer_followup_response(const u8 *r
     resourcesReady = vm_net_mock_prepare_scene_enter_resources(&target,
                                                                missingResource,
                                                                sizeof(missingResource));
+    /*
+     * Re-evaluate resource readiness against the actual on-disk scene file
+     * rather than trusting the possibly-stale needsSceneDownload flag carried
+     * from the remembered target.  A scene that exists locally is ready
+     * regardless of whether the original request thought it needed downloading.
+     */
+    if (!resourcesReady && vm_net_mock_scene_resource_exists(target.scene))
+    {
+        target.needsSceneDownload = false;
+        if (target.x == 0 && target.y == 0)
+        {
+            u16 cx = 0, cy = 0;
+            if (vm_net_mock_get_scene_center_spawn_from_sce(target.scene, &cx, &cy))
+            {
+                target.x = cx;
+                target.y = cy;
+                target.hasSceEntry = true;
+            }
+        }
+        resourcesReady = vm_net_mock_prepare_scene_enter_resources(&target,
+                                                                   missingResource,
+                                                                   sizeof(missingResource));
+    }
     g_vm_net_mock_last_scene_change_target = target;
 
     if (!vm_net_mock_append_scene_resource_followup_objects(out, outCap, &pos, &objectCount,
