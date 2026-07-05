@@ -4129,12 +4129,12 @@ u8 *SimpleRamMatch(u8 *start, u8 *end, u8 *matchStart, int matchLen)
 #define LOAD_CBE_PATH "CBE/鬼吹灯.CBE"
 #define LOAD_CBE_PATH "CBE/皇牌空战.CBE"
 #define LOAD_CBE_PATH "CBE/涂鸦跳跃.CBE"
-#define LOAD_CBE_PATH "CBE/江湖OL.CBE"
 #define LOAD_CBE_PATH "CBE/血剑Online.CBE"
 #define LOAD_CBE_PATH "CBE/愤怒的小鸟.CBE"
 #define LOAD_CBE_PATH "CBE/歪歪猫发条城历险记V100.CBE"
 #define LOAD_CBE_PATH "CBE/武林外传(新品).CBE"
 #define LOAD_CBE_PATH "CBE/众神之战.CBE"
+#define LOAD_CBE_PATH "CBE/恶魔城登录版.CBE"
 #define LOAD_CBE_PATH "CBE/江湖OL.CBE"
 
 
