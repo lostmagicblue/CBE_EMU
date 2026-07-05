@@ -1,6 +1,6 @@
 CC := gcc
 
-OBJS := obj/gifDecode.o obj/cbeParser.o obj/mystd.o obj/fontEngine.o obj/vmMalloc.o obj/fileIoEngine.o obj/lcd.o obj/main.o
+OBJS := obj/gifDecode.o obj/cbeParser.o obj/mystd.o obj/fontEngine.o obj/vmMalloc.o obj/fileIoEngine.o obj/lcd.o obj/resource.o obj/main.o
 
 UNICORN = Lib/unicorn-2.1.4/unicorn-import.lib
 
@@ -28,5 +28,7 @@ obj/main.o: src/main.c src/mock-server.c src/vmFunc.c src/hookRam.c src/vmEvent.
 	$(CC) -g  -w -c src/main.c -o obj/main.o
 obj/gifDecode.o: src/gifDecode.c
 	$(CC) -g  -w -c src/gifDecode.c -o obj/gifDecode.o
+obj/resource.o: resource.rc
+	windres $< -O coff -o $@	
 build:
 	$(CC) $(OBJS) -o bin/main.exe -g -w -lpthread -liconv -lm -lmingw32 -lkernel32 -Wall -lws2_32 -DNETWORK_SUPPORT $(UNICORN) -L$(SDL2)/lib/ -lSDL2main -lSDL2
