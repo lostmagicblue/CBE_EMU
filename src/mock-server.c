@@ -34,6 +34,7 @@ static u32 g_netMockShopWCoinBalance = 0;
 static u8 g_netMockBackpackPreferRoleListAfterShopBuy = 0;
 static bool g_vm_net_mock_update_completed_reenter_pending = false;
 static char g_vm_net_mock_update_completed_name[64];
+static char completedScene[64];
 
 static bool vm_net_mock_request_contains(const u8 *request, u32 requestLen, const char *needle)
 {
@@ -5872,11 +5873,34 @@ static char g_vm_net_mock_scene_moveinfo_npc_pending_scene[64];
 static bool g_vm_net_mock_scene_moveinfo_npc_pending = false;
 static char g_vm_net_mock_scene_moveinfo_npc_seeded_scene[64];
 static bool g_vm_net_mock_scene_moveinfo_npc_seeded = false;
+static char g_vm_net_mock_scene_npcinfo11_pending_scene[64];
+static bool g_vm_net_mock_scene_npcinfo11_pending = false;
 
 static bool vm_net_mock_read_current_player_grid(u32 *nodeOut, u32 *actorIdOut,
                                                  u16 *gridXOut, u16 *gridYOut,
                                                  u16 *targetXOut, u16 *targetYOut);
 static bool vm_net_mock_snapshot_current_player_pos(const char *reason);
+
+static void vm_net_mock_mark_scene_npcinfo11_pending(const char *scene)
+{
+    if (scene == NULL || scene[0] == 0)
+        return;
+    g_vm_net_mock_scene_npcinfo11_pending = true;
+    snprintf(g_vm_net_mock_scene_npcinfo11_pending_scene,
+             sizeof(g_vm_net_mock_scene_npcinfo11_pending_scene),
+             "%s", scene);
+}
+
+static bool vm_net_mock_is_scene_npcinfo11_pending(const char *scene)
+{
+    if (!g_vm_net_mock_scene_npcinfo11_pending)
+        return false;
+    if (scene == NULL || scene[0] == 0 ||
+        g_vm_net_mock_scene_npcinfo11_pending_scene[0] == 0 ||
+        strcmp(g_vm_net_mock_scene_npcinfo11_pending_scene, scene) != 0)
+        return false;
+    return true;
+}
 
 static void vm_net_mock_reset_scene_moveinfo_npc_seed_if_needed(const char *scene)
 {
@@ -10280,6 +10304,7 @@ static void vm_net_mock_get_scene_change_target(const u8 *request, u32 requestLe
         target->needsSceneDownload = false;
         printf("[info][network] mock_scene_target_inherit_completed scene=%s pos=(%u,%u) exit=%u\n",
                target->scene, target->x, target->y, exitId);
+        snprintf(completedScene, sizeof(completedScene), "%s", target->scene);
         return;
     }
 
@@ -12135,16 +12160,272 @@ typedef struct
     const char *scriptName;
 } vm_net_mock_scene_npcinfo_seed;
 
+static vm_net_mock_scene_npcinfo_seed g_vm_net_mock_scene_npcinfo_seeds_cache[16];
+static size_t g_vm_net_mock_scene_npcinfo_seeds_cache_count = 0;
+static char g_vm_net_mock_scene_npcinfo_seeds_cache_scene[64];
+static char g_vm_net_mock_scene_npcinfo_strings_cache[16][3][64];
+
+static void vm_net_mock_json_skip_value(u8 *buf, u32 len, u32 *p)
+{
+    while (*p < len && buf[*p] <= ' ') (*p)++;
+    if (*p >= len) return;
+
+    switch (buf[*p])
+    {
+    case '"':
+        (*p)++;
+        while (*p < len)
+        {
+            if (buf[*p] == '\\') { if (*p + 1 < len) (*p) += 2; else { (*p)++; } continue; }
+            if (buf[*p] == '"') { (*p)++; break; }
+            (*p)++;
+        }
+        break;
+    case '{':
+    {
+        int depth = 1;
+        (*p)++;
+        while (*p < len && depth > 0)
+        {
+            if (buf[*p] == '"') {
+                (*p)++;
+                while (*p < len) {
+                    if (buf[*p] == '\\') { if (*p + 1 < len) (*p) += 2; else { (*p)++; } continue; }
+                    if (buf[*p] == '"') { (*p)++; break; }
+                    (*p)++;
+                }
+                continue;
+            }
+            if (buf[*p] == '{') depth++;
+            if (buf[*p] == '}') depth--;
+            (*p)++;
+        }
+        break;
+    }
+    case '[':
+    {
+        int depth = 1;
+        (*p)++;
+        while (*p < len && depth > 0)
+        {
+            if (buf[*p] == '"') {
+                (*p)++;
+                while (*p < len) {
+                    if (buf[*p] == '\\') { if (*p + 1 < len) (*p) += 2; else { (*p)++; } continue; }
+                    if (buf[*p] == '"') { (*p)++; break; }
+                    (*p)++;
+                }
+                continue;
+            }
+            if (buf[*p] == '[') depth++;
+            if (buf[*p] == ']') depth--;
+            (*p)++;
+        }
+        break;
+    }
+    default:
+        if (buf[*p] == '-' || (buf[*p] >= '0' && buf[*p] <= '9'))
+        {
+            if (buf[*p] == '-') (*p)++;
+            while (*p < len && buf[*p] >= '0' && buf[*p] <= '9') (*p)++;
+        }
+        else
+        {
+            while (*p < len && buf[*p] > ' ' && buf[*p] != ',' && buf[*p] != '}' && buf[*p] != ']')
+                (*p)++;
+        }
+        break;
+    }
+}
+
+static bool vm_net_mock_parse_scene_npcinfo_from_json(const char *scene)
+{
+    u8 buf[16384];
+    u32 len = vm_net_mock_load_response_file("JHOnlineData/npcs.json", buf, sizeof(buf));
+    u32 p = 0;
+    size_t npcIndex = 0;
+    char sceneKey[64];
+    char field[32];
+    char strval[64];
+
+    g_vm_net_mock_scene_npcinfo_seeds_cache_count = 0;
+
+    if (scene == NULL || scene[0] == 0 || len == 0)
+        return false;
+
+    while (p < len && buf[p] <= ' ') p++;
+    if (p >= len || buf[p] != '{') return false;
+    p++;
+
+    while (p < len)
+    {
+        while (p < len && buf[p] <= ' ') p++;
+        if (p >= len || buf[p] == '}') { p++; break; }
+
+        if (buf[p] != '"') break;
+        p++;
+        u32 keyLen = 0;
+        while (p < len && buf[p] != '"' && keyLen < sizeof(sceneKey) - 1)
+        {
+            if (buf[p] == '\\') { p++; if (p >= len) break; }
+            sceneKey[keyLen++] = buf[p++];
+        }
+        sceneKey[keyLen] = 0;
+        if (p >= len) break;
+        p++;
+
+        while (p < len && buf[p] <= ' ') p++;
+        if (p >= len || buf[p] != ':') break;
+        p++;
+        if (strcmp(scene, sceneKey) == 0)
+        {
+            while (p < len && buf[p] <= ' ') p++;
+            if (p >= len || buf[p] != '[') return false;
+            p++;
+
+            while (p < len && npcIndex < 16)
+            {
+                while (p < len && buf[p] <= ' ') p++;
+                if (p >= len || buf[p] == ']') { p++; break; }
+                if (buf[p] != '{') break;
+                p++;
+
+                u32 actorId = 0, x = 0, y = 0, finalActorId = 0;
+                char displayName[64] = "", actorResource[64] = "", scriptName[64] = "";
+
+                while (p < len)
+                {
+                    while (p < len && buf[p] <= ' ') p++;
+                    if (p >= len || buf[p] == '}') { p++; break; }
+
+                    if (buf[p] != '"') break;
+                    p++;
+                    u32 fLen = 0;
+                    while (p < len && buf[p] != '"' && fLen < sizeof(field) - 1)
+                    {
+                        if (buf[p] == '\\') { p++; if (p >= len) break; }
+                        field[fLen++] = buf[p++];
+                    }
+                    field[fLen] = 0;
+                    if (p >= len) break;
+                    p++;
+
+                    while (p < len && buf[p] <= ' ') p++;
+                    if (p >= len || buf[p] != ':') break;
+                    p++;
+                    while (p < len && buf[p] <= ' ') p++;
+
+                    if (buf[p] == '"')
+                    {
+                        p++;
+                        u32 vLen = 0;
+                        while (p < len && buf[p] != '"' && vLen < sizeof(strval) - 1)
+                        {
+                            if (buf[p] == '\\') { p++; if (p >= len) break; }
+                            strval[vLen++] = buf[p++];
+                        }
+                        strval[vLen] = 0;
+                        if (p < len) p++;
+
+                        if (strcmp(field, "displayName") == 0) snprintf(displayName, sizeof(displayName), "%s", strval);
+                        else if (strcmp(field, "actorResource") == 0) snprintf(actorResource, sizeof(actorResource), "%s", strval);
+                        else if (strcmp(field, "scriptName") == 0) snprintf(scriptName, sizeof(scriptName), "%s", strval);
+                    }
+                    else if ((buf[p] >= '0' && buf[p] <= '9') || buf[p] == '-')
+                    {
+                        bool neg = (buf[p] == '-');
+                        if (neg) p++;
+                        u32 num = 0;
+                        while (p < len && buf[p] >= '0' && buf[p] <= '9')
+                        {
+                            num = num * 10 + (buf[p] - '0');
+                            p++;
+                        }
+                        if (neg) num = (u32)(-(int)num);
+
+                        if (strcmp(field, "actorId") == 0) actorId = num;
+                        else if (strcmp(field, "x") == 0) x = num;
+                        else if (strcmp(field, "y") == 0) y = num;
+                        else if (strcmp(field, "finalActorId") == 0) finalActorId = num;
+                    }
+                    else break;
+
+                    while (p < len && buf[p] <= ' ') p++;
+                    if (p < len && buf[p] == ',') p++;
+                }
+
+                if (npcIndex < 16 && actorId != 0)
+                {
+                    if (finalActorId == 0) finalActorId = actorId;
+
+                    snprintf(g_vm_net_mock_scene_npcinfo_strings_cache[npcIndex][0], 64, "%s", displayName);
+                    snprintf(g_vm_net_mock_scene_npcinfo_strings_cache[npcIndex][1], 64, "%s", actorResource);
+                    snprintf(g_vm_net_mock_scene_npcinfo_strings_cache[npcIndex][2], 64, "%s", scriptName);
+
+                    g_vm_net_mock_scene_npcinfo_seeds_cache[npcIndex].actorId = actorId;
+                    g_vm_net_mock_scene_npcinfo_seeds_cache[npcIndex].x = x;
+                    g_vm_net_mock_scene_npcinfo_seeds_cache[npcIndex].y = y;
+                    g_vm_net_mock_scene_npcinfo_seeds_cache[npcIndex].finalActorId = finalActorId;
+                    g_vm_net_mock_scene_npcinfo_seeds_cache[npcIndex].displayName = g_vm_net_mock_scene_npcinfo_strings_cache[npcIndex][0];
+                    g_vm_net_mock_scene_npcinfo_seeds_cache[npcIndex].actorResource = g_vm_net_mock_scene_npcinfo_strings_cache[npcIndex][1];
+                    g_vm_net_mock_scene_npcinfo_seeds_cache[npcIndex].scriptName = g_vm_net_mock_scene_npcinfo_strings_cache[npcIndex][2];
+
+                    npcIndex++;
+                }
+
+                while (p < len && buf[p] <= ' ') p++;
+                if (p < len && buf[p] == ',') p++;
+            }
+            if (npcIndex > 0)
+            {
+                g_vm_net_mock_scene_npcinfo_seeds_cache_count = npcIndex;
+                //snprintf(g_vm_net_mock_scene_npcinfo_seeds_cache_scene, sizeof(g_vm_net_mock_scene_npcinfo_seeds_cache_scene), "%s", scene);
+            }
+            printf("[info]g_vm_net_mock_scene_npcinfo_seeds_cache_count=%u scene=%s \n",
+           npcIndex,scene);
+            return npcIndex > 0;
+        }
+        else
+        {
+            vm_net_mock_json_skip_value(buf, len, &p);
+        }
+
+        while (p < len && buf[p] <= ' ') p++;
+        if (p < len && buf[p] == ',') p++;
+    }
+
+    return false;
+}
+
+static bool vm_net_mock_parse_scene_npcinfo_from_sce(const char *scene)
+{
+    printf("[info]vm_net_mock_parse_scene_npcinfo_from_sce scene=%s, completedScene=%s \n",scene, completedScene);
+    g_vm_net_mock_scene_npcinfo_seeds_cache_count = 0;
+    if (vm_net_mock_parse_scene_npcinfo_from_json(scene))
+        return true;
+    return false;
+}
+
 static bool vm_net_mock_select_scene_npcinfo_seeds(const char *scene,
                                                    const vm_net_mock_scene_npcinfo_seed **seedsOut,
                                                    size_t *seedCountOut)
 {
-    if (seedsOut)
+     if (seedsOut)
         *seedsOut = NULL;
     if (seedCountOut)
         *seedCountOut = 0;
-    (void)scene;
-    return false;
+    if (scene == NULL)
+        return false;
+
+    if (strcmp(g_vm_net_mock_scene_npcinfo_seeds_cache_scene, scene) != 0)
+    {
+        if (!vm_net_mock_parse_scene_npcinfo_from_sce(scene))
+            return false;
+    }
+
+    *seedsOut = g_vm_net_mock_scene_npcinfo_seeds_cache;
+    *seedCountOut = g_vm_net_mock_scene_npcinfo_seeds_cache_count;
+    return g_vm_net_mock_scene_npcinfo_seeds_cache_count > 0;
 }
 
 static bool vm_net_mock_build_scene_npcinfo_blob(const char *scene,
@@ -12192,8 +12473,13 @@ static bool vm_net_mock_build_scene_npcinfo_blob(const char *scene,
                 return false;
             if (!vm_net_mock_seq_put_string(npcInfo, npcInfoCap, &npcInfoLen, seed->displayName))
                 return false;
-            if (!vm_net_mock_seq_put_string(npcInfo, npcInfoCap, &npcInfoLen, seed->actorResource))
-                return false;
+            {
+                const char *resource = seed->actorResource;
+                if (resource == NULL || resource[0] == 0)
+                    resource = "n_solider1";
+                if (!vm_net_mock_seq_put_string(npcInfo, npcInfoCap, &npcInfoLen, resource))
+                    return false;
+            }
             if (!vm_net_mock_seq_put_string(npcInfo, npcInfoCap, &npcInfoLen, seed->scriptName))
                 return false;
             if (!vm_net_mock_seq_put_string(npcInfo, npcInfoCap, &npcInfoLen, seed->displayName))
@@ -12215,7 +12501,7 @@ static bool vm_net_mock_append_scene_room_npc_object(u8 *out, u32 outCap, u32 *p
 {
     u32 objectStart = 0;
     u8 roomList[128];
-    u8 npcInfo[256];
+    u8 npcInfo[1024];
     u8 colNames[64];
     u32 roomListLen = 0;
     u32 npcInfoLen = 0;
@@ -12236,6 +12522,8 @@ static bool vm_net_mock_append_scene_room_npc_object(u8 *out, u32 outCap, u32 *p
         return false;
     if (!vm_net_mock_build_scene_npcinfo_blob(scene, npcInfo, sizeof(npcInfo), &npcNum, &npcInfoLen))
         return false;
+    printf("[info][network] vm_net_mock_append_scene_room_npc_object: scene=%s npcNum=%u npcInfoLen=%u\n",
+           scene ? scene : "NULL", (u32)npcNum, (u32)npcInfoLen);
     seedSceneNpcInfo = npcNum > 0;
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 0x1e, 3, &objectStart))
         return false;
@@ -12499,7 +12787,7 @@ static bool vm_net_mock_append_fb_target_scene_npcs11_object(u8 *out, u32 outCap
                                                              u32 *npcInfoLenOut)
 {
     u32 objectStart = 0;
-    u8 npcInfo[256];
+    u8 npcInfo[1024];
     u32 npcInfoLen = 0;
     u8 npcNum = 0;
 
@@ -12509,6 +12797,8 @@ static bool vm_net_mock_append_fb_target_scene_npcs11_object(u8 *out, u32 outCap
         *npcInfoLenOut = 0;
     if (!vm_net_mock_build_scene_npcinfo_blob(scene, npcInfo, sizeof(npcInfo), &npcNum, &npcInfoLen))
         return false;
+    printf("[info][network] vm_net_mock_append_fb_target_scene_npcs11_object: scene=%s npcNum=%u npcInfoLen=%u\n",
+           scene, (u32)npcNum, (u32)npcInfoLen);
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 0x1b, 11, &objectStart))
         return false;
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "npcnum", npcNum))
@@ -14640,7 +14930,7 @@ static bool vm_net_mock_parse_actor_moveinfo_pos(const u8 *moveInfo,
         *yOut = y;
     return true;
 }
-
+static bool ischangescene = false;
 static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 requestLen,
                                                          u8 *out, u32 outCap)
 {
@@ -14651,10 +14941,10 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
     bool snappedPos = false;
     const char *scene = NULL;
     vm_net_mock_role_state *role = vm_net_mock_active_role();
-    const char sourceScene01[] = "\x30\x31\xcc\xd2\xbb\xa8\xb5\xba\x5f\x30\x31\x2e\x73\x63\x65"; /* GBK: 01TaoHuaDao_01.sce */
-    const char targetScene01[] = "\x30\x31\xcc\xd2\xbb\xa8\xb5\xba\x5f\x30\x32\x2e\x73\x63\x65"; /* GBK: 01TaoHuaDao_02.sce */
-    const char sourceScene03[] = "\x30\x31\xcc\xd2\xbb\xa8\xb5\xba\x5f\x30\x33\x2e\x73\x63\x65"; /* GBK: 01TaoHuaDao_03.sce */
-    const char targetScene03[] = "\x30\x31\xcc\xd2\xbb\xa8\xb5\xba\x5f\x30\x34\x2e\x73\x63\x65"; /* GBK: 01TaoHuaDao_04.sce */
+    //const char sourceScene01[] = "\x30\x31\xcc\xd2\xbb\xa8\xb5\xba\x5f\x30\x31\x2e\x73\x63\x65"; /* GBK: 01TaoHuaDao_01.sce */
+    //const char targetScene01[] = "\x30\x31\xcc\xd2\xbb\xa8\xb5\xba\x5f\x30\x32\x2e\x73\x63\x65"; /* GBK: 01TaoHuaDao_02.sce */
+    //const char sourceScene03[] = "\x30\x31\xcc\xd2\xbb\xa8\xb5\xba\x5f\x30\x33\x2e\x73\x63\x65"; /* GBK: 01TaoHuaDao_03.sce */
+    //const char targetScene03[] = "\x30\x31\xcc\xd2\xbb\xa8\xb5\xba\x5f\x30\x34\x2e\x73\x63\x65"; /* GBK: 01TaoHuaDao_04.sce */
     u16 gridX = 0;
     u16 gridY = 0;
     u16 uploadedX = 0;
@@ -14671,7 +14961,10 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
         role != NULL &&
         vm_net_mock_scene_name_is_safe(role->scene))
     {
-        scene = role->scene;
+        if(completedScene[0] != '\0')    
+            scene = completedScene;//role->scene;
+        else
+            scene = role->scene;
         gridX = uploadedX;
         gridY = uploadedY;
         vm_net_mock_remember_moveinfo_source_pos(scene, gridX, gridY, "moveinfo-upload-packet");
@@ -14681,7 +14974,10 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
     else
     {
         snappedPos = vm_net_mock_snapshot_current_player_pos("moveinfo-upload");
-        scene = vm_net_mock_current_scene_name();
+        if(completedScene[0] != '\0')   
+            scene = completedScene;//vm_net_mock_current_scene_name();
+        else
+            scene = vm_net_mock_current_scene_name();
         gridX = vm_net_mock_scene_spawn_x();
         gridY = vm_net_mock_scene_spawn_y();
         if (snappedPos && vm_net_mock_scene_name_is_safe(scene) && gridX != 0 && gridY != 0)
@@ -14695,35 +14991,35 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
      * never emits the later 2/3 or 4/1 scene-change request. Treat the narrow
      * approach band as the server-side completion for this known portal only.
      */
-    if (snappedPos &&
-        strcmp(scene, sourceScene01) == 0 &&
-        gridX >= 208 && gridX <= 256 &&
-        gridY >= 408 && gridY <= 448)
-    {
-        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 1, &objectStart))
-            return 0;
-        if (!vm_net_mock_put_scene_fields_with(out, outCap, &pos, false, false, 0, targetScene01, 80, 60))
-            return 0;
-        vm_net_mock_finish_wt_object(out, objectStart, pos);
-        vm_net_mock_finish_wt_packet(out, pos, 1);
-        vm_net_mock_save_player_pos_state(targetScene01, 80, 60, "moveinfo-taohuadao-bottom-portal");
-        return pos;
-    }
+    // if (snappedPos &&
+    //     strcmp(scene, sourceScene01) == 0 &&
+    //     gridX >= 208 && gridX <= 256 &&
+    //     gridY >= 408 && gridY <= 448)
+    // {
+    //     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 1, &objectStart))
+    //         return 0;
+    //     if (!vm_net_mock_put_scene_fields_with(out, outCap, &pos, false, false, 0, targetScene01, 80, 60))
+    //         return 0;
+    //     vm_net_mock_finish_wt_object(out, objectStart, pos);
+    //     vm_net_mock_finish_wt_packet(out, pos, 1);
+    //     vm_net_mock_save_player_pos_state(targetScene01, 80, 60, "moveinfo-taohuadao-bottom-portal");
+    //     return pos;
+    // }
 
-    if (snappedPos &&
-        strcmp(scene, sourceScene03) == 0 &&
-        gridX >= 160 && gridX <= 240 &&
-        gridY >= 553 && gridY <= 570)
-    {
-        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 1, &objectStart))
-            return 0;
-        if (!vm_net_mock_put_scene_fields_with(out, outCap, &pos, false, false, 0, targetScene03, 42, 60))
-            return 0;
-        vm_net_mock_finish_wt_object(out, objectStart, pos);
-        vm_net_mock_finish_wt_packet(out, pos, 1);
-        vm_net_mock_save_player_pos_state(targetScene03, 42, 60, "moveinfo-taohuadao-bottom-portal");
-        return pos;
-    }
+    // if (snappedPos &&
+    //     strcmp(scene, sourceScene03) == 0 &&
+    //     gridX >= 160 && gridX <= 240 &&
+    //     gridY >= 553 && gridY <= 570)
+    // {
+    //     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 1, &objectStart))
+    //         return 0;
+    //     if (!vm_net_mock_put_scene_fields_with(out, outCap, &pos, false, false, 0, targetScene03, 42, 60))
+    //         return 0;
+    //     vm_net_mock_finish_wt_object(out, objectStart, pos);
+    //     vm_net_mock_finish_wt_packet(out, pos, 1);
+    //     vm_net_mock_save_player_pos_state(targetScene03, 42, 60, "moveinfo-taohuadao-bottom-portal");
+    //     return pos;
+    // }
 
     if (snappedPos &&
         vm_net_mock_find_portal_fallback_margin(scene, gridX, gridY, 8,
@@ -14735,6 +15031,29 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
          * races that local path, sets a pending scene save early, and prevents
          * the later pendingRawMatch=1 2/10 completion from being exercised.
          */
+    }
+
+    
+    printf("[info][network] moveinfo vm_net_mock_is_scene_npcinfo11_pending:1\n");
+    if (vm_net_mock_is_scene_npcinfo11_pending(scene) || ischangescene)
+    {
+        u8 objectCount = 0;
+        u8 npcNum = 0;
+        u32 npcInfoLen = 0;
+        vm_net_mock_parse_scene_npcinfo_from_json(scene);
+        printf("[info][network] moveinfo vm_net_mock_is_scene_npcinfo11_pending:2\n");
+        if (!vm_net_mock_append_fb_target_scene_npcs11_object(out, outCap, &pos,
+                                                             scene,
+                                                             &npcNum,
+                                                             &npcInfoLen))
+            return 0;
+        printf("[info][network] moveinfo vm_net_mock_is_scene_npcinfo11_pending:3\n");
+        objectCount += 1;
+        vm_net_mock_finish_wt_packet(out, pos, objectCount);
+        g_vm_net_mock_scene_npcinfo11_pending = false;
+        g_vm_net_mock_scene_npcinfo11_pending_scene[0] = 0;
+        ischangescene = false;
+        return pos;
     }
 
     /*
@@ -18474,10 +18793,13 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
                                   sceneSupportsActorOtherNpcSeed &&
                                   probeActorOtherNpcInFollowup;
     preferActorOtherNpcRows = actorOtherNpcSeedInFollowup;
-    sceneNpcInfo11SeedInFollowup = !keepBusinessGate &&
-                                   includeSkillBooks &&
-                                   vm_net_mock_scene_room_npc_seed_count(currentScene) > 0 &&
-                                   vm_net_mock_env_u8("CBE_SCENE_FOLLOWUP_NPCINFO11", 0) != 0;
+    sceneNpcInfo11SeedInFollowup = false;
+    if (!keepBusinessGate &&
+        vm_net_mock_scene_room_npc_seed_count(currentScene) > 0 &&
+        vm_net_mock_env_u8("CBE_SCENE_FOLLOWUP_NPCINFO11", 1) != 0)
+    {
+        vm_net_mock_mark_scene_npcinfo11_pending(currentScene);
+    }
     sceneNpcActorInfoSeedInFollowup = !keepBusinessGate &&
                                       includeSkillBooks &&
                                       sceneSupportsActorOtherNpcSeed &&
@@ -18759,6 +19081,7 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
                  sizeof(g_vm_net_mock_scene_moveinfo_npc_seeded_scene),
                  "%s", currentScene ? currentScene : "");
     }
+    ischangescene=true;
     return pos;
 }
 
