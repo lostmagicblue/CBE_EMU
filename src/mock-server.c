@@ -9138,27 +9138,29 @@ static u32 vm_net_mock_load_scene_resource(const char *scene, u8 *out, u32 outCa
     if (rawLen == 0)
         return 0;
 
+    if (rawLen > 4)
+    {
+        u32 declaredLen = vm_net_mock_read_le16_at(raw, 0) |
+                          ((u32)vm_net_mock_read_le16_at(raw, 2) << 16);
+        if (declaredLen != 0 && declaredLen <= rawLen - 4 &&
+            (raw[4] == 1 || raw[4] == 2))
+        {
+            decodedLen = vm_net_mock_decode_lzss_resource_stream(raw + 4,
+                                                                 declaredLen,
+                                                                 out,
+                                                                 outCap);
+            if (decodedLen != 0 && vm_net_mock_scene_payload_start(out, decodedLen) != 0)
+                return decodedLen;
+            return 0;
+        }
+    }
+
     if (vm_net_mock_scene_payload_start(raw, rawLen) != 0)
     {
         if (rawLen > outCap)
             return 0;
         memcpy(out, raw, rawLen);
         return rawLen;
-    }
-
-    if (rawLen > 4)
-    {
-        u32 declaredLen = vm_net_mock_read_le16_at(raw, 0) |
-                          ((u32)vm_net_mock_read_le16_at(raw, 2) << 16);
-        if (declaredLen != 0 && declaredLen <= rawLen - 4)
-        {
-            decodedLen = vm_net_mock_decode_lzss_resource_stream(raw + 4,
-                                                                 rawLen - 4,
-                                                                 out,
-                                                                 outCap);
-            if (decodedLen != 0 && vm_net_mock_scene_payload_start(out, decodedLen) != 0)
-                return decodedLen;
-        }
     }
 
     decodedLen = vm_net_mock_decode_lzss_resource_stream(raw, rawLen, out, outCap);
@@ -18666,16 +18668,31 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
     return pos;
 }
 
-static u32 vm_net_mock_build_short_wt_control_echo_response(const u8 *request, u32 requestLen,
-                                                            u8 kind, u8 subtype,
-                                                            u8 *out, u32 outCap)
+static u32 vm_net_mock_build_empty_wt_ack_response(u8 *out, u32 outCap)
 {
+    if (outCap < 5)
+        return 0;
+    vm_net_mock_finish_wt_packet(out, 5, 0);
+    return 5;
+}
+
+static u32 vm_net_mock_build_short_wt_control_ack_response(const u8 *request, u32 requestLen,
+                                                           u8 kind, u8 subtype,
+                                                           u8 *out, u32 outCap)
+{
+    (void)request;
+    (void)requestLen;
+    (void)kind;
+    (void)subtype;
     /*
-     * 0x63/1 sits on the startup/login bridge. Dropping it leaves the progress
-     * spinner running forever; while the exact protocol is still unknown, the
-     * client does continue when it receives a short control ack back.
+     * 0x63/1 sits on the startup/login bridge. The old echo copied the
+     * request-side short-object layout back to the client, but response parsing
+     * uses the normal WT object layout. That malformed echo trips
+     * event_packet_init() and shows the unpack-error popup. A zero-object WT ack
+     * still delivers the network event without feeding business dispatch an
+     * unsupported 0x63 object.
      */
-    return vm_net_mock_copy_response(request, requestLen, out, outCap);
+    return vm_net_mock_build_empty_wt_ack_response(out, outCap);
 }
 
 static u32 vm_net_mock_build_practise_info18_response(u8 *out, u32 outCap)
@@ -20951,10 +20968,10 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
 
     if (vm_net_mock_is_short_wt_control_packet(request, requestLen, 0x63, 1))
     {
-        hookedLen = vm_net_mock_build_short_wt_control_echo_response(request, requestLen, 0x63, 1, out, outCap);
+        hookedLen = vm_net_mock_build_short_wt_control_ack_response(request, requestLen, 0x63, 1, out, outCap);
         if (hookedLen)
         {
-            vm_net_log_handled_packet("builtin-short-63-1-echo", request, requestLen, hookedLen);
+            vm_net_log_handled_packet("builtin-short-63-1-empty-ack", request, requestLen, hookedLen);
             return hookedLen;
         }
     }

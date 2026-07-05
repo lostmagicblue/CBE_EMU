@@ -207,13 +207,24 @@ u32 screenStructChange = 0;
 u32 screenStructNotifyLoadRes = 0;
 u32 vmAddedScreen = 0;
 static u32 g_screenStack[32];
+static u32 g_screenStackParam[32];
 static u32 g_screenStackModuleBase[32];
+static u8 g_screenStackFlags[32];
+static u8 g_screenStackInited[32];
 static u32 g_screenStackCount = 0;
 static u32 g_screenRemovedWithoutNext = 0;
 static u32 g_screenResumeExisting = 0;
+static u32 g_screenEnterExistingNoCallback = 0;
 static u32 g_activeScreenRemovedThisFrame = 0;
+static u32 g_screenExitMode = 0;
+static u32 g_screenLoadResourcePendingScreen = 0;
+static u32 g_screenLoadResourcePendingParam = 0;
 static u32 g_currentScreenThis = 0;
 u32 g_currentScreenModuleBase = 0;
+
+#define VM_SCREEN_EXIT_DESTROY 0
+#define VM_SCREEN_EXIT_PAUSE 1
+#define VM_SCREEN_EXIT_SKIP 2
 
 static bool g_vm_net_mock_pending_scene_save_valid = false;
 static char g_vm_net_mock_pending_scene_save_scene[64];
@@ -597,6 +608,19 @@ static uc_err vm_emu_start(u32 begin, u32 until);
 static bool vm_is_pool_entry(u32 entry);
 static void vm_restore_r9_for_entry(u32 entry);
 
+static bool vm_is_writable_vm_range(u32 addr, u32 len)
+{
+    if (addr == 0 || len == 0 || addr + len < addr)
+        return false;
+    if (addr >= Program_Data_Address && addr + len <= Program_Data_Address + g_cbeInfo.headerInt4)
+        return true;
+    if (addr >= VM_Memory_Pool_ADDRESS && addr + len <= VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
+        return true;
+    if (addr >= STACK_ADDRESS && addr + len <= STACK_ADDRESS + 0x100000u)
+        return true;
+    return false;
+}
+
 static int vm_screen_stack_find(u32 screen)
 {
     for (u32 i = 0; i < g_screenStackCount; ++i)
@@ -632,6 +656,48 @@ static u32 vm_screen_stack_lookup_module_base(u32 screen)
     if (existing < 0)
         return 0;
     return g_screenStackModuleBase[(u32)existing];
+}
+
+static u32 vm_screen_default_call_param(u32 screen)
+{
+    if (screen == 0)
+        return 0;
+    if (screen >= Global_R9 && screen < Program_ROM_Address + Program_ROM_Mapped_Size)
+        return screen - 0x18;
+    if (vm_screen_stack_lookup_module_base(screen))
+        return screen - 0x18;
+    return 0;
+}
+
+static bool vm_screen_param_is_live(u32 param)
+{
+    u32 probe[3] = {0};
+    if (param == 0)
+        return false;
+    if (uc_mem_read(MTK, param, probe, sizeof(probe)) != UC_ERR_OK)
+        return false;
+    return probe[0] != 0 || probe[1] != 0 || probe[2] != 0;
+}
+
+static u32 vm_screen_stack_lookup_param(u32 screen)
+{
+    u32 fallback = vm_screen_default_call_param(screen);
+    int existing = vm_screen_stack_find_related(screen);
+    if (existing >= 0 && g_screenStackParam[(u32)existing])
+    {
+        u32 param = g_screenStackParam[(u32)existing];
+        if (fallback == 0 || vm_screen_param_is_live(param))
+            return param;
+    }
+    return fallback;
+}
+
+static u32 vm_screen_stack_lookup_flags(u32 screen)
+{
+    int existing = vm_screen_stack_find_related(screen);
+    if (existing < 0)
+        return 1;
+    return g_screenStackFlags[(u32)existing];
 }
 
 static bool vm_infer_battle_module_from_screen(u32 screen, u32 *codeBase, u32 *moduleR9)
@@ -686,7 +752,7 @@ static bool vm_infer_battle_module_from_screen(u32 screen, u32 *codeBase, u32 *m
     return true;
 }
 
-static void vm_screen_stack_push(u32 screen, u32 moduleBase)
+static void vm_screen_stack_push(u32 screen, u32 param, u32 flags, u32 moduleBase)
 {
     if (screen == 0)
         return;
@@ -697,7 +763,10 @@ static void vm_screen_stack_push(u32 screen, u32 moduleBase)
         for (u32 i = (u32)existing; i + 1 < g_screenStackCount; ++i)
         {
             g_screenStack[i] = g_screenStack[i + 1];
+            g_screenStackParam[i] = g_screenStackParam[i + 1];
             g_screenStackModuleBase[i] = g_screenStackModuleBase[i + 1];
+            g_screenStackFlags[i] = g_screenStackFlags[i + 1];
+            g_screenStackInited[i] = g_screenStackInited[i + 1];
         }
         g_screenStackCount--;
     }
@@ -705,22 +774,37 @@ static void vm_screen_stack_push(u32 screen, u32 moduleBase)
     if (g_screenStackCount >= sizeof(g_screenStack) / sizeof(g_screenStack[0]))
     {
         memmove(g_screenStack, g_screenStack + 1, (sizeof(g_screenStack) / sizeof(g_screenStack[0]) - 1) * sizeof(g_screenStack[0]));
+        memmove(g_screenStackParam, g_screenStackParam + 1, (sizeof(g_screenStackParam) / sizeof(g_screenStackParam[0]) - 1) * sizeof(g_screenStackParam[0]));
         memmove(g_screenStackModuleBase, g_screenStackModuleBase + 1, (sizeof(g_screenStackModuleBase) / sizeof(g_screenStackModuleBase[0]) - 1) * sizeof(g_screenStackModuleBase[0]));
+        memmove(g_screenStackFlags, g_screenStackFlags + 1, (sizeof(g_screenStackFlags) / sizeof(g_screenStackFlags[0]) - 1) * sizeof(g_screenStackFlags[0]));
+        memmove(g_screenStackInited, g_screenStackInited + 1, (sizeof(g_screenStackInited) / sizeof(g_screenStackInited[0]) - 1) * sizeof(g_screenStackInited[0]));
         g_screenStackCount--;
     }
 
     g_screenStack[g_screenStackCount] = screen;
+    g_screenStackParam[g_screenStackCount] = param;
     g_screenStackModuleBase[g_screenStackCount] = moduleBase;
+    g_screenStackFlags[g_screenStackCount] = (u8)flags;
+    g_screenStackInited[g_screenStackCount] = 0;
     g_screenStackCount++;
 }
 
-static bool vm_screen_stack_remove(u32 screen, u32 *newTop, u32 *newTopModuleBase)
+static void vm_screen_stack_replace_top(u32 screen, u32 param, u32 flags, u32 moduleBase)
+{
+    if (g_screenStackCount > 0)
+        g_screenStackCount--;
+    vm_screen_stack_push(screen, param, flags, moduleBase);
+}
+
+static bool vm_screen_stack_remove(u32 screen, u32 *newTop, u32 *newTopParam, u32 *newTopModuleBase)
 {
     int existing = vm_screen_stack_find_related(screen);
     if (existing < 0)
     {
         if (newTop)
             *newTop = g_screenStackCount ? g_screenStack[g_screenStackCount - 1] : 0;
+        if (newTopParam)
+            *newTopParam = g_screenStackCount ? g_screenStackParam[g_screenStackCount - 1] : 0;
         if (newTopModuleBase)
             *newTopModuleBase = g_screenStackCount ? g_screenStackModuleBase[g_screenStackCount - 1] : 0;
         return false;
@@ -729,12 +813,17 @@ static bool vm_screen_stack_remove(u32 screen, u32 *newTop, u32 *newTopModuleBas
     for (u32 i = (u32)existing; i + 1 < g_screenStackCount; ++i)
     {
         g_screenStack[i] = g_screenStack[i + 1];
+        g_screenStackParam[i] = g_screenStackParam[i + 1];
         g_screenStackModuleBase[i] = g_screenStackModuleBase[i + 1];
+        g_screenStackFlags[i] = g_screenStackFlags[i + 1];
+        g_screenStackInited[i] = g_screenStackInited[i + 1];
     }
     g_screenStackCount--;
 
     if (newTop)
         *newTop = g_screenStackCount ? g_screenStack[g_screenStackCount - 1] : 0;
+    if (newTopParam)
+        *newTopParam = g_screenStackCount ? g_screenStackParam[g_screenStackCount - 1] : 0;
     if (newTopModuleBase)
         *newTopModuleBase = g_screenStackCount ? g_screenStackModuleBase[g_screenStackCount - 1] : 0;
     return true;
@@ -929,6 +1018,7 @@ static uc_err vm_call4_preserve_regs(u32 entry, u32 r0, u32 r1, u32 r2, u32 r3)
         UC_ARM_REG_R12,
         UC_ARM_REG_SP,
         UC_ARM_REG_LR,
+        UC_ARM_REG_PC,
         UC_ARM_REG_CPSR,
     };
     u32 saved[mySizeOf(preserveRegs)] = {0};
@@ -960,6 +1050,7 @@ static uc_err vm_call4_preserve_regs_clear_stack_args(u32 entry, u32 r0, u32 r1,
         UC_ARM_REG_R12,
         UC_ARM_REG_SP,
         UC_ARM_REG_LR,
+        UC_ARM_REG_PC,
         UC_ARM_REG_CPSR,
     };
     u32 saved[mySizeOf(preserveRegs)] = {0};
@@ -1471,9 +1562,10 @@ static uc_err scheduler_dispatch_tscreen_event(u32 tScreenEventEntry, u32 screen
         if (tScreenEventEntry == 0)
             return UC_ERR_OK;
 
+        u32 touchEventType = evt->r0 == MR_MOUSE_UP ? 4 : (evt->r0 == MR_MOUSE_MOVE ? 5 : 3);
         u32 touchPtr = vm_malloc_var();
         vm_set_var(touchPtr, evt->r1);
-        uc_err err = vm_call4(tScreenEventEntry, screenPtr, evt->r0 == MR_MOUSE_UP ? 4 : 3, touchPtr, 0);
+        uc_err err = vm_call4(tScreenEventEntry, screenPtr, touchEventType, touchPtr, 0);
         vm_free_var(touchPtr);
         return err;
     }
@@ -4136,6 +4228,7 @@ u8 *SimpleRamMatch(u8 *start, u8 *end, u8 *matchStart, int matchLen)
 #define LOAD_CBE_PATH "CBE/众神之战.CBE"
 #define LOAD_CBE_PATH "CBE/恶魔城登录版.CBE"
 #define LOAD_CBE_PATH "CBE/江湖OL.CBE"
+//#define LOAD_CBE_PATH "CBE/恶魔城登录版.CBE"
 
 
 static int vm_ascii_stricmp(const char *a, const char *b)
@@ -4156,6 +4249,124 @@ static int vm_ascii_stricmp(const char *a, const char *b)
             return (int)ca - (int)cb;
     }
     return (int)(unsigned char)*a - (int)(unsigned char)*b;
+}
+
+static void vm_close_open_files_for_restart(void)
+{
+    for (u32 i = 0; i < 16; ++i)
+    {
+        if (openFileList[i] != NULL && openFileList[i] != VM_PSEUDO_DIR_HANDLE)
+            fclose(openFileList[i]);
+        openFileList[i] = NULL;
+        openFileNames[i][0] = 0;
+    }
+}
+
+static void vm_reset_runtime_state_for_restart(void)
+{
+    if (ROM_MEMPOOL)
+        memset(ROM_MEMPOOL, 0, Program_ROM_Mapped_Size);
+    if (STACK_MEMPOOL)
+        memset(STACK_MEMPOOL, 0, 0x100000u);
+    if (PRAM_MEMPOOL)
+        memset(PRAM_MEMPOOL, 0, 0x100000u);
+    if (RAM_MEMPOOL)
+        memset(RAM_MEMPOOL, 0, VM_MEMPOOL_TOTAL_SIZE);
+
+    if (g_cbeFileBuffer)
+    {
+        uc_mem_write(MTK, Program_ROM_Address, g_cbeFileBuffer + g_cbeInfo.codeOffset, g_cbeInfo.codeLen);
+        uc_mem_write(MTK, Program_Data_Address, g_cbeFileBuffer + g_cbeInfo.BssDataOffset, g_cbeInfo.BssDataLen);
+    }
+
+    vm_close_open_files_for_restart();
+    InitVmEvent();
+    InitVmMalloc();
+
+    memset(g_netTasks, 0, sizeof(g_netTasks));
+    memset(g_netChannels, 0, sizeof(g_netChannels));
+    memset(g_timerTasks, 0, sizeof(g_timerTasks));
+    g_schedulerTick = 0;
+    g_schedulerStartTicks = 0;
+    g_nextNetConnectId = 1;
+    g_netTaskDispatchDepth = 0;
+    g_netTaskDispatchSlot = -1;
+    g_netMockResponseLen = 0;
+    g_netMockResponseOffset = 0;
+    g_netMockResponseVmPtr = 0;
+    g_netUpLinkData = 0;
+    g_netDownLinkData = 0;
+    g_netCurrentObject = 0;
+    g_netDebugReadWindow = 0;
+    g_netBusinessSendReadyDeferred = 0;
+    g_netBusinessSendReadyRerun = 0;
+    g_netBusinessSendReadyPostVm = 0;
+    g_loginTail42AllocPending = 0;
+    g_loginTail42FlushPending = 0;
+
+    screenStructChange = 0;
+    screenStructNotifyLoadRes = 0;
+    vmAddedScreen = 0;
+    memset(g_screenStack, 0, sizeof(g_screenStack));
+    memset(g_screenStackParam, 0, sizeof(g_screenStackParam));
+    memset(g_screenStackModuleBase, 0, sizeof(g_screenStackModuleBase));
+    memset(g_screenStackFlags, 0, sizeof(g_screenStackFlags));
+    memset(g_screenStackInited, 0, sizeof(g_screenStackInited));
+    g_screenStackCount = 0;
+    g_screenRemovedWithoutNext = 0;
+    g_screenResumeExisting = 0;
+    g_screenEnterExistingNoCallback = 0;
+    g_activeScreenRemovedThisFrame = 0;
+    g_screenExitMode = VM_SCREEN_EXIT_DESTROY;
+    g_screenLoadResourcePendingScreen = 0;
+    g_screenLoadResourcePendingParam = 0;
+    g_currentScreenThis = 0;
+    g_currentScreenModuleBase = 0;
+
+    simulatePress = 0;
+    simulateKey = 0;
+    simulateTouchPress = 0;
+    simulateTouchDown = 0;
+    simulateTouchUp = 0;
+    simulateTouchDrag = 0;
+    simulateTouchX = 0;
+    simulateTouchY = 0;
+    g_curKeyDownState = 0;
+    g_curKeyState = 0;
+    g_vmInputOpen = 0;
+    g_vmInputCallback = 0;
+    g_vmInputBuffer = 0;
+    g_vmInputMaxLen = 0;
+    g_vmInputComposition[0] = 0;
+    g_vmInputSdlTextInputWanted = 0;
+    g_vmInputSdlTextInputActive = 0;
+
+    g_lastStartupScreenState = 0xff;
+    g_lastStartupUpdateObj = 0xffffffff;
+    g_lastStartupProgress = 0xff;
+    g_lastStartupUpdateState = 0xff;
+    g_currentFontType = 0;
+    g_nativeAppInitEntry = 0;
+    g_nativeAppParserEntry = 0;
+    g_nativeSystemInfoPtr = 0;
+    g_nativePropertyInfoPtr = 0;
+    g_vm_img_app_data_package = 0;
+    g_vm_img_inner_data_package = 0;
+    g_vm_img_current_data_package = 0;
+
+    changeTmp3 = VM_MANAGER_TABLE_ADDRESS;
+    vm_set_var(VM_Manager_Table_ADDRESS + 8, changeTmp3);
+    changeTmp3 = VM_LOG_NOOP_ADDRESS;
+    vm_set_var(VM_Manager_Table_ADDRESS + 12, changeTmp3);
+    changeTmp3 = VM_CURR_APP_INFO_ADDRESS;
+    vm_set_var(VM_Manager_Table_ADDRESS + 16, changeTmp3);
+    vm_initManagerTable();
+
+    Global_R9 = Program_Data_Address;
+    uc_reg_write(MTK, UC_ARM_REG_R9, &Global_R9);
+    changeTmp2 = STACK_ADDRESS + 0x100000u;
+    uc_reg_write(MTK, UC_ARM_REG_SP, &changeTmp2);
+    lastAddress = 1;
 }
 
 static u32 vm_math_sqrt_result(u32 value)
@@ -4687,6 +4898,8 @@ void RunArmProgram(void *param)
     readAllCpuRegFunc = ReadRegsToGdb;
     gdb_readMemFunc = readMemoryToGdb;
 #endif
+    p = UC_ERR_OK;
+    startAddr = (u32)param;
     // 准备工作
     // 写入屏幕缓存数据
     vm_lcd_init_screen_image_struct();
@@ -4753,8 +4966,8 @@ void RunArmProgram(void *param)
         {
             if (vmAddedScreen == 0)
             {
-                printf("第二次初始化未设置Screen，停止运行以避免执行未初始化入口\n");
-                assert(0);
+                printf("[info][screen] second init did not set an active screen, entering idle screen state\n");
+                g_screenRemovedWithoutNext = 1;
             }
             u32 tScreenRenderEntry = 0;
             u32 tScreenEventEntry = 0;
@@ -4765,6 +4978,8 @@ void RunArmProgram(void *param)
             {
                 p = scheduler_tick();
                 if (p != UC_ERR_OK)
+                    break;
+                if (screenStructChange == 1 || g_screenRemovedWithoutNext || vmAddedScreen == 0)
                     break;
                 if (tScreenInitedPtr != vmAddedScreen)
                 {
@@ -4781,6 +4996,8 @@ void RunArmProgram(void *param)
                         }
                     }
                     tScreenInitedPtr = vmAddedScreen;
+                    if (screenStructChange == 1 || g_screenRemovedWithoutNext || vmAddedScreen == 0)
+                        break;
                 }
                 scheduler_normalize_startup_screen_state();
                 tScreenEventEntry = vm_get_var(vmAddedScreen + 0x08);
@@ -4801,7 +5018,7 @@ void RunArmProgram(void *param)
                 p = scheduler_flush_post_vm_business_send_ready("tscreen_event");
                 if (p != UC_ERR_OK)
                     break;
-                if (screenStructChange == 1)
+                if (screenStructChange == 1 || g_screenRemovedWithoutNext || vmAddedScreen == 0)
                     break;
                 if (vmAddedScreen != screenBeforeCallback)
                     continue;
@@ -4820,6 +5037,8 @@ void RunArmProgram(void *param)
                         }
                     }
                 }
+                if (screenStructChange == 1 || g_screenRemovedWithoutNext || vmAddedScreen == 0)
+                    break;
                 uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
                 uc_reg_write(MTK, UC_ARM_REG_R0, &vmAddedScreen);
                 p = vm_emu_start(tScreenRenderEntry, exitAddr);
@@ -4866,16 +5085,24 @@ void RunArmProgram(void *param)
             if (screenStructChange == 1)
             {
                 screenFuncPtr = vm_get_var(VM_SCREEN_nextSubTScreen_ADDRESS); // 得到screen函数表地址的指针
+                if (screenFuncPtr == 0)
+                {
+                    printf("[info][screen] screen change without next screen, keep idle state\n");
+                    screenStructChange = 0;
+                    g_screenRemovedWithoutNext = 1;
+                    vmAddedScreen = 0;
+                    g_screenResumeExisting = 0;
+                    g_screenEnterExistingNoCallback = 0;
+                    g_currentScreenThis = 0;
+                    g_currentScreenModuleBase = 0;
+                    continue;
+                }
                 u32 screenModuleBase = vm_screen_stack_lookup_module_base(screenFuncPtr);
-                if (screenFuncPtr >= Global_R9 && screenFuncPtr < Program_ROM_Address + Program_ROM_Mapped_Size)
-                {
-                    screenThisPtr = screenFuncPtr - 0x18;
-                }
-                else if (screenModuleBase)
-                {
-                    screenThisPtr = screenFuncPtr - 0x18;
+                screenThisPtr = vm_screen_default_call_param(screenFuncPtr);
+                if (screenThisPtr == 0)
+                    screenThisPtr = vm_screen_stack_lookup_param(screenFuncPtr);
+                if (screenModuleBase)
                     g_currentScreenModuleBase = screenModuleBase;
-                }
                 screenInitEntry = vm_get_var(screenFuncPtr);
                 screenDestoryEntry = vm_get_var(screenFuncPtr + 4);
                 screenLogicEntry = vm_get_var(screenFuncPtr + 8);
@@ -4889,11 +5116,8 @@ void RunArmProgram(void *param)
             }
 
             uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr); // 程序退出点
-            if (screenThisPtr)
-            {
-                scheduler_prepare_screen_call(screenThisPtr);
-                uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
-            }
+            scheduler_prepare_screen_call(screenThisPtr);
+            uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
             if (g_screenResumeExisting)
             {
                 if (screenRemuseEntry)
@@ -4902,6 +5126,12 @@ void RunArmProgram(void *param)
                     p = UC_ERR_OK;
                 printf("ScreenResume Ok\n");
                 g_screenResumeExisting = 0;
+            }
+            else if (g_screenEnterExistingNoCallback)
+            {
+                p = UC_ERR_OK;
+                printf("ScreenResume skipped by isInQuit\n");
+                g_screenEnterExistingNoCallback = 0;
             }
             else
             {
@@ -4928,15 +5158,17 @@ void RunArmProgram(void *param)
                     if (screenStructNotifyLoadRes == 1)
                     {
                         screenStructNotifyLoadRes = 0;
+                        u32 resScreen = g_screenLoadResourcePendingScreen ? g_screenLoadResourcePendingScreen : screenFuncPtr;
+                        u32 resParam = g_screenLoadResourcePendingParam ? g_screenLoadResourcePendingParam : screenThisPtr;
+                        u32 resEntry = resScreen == screenFuncPtr ? screenResouceLoadEntry : vm_get_var(resScreen + 24);
+                        g_screenLoadResourcePendingScreen = 0;
+                        g_screenLoadResourcePendingParam = 0;
                         uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr); // 程序退出点
-                        if (screenThisPtr)
+                        scheduler_prepare_screen_call(resParam);
+                        uc_reg_write(MTK, UC_ARM_REG_R0, &resParam);
+                        if (resEntry)
                         {
-                            scheduler_prepare_screen_call(screenThisPtr);
-                            uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
-                        }
-                        if (screenResouceLoadEntry)
-                        {
-                            p = vm_emu_start(screenResouceLoadEntry, exitAddr);
+                            p = vm_emu_start(resEntry, exitAddr);
                             if (p != UC_ERR_OK)
                             {
                                 printf("SCR_ResourceLoad异常:%s\n", uc_strerror(p));
@@ -4984,7 +5216,7 @@ void RunArmProgram(void *param)
                                 simulateTouchX = evt->r1 & 0xffff;
                                 simulateTouchY = (evt->r1 >> 16) & 0xffff;
                             }
-                            if (screenThisPtr && vm_is_pool_entry(screenLogicEntry))
+                            if (screenThisPtr && screenLogicEntry)
                             {
                                 u32 eventType = 0;
                                 u32 eventArg = 0;
@@ -4997,7 +5229,7 @@ void RunArmProgram(void *param)
                                 }
                                 else
                                 {
-                                    eventType = evt->r0 == MR_MOUSE_UP ? 4 : 3;
+                                    eventType = evt->r0 == MR_MOUSE_UP ? 4 : (evt->r0 == MR_MOUSE_MOVE ? 5 : 3);
                                     eventArg = vm_malloc_var();
                                     vm_set_var(eventArg, evt->r1);
                                 }
@@ -5026,14 +5258,15 @@ void RunArmProgram(void *param)
                         break;
                     if (1)
                     {
-                        if (!vm_is_pool_entry(screenLogicEntry))
+                        if (screenLogicEntry && !vm_is_pool_entry(screenLogicEntry))
                         {
+                            u32 idleEventType = 6;
+                            u32 idleEventArg = 0;
                             uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
-                            if (screenThisPtr)
-                            {
-                                scheduler_prepare_screen_call(screenThisPtr);
-                                uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
-                            }
+                            scheduler_prepare_screen_call(screenThisPtr);
+                            uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
+                            uc_reg_write(MTK, UC_ARM_REG_R1, &idleEventType);
+                            uc_reg_write(MTK, UC_ARM_REG_R2, &idleEventArg);
                             p = vm_emu_start(screenLogicEntry, exitAddr);
                             if (p != UC_ERR_OK)
                             {
@@ -5050,11 +5283,8 @@ void RunArmProgram(void *param)
                         if (screenStructChange == 1 || g_screenRemovedWithoutNext)
                             break;
                         uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
-                        if (screenThisPtr)
-                        {
-                            scheduler_prepare_screen_call(screenThisPtr);
-                            uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
-                        }
+                        scheduler_prepare_screen_call(screenThisPtr);
+                        uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
                         p = vm_emu_start(screenRenderEntry, exitAddr);
                         if (p != UC_ERR_OK)
                         {
@@ -5073,14 +5303,23 @@ void RunArmProgram(void *param)
                     _frameTick = SDL_GetTicks();
                 }
                 uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
-                if (screenThisPtr)
-                {
-                    scheduler_prepare_screen_call(screenThisPtr);
-                    uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
-                }
+                scheduler_prepare_screen_call(screenThisPtr);
+                uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
                 if (g_activeScreenRemovedThisFrame)
                 {
                     g_activeScreenRemovedThisFrame = 0;
+                }
+                else if (g_screenExitMode == VM_SCREEN_EXIT_PAUSE)
+                {
+                    if (screenPauseEntry)
+                    {
+                        p = vm_emu_start(screenPauseEntry, exitAddr);
+                        if (p != UC_ERR_OK)
+                        {
+                            printf("SCR_Pause异常\n");
+                            break;
+                        }
+                    }
                 }
                 else
                 {
@@ -5097,6 +5336,7 @@ void RunArmProgram(void *param)
                     {
                     }
                 }
+                g_screenExitMode = VM_SCREEN_EXIT_DESTROY;
             }
             else
             {
@@ -5390,7 +5630,7 @@ static bool hook_vm_manager_func(u32 address)
     else if (idx == 12)
     {
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        vm_configManagerTableCount(tmp1, VM_MANAGER_SCREEN_FUNC_LIST_ADDRESS, 11);
+        vm_configManagerTableCount(tmp1, VM_MANAGER_SCREEN_FUNC_LIST_ADDRESS, 12);
         vm_set_call_result(tmp1);
     }
     else if (idx == 13)
@@ -5960,8 +6200,13 @@ return 4;
     }
     else if (idx == 24)
     {
-        printf("[call]CDownGetCompany\n");
-        assert(0);
+        DEBUG_PRINT("[call]CDownGetCompany\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        snprintf((char *)cbeTextString, mySizeOf(cbeTextString), "cbe_emu");
+        if (tmp1 && tmp2)
+            uc_mem_write(MTK, tmp1, cbeTextString, SDL_min(tmp2, (u32)strlen((char *)cbeTextString) + 1));
+        vm_set_call_result(0);
     }
     else if (idx == 25)
     {
@@ -6576,8 +6821,8 @@ static bool hook_vm_memory_manager_func(u32 address)
     }
     else if (idx == 17)
     {
-        printf("[call]DF_InitMemoryEx\n");
-        assert(0);
+        DEBUG_PRINT("[call]DF_InitMemoryEx\n");
+        vm_set_call_result(0);
     }
     else if (idx == 18)
     {
@@ -8064,6 +8309,8 @@ static bool hook_vm_manager_network_func(u32 address)
         return false;
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+    u32 netSp = 0;
+    u32 netStackArg0 = 0;
     u32 netR4 = 0, netR5 = 0, netR6 = 0, netR7 = 0, netLr = 0;
     static u32 s_netManagerObserveCount = 0;
 
@@ -8076,7 +8323,10 @@ static bool hook_vm_manager_network_func(u32 address)
     uc_reg_read(MTK, UC_ARM_REG_R5, &netR5);
     uc_reg_read(MTK, UC_ARM_REG_R6, &netR6);
     uc_reg_read(MTK, UC_ARM_REG_R7, &netR7);
+    uc_reg_read(MTK, UC_ARM_REG_SP, &netSp);
     uc_reg_read(MTK, UC_ARM_REG_LR, &netLr);
+    if (netSp)
+        uc_mem_read(MTK, netSp, &netStackArg0, sizeof(netStackArg0));
     DEBUG_PRINT("[probe_net_idx] idx=%u r0=%x r1=%x r2=%x r3=%x last=%x\n", idx, tmp1, tmp2, tmp3, tmp4, lastAddress);
     if (s_netManagerObserveCount < 20)
     {
@@ -8114,15 +8364,32 @@ static bool hook_vm_manager_network_func(u32 address)
     }
     else if (idx == 3)
     {
-        tmp1 = vm_get_var(Global_R9 + 0x5a3c + 0x10);
-        if (tmp1)
+        if (tmp2 >= Program_ROM_Address && tmp2 < Program_ROM_Address + Program_ROM_Mapped_Size && tmp3)
         {
-            tmp2 = 0;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp2);
-            vm_bx(tmp1);
-            return;
+            u32 connectIdOut = vm_is_writable_vm_range(netStackArg0, sizeof(tmp5)) ? netStackArg0 : 0;
+            if (connectIdOut == 0 && vm_is_writable_vm_range(tmp3, sizeof(tmp5)))
+                connectIdOut = tmp3;
+            tmp5 = g_nextNetConnectId++;
+            if (tmp5 == 0)
+                tmp5 = g_nextNetConnectId++;
+            if (connectIdOut)
+                uc_mem_write(MTK, connectIdOut, &tmp5, 4);
+            scheduler_register_net_channel(tmp5, tmp2, tmp3);
+            scheduler_queue_net_task(tmp1, 0, tmp2, tmp3);
+            vm_set_call_result(1);
         }
-        vm_set_call_result(0);
+        else
+        {
+            tmp1 = vm_get_var(Global_R9 + 0x5a3c + 0x10);
+            if (tmp1)
+            {
+                tmp2 = 0;
+                uc_reg_write(MTK, UC_ARM_REG_R0, &tmp2);
+                vm_bx(tmp1);
+                return;
+            }
+            vm_set_call_result(0);
+        }
     }
     else if (idx == 6 || idx == 7 || idx == 18)
     {
@@ -8901,137 +9168,124 @@ static bool hook_vm_manager_screen_func(u32 address)
         vm_set_var(VM_SCREEN_nextSubTScreen_ADDRESS, tmp1);
         tmp2 = 0;
         vm_set_var(VM_SCREEN_isInQuit_ADDRESS, tmp2);
+        vm_screen_stack_replace_top(tmp1, 0, 1, vm_screen_stack_lookup_module_base(tmp1));
+        vmAddedScreen = tmp1;
         screenStructChange = 1;
+        g_screenExitMode = VM_SCREEN_EXIT_DESTROY;
         g_screenRemovedWithoutNext = 0;
+        g_screenEnterExistingNoCallback = 0;
         vm_set_call_result(VM_SCREEN_isInQuit_ADDRESS);
     }
-    else if (idx == 2)
+    else if (idx == 1)
     {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        if (tmp1 == 0)
+            tmp1 = vmAddedScreen;
+        g_screenLoadResourcePendingScreen = tmp1;
+        g_screenLoadResourcePendingParam = vm_screen_stack_lookup_param(tmp1);
+        screenStructNotifyLoadRes = tmp1 != 0;
+        vm_set_call_result(0);
+    }
+    else if (idx == 2 || idx == 3)
+    {
+        bool acceptChange = true;
+        u32 moduleBase = 0;
+        const vm_net_mock_scene_change_target *activeTarget = NULL;
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
         uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
-        if (tmp1 != 0 && tmp1 != vmAddedScreen)
+        if (idx == 2)
         {
-            vm_autotest_note("screen_mgr idx=2 type=replace caller=%08x screen=%08x added=%08x r1=%08x r2=%08x r3=%08x\n",
-                             lastAddress, tmp1, vmAddedScreen, tmp2, tmp3, tmp4);
-            vm_set_var(VM_SCREEN_nextSubTScreen_ADDRESS, tmp1);
             tmp2 = 0;
-            vm_set_var(VM_SCREEN_isInQuit_ADDRESS, tmp2);
-            screenStructChange = 1;
-            g_screenRemovedWithoutNext = 0;
+            tmp3 = 1;
         }
-        else
+        if (tmp1 != 0 && tmp1 == vmAddedScreen && lastAddress == 0x01018150)
         {
-            if (tmp1 != 0 &&
-                tmp1 == vmAddedScreen &&
-                (lastAddress == 0x010182A6 || lastAddress == 0x01018150))
+            activeTarget = vm_active_scene_reenter_target();
+            if (vm_net_mock_consume_update_completed_scene_reenter(activeTarget))
             {
-                bool acceptSameSceneReenter = true;
-                const vm_net_mock_scene_change_target *activeTarget = NULL;
-                /*
-                 * Same-class scene switches call the platform screen-change API
-                 * with the current screen. Treat both the local portal
-                 * FindEmptyActorSlot() path and the EnterSceneByMapName() path
-                 * as real lifecycle requests so the scene screen can re-enter
-                 * its setup path.
-                 */
-                if (lastAddress == 0x01018150)
-                {
-                    activeTarget = vm_active_scene_reenter_target();
-                    if (vm_net_mock_consume_update_completed_scene_reenter(activeTarget))
-                    {
-                        acceptSameSceneReenter = true;
-                    }
-                    else if (vm_scene_same_reenter_matches_target(activeTarget))
-                    {
-                        acceptSameSceneReenter = false;
-                        printf("[info][screen] screen_mgr same-suppressed caller=%08x serial=%u scene=%s pos=(%u,%u) exit=%u\n",
-                               lastAddress,
-                               g_vm_net_mock_last_scene_change_target_serial,
-                               activeTarget ? activeTarget->scene : "",
-                               activeTarget ? activeTarget->x : 0,
-                               activeTarget ? activeTarget->y : 0,
-                               activeTarget ? activeTarget->exitId : 0);
-                        vm_autotest_note("screen_mgr idx=2 type=same-suppressed caller=%08x screen=%08x added=%08x scene=%s pos=(%u,%u) exit=%u\n",
-                                         lastAddress, tmp1, vmAddedScreen,
-                                         activeTarget ? activeTarget->scene : "",
-                                         activeTarget ? activeTarget->x : 0,
-                                         activeTarget ? activeTarget->y : 0,
-                                         activeTarget ? activeTarget->exitId : 0);
-                    }
-                    else
-                    {
-                        vm_scene_same_reenter_remember_target(activeTarget);
-                    }
-                }
-                if (acceptSameSceneReenter)
-                {
-                    if (lastAddress == 0x01018150)
-                    {
-                        printf("[info][screen] screen_mgr same caller=%08x screen=%08x serial=%u scene=%s pos=(%u,%u) exit=%u\n",
-                               lastAddress, tmp1,
-                               g_vm_net_mock_last_scene_change_target_serial,
-                               activeTarget ? activeTarget->scene : "",
-                               activeTarget ? activeTarget->x : 0,
-                               activeTarget ? activeTarget->y : 0,
-                               activeTarget ? activeTarget->exitId : 0);
-                    }
-                    vm_autotest_note("screen_mgr idx=2 type=same caller=%08x screen=%08x added=%08x r1=%08x r2=%08x r3=%08x\n",
-                                     lastAddress, tmp1, vmAddedScreen, tmp2, tmp3, tmp4);
-                    vm_set_var(VM_SCREEN_nextSubTScreen_ADDRESS, tmp1);
-                    tmp2 = 0;
-                    vm_set_var(VM_SCREEN_isInQuit_ADDRESS, tmp2);
-                    screenStructChange = 1;
-                    g_screenRemovedWithoutNext = 0;
-                }
+                acceptChange = true;
+            }
+            else if (vm_scene_same_reenter_matches_target(activeTarget))
+            {
+                acceptChange = false;
+                printf("[info][screen] screen_mgr same-suppressed caller=%08x serial=%u scene=%s pos=(%u,%u) exit=%u\n",
+                       lastAddress,
+                       g_vm_net_mock_last_scene_change_target_serial,
+                       activeTarget ? activeTarget->scene : "",
+                       activeTarget ? activeTarget->x : 0,
+                       activeTarget ? activeTarget->y : 0,
+                       activeTarget ? activeTarget->exitId : 0);
+                vm_autotest_note("screen_mgr idx=%u type=same-suppressed caller=%08x screen=%08x added=%08x scene=%s pos=(%u,%u) exit=%u\n",
+                                 idx, lastAddress, tmp1, vmAddedScreen,
+                                 activeTarget ? activeTarget->scene : "",
+                                 activeTarget ? activeTarget->x : 0,
+                                 activeTarget ? activeTarget->y : 0,
+                                 activeTarget ? activeTarget->exitId : 0);
+            }
+            else
+            {
+                vm_scene_same_reenter_remember_target(activeTarget);
             }
         }
-        vm_set_call_result(VM_SCREEN_isInQuit_ADDRESS);
-    }
-    else if (idx == 4)
-    {
-        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        vmAddedScreen = tmp1;
-        u32 moduleBase = 0;
-        if (lastAddress >= VM_Memory_Pool_ADDRESS && lastAddress < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
+        if (tmp1 != 0 && acceptChange)
         {
-            uc_reg_read(MTK, UC_ARM_REG_R9, &moduleBase);
-        }
-        vm_screen_stack_push(tmp1, moduleBase);
-        if (moduleBase)
-        {
-            g_currentScreenThis = tmp1 - 0x18;
-            g_currentScreenModuleBase = moduleBase;
-        }
-        u32 startupObj = 0;
-        startupObj = vm_get_var(Global_R9 + 0x9928 + 0x10);
-        if (startupObj == 0 && tmp1 != 0 && g_lastStartupScreenState != 0xff)
-        {
-            /* Firmware's screen manager maintains a focused screen stack.  The
-             * emulator still has a single active screen slot, so after startup
-             * vmAddScreen promotes the newly added screen to the active slot.
-             */
-            tmp2 = 0;
+            if (lastAddress >= VM_Memory_Pool_ADDRESS && lastAddress < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
+                uc_reg_read(MTK, UC_ARM_REG_R9, &moduleBase);
+            if (!moduleBase)
+                moduleBase = vm_screen_stack_lookup_module_base(tmp1);
+            vm_autotest_note("screen_mgr idx=%u type=change caller=%08x screen=%08x param=%08x flags=%u old=%08x\n",
+                             idx, lastAddress, tmp1, tmp2, tmp3, vmAddedScreen);
+            vm_screen_stack_replace_top(tmp1, tmp2, tmp3, moduleBase);
+            vmAddedScreen = tmp1;
             vm_set_var(VM_SCREEN_nextSubTScreen_ADDRESS, tmp1);
-            vm_set_var(VM_SCREEN_isInQuit_ADDRESS, tmp2);
+            tmp4 = 0;
+            vm_set_var(VM_SCREEN_isInQuit_ADDRESS, tmp4);
             screenStructChange = 1;
+            g_screenExitMode = VM_SCREEN_EXIT_DESTROY;
             g_screenRemovedWithoutNext = 0;
+            g_screenEnterExistingNoCallback = 0;
         }
         vm_set_call_result(0);
     }
-    else if (idx == 5)
+    else if (idx == 4 || idx == 5)
     {
+        u32 moduleBase = 0;
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-        /*
-         * The game passes both screen table pointers and owner/object pointers
-         * here.  Treating it as an exact stack contains check made valid screens
-         * look absent (for example table+0xe8 during login).  Firmware accepts
-         * this as a successful screen-manager query, so keep the permissive
-         * result and use the stack only as debug state.
-         */
-        vm_set_call_result(1);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        bool wasEmptyScreenStack = g_screenRemovedWithoutNext || vmAddedScreen == 0 || g_screenStackCount == 0;
+        if (idx == 4)
+        {
+            tmp2 = 0;
+            tmp3 = 1;
+        }
+        if (lastAddress >= VM_Memory_Pool_ADDRESS && lastAddress < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
+            uc_reg_read(MTK, UC_ARM_REG_R9, &moduleBase);
+        vm_screen_stack_push(tmp1, tmp2, tmp3, moduleBase);
+        if (tmp1 != 0)
+            vmAddedScreen = tmp1;
+        u32 startupObj = 0;
+        if (Global_R9)
+            startupObj = vm_get_var(Global_R9 + 0x9928 + 0x10);
+        bool promoteAddScreen = tmp1 != 0 && (wasEmptyScreenStack ||
+                                               g_currentScreenThis != 0 ||
+                                               (startupObj == 0 && g_lastStartupScreenState != 0xff));
+        if (promoteAddScreen)
+        {
+            vm_set_var(VM_SCREEN_nextSubTScreen_ADDRESS, tmp1);
+            tmp4 = 0;
+            vm_set_var(VM_SCREEN_isInQuit_ADDRESS, tmp4);
+            screenStructChange = 1;
+            g_screenExitMode = g_screenStackCount > 1 ? VM_SCREEN_EXIT_PAUSE : VM_SCREEN_EXIT_DESTROY;
+            g_screenEnterExistingNoCallback = 0;
+        }
+        if (tmp1 != 0)
+            g_screenRemovedWithoutNext = 0;
+        vm_autotest_note("screen_mgr idx=%u type=add caller=%08x screen=%08x param=%08x flags=%u depth=%u\n",
+                         idx, lastAddress, tmp1, tmp2, tmp3, g_screenStackCount);
+        vm_set_call_result(0);
     }
     else if (idx == 6)
     {
@@ -9040,18 +9294,21 @@ static bool hook_vm_manager_screen_func(u32 address)
         int removeIndex = vm_screen_stack_find_related(tmp1);
         bool removingCurrent = removeIndex >= 0 && g_screenStack[(u32)removeIndex] == vmAddedScreen;
         tmp3 = 0;
+        tmp2 = 0;
         tmp5 = 0;
-        tmp4 = vm_screen_stack_remove(tmp1, &tmp3, &tmp5) ? 1 : 0;
+        tmp4 = vm_screen_stack_remove(tmp1, &tmp3, &tmp2, &tmp5) ? 1 : 0;
         printf("[info][screen] screen_mgr remove requested=%08x current=%08x result=%u current_match=%u new_top=%08x module=%08x\n",
                tmp1, vmAddedScreen, tmp4, removingCurrent ? 1u : 0u, tmp3, tmp5);
         if (tmp4 && removingCurrent && tmp3)
         {
+            u32 isInQuit = vm_get_var(VM_SCREEN_isInQuit_ADDRESS);
             g_activeScreenRemovedThisFrame = 1;
-            g_screenResumeExisting = 1;
+            g_screenResumeExisting = isInQuit ? 0 : 1;
+            g_screenEnterExistingNoCallback = isInQuit ? 1 : 0;
+            g_screenExitMode = VM_SCREEN_EXIT_SKIP;
             vmAddedScreen = tmp3;
             g_currentScreenThis = tmp3 - 0x18;
             g_currentScreenModuleBase = tmp5;
-            u32 isInQuit = 0;
             vm_set_var(VM_SCREEN_nextSubTScreen_ADDRESS, tmp3);
             vm_set_var(VM_SCREEN_isInQuit_ADDRESS, isInQuit);
             screenStructChange = 1;
@@ -9061,15 +9318,54 @@ static bool hook_vm_manager_screen_func(u32 address)
         {
             g_activeScreenRemovedThisFrame = 1;
             vmAddedScreen = 0;
+            g_screenResumeExisting = 0;
+            g_screenEnterExistingNoCallback = 0;
             g_screenRemovedWithoutNext = 1;
+            g_screenExitMode = VM_SCREEN_EXIT_SKIP;
+            g_currentScreenThis = 0;
+            g_currentScreenModuleBase = 0;
+            g_screenLoadResourcePendingScreen = 0;
+            g_screenLoadResourcePendingParam = 0;
+            screenStructNotifyLoadRes = 0;
+            vm_set_var(VM_SCREEN_nextSubTScreen_ADDRESS, 0);
         }
         vm_set_call_result(tmp4);
+    }
+    else if (idx == 7 || idx == 8)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        if (idx == 7)
+            tmp2 = 0;
+        g_screenLoadResourcePendingScreen = tmp1;
+        g_screenLoadResourcePendingParam = tmp2 ? tmp2 : vm_screen_stack_lookup_param(tmp1);
+        screenStructNotifyLoadRes = tmp1 != 0;
+        vm_set_call_result(0);
+    }
+    else if (idx == 9)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        int existing = vm_screen_stack_find_related(tmp1);
+        tmp2 = existing >= 0 && g_screenStackCount > 0 && (u32)existing == g_screenStackCount - 1;
+        vm_set_call_result(tmp2);
+    }
+    else if (idx == 10)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        int existing = vm_screen_stack_find_related(tmp1);
+        tmp2 = existing == 0 && g_screenStackCount > 0;
+        vm_set_call_result(tmp2);
+    }
+    else if (idx == 11)
+    {
+        vm_set_call_result(0);
     }
     else
     {
         printf("[impl]vmScreenManager调用位置:%d\n", idx);
         assert(0);
     }
+screen_func_return:
     uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
     vm_bx(tmp1);
     return true;
@@ -9518,6 +9814,9 @@ static bool hook_vm_manager_gameold_func(u32 address)
         tmp2 = 0;
         vm_set_var(VM_SCREEN_isInQuit_ADDRESS, tmp2);
         screenStructChange = 1;
+        g_screenExitMode = VM_SCREEN_EXIT_DESTROY;
+        g_screenRemovedWithoutNext = 0;
+        g_screenEnterExistingNoCallback = 0;
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
     }
     else if (idx == 62)
@@ -9536,6 +9835,8 @@ static bool hook_vm_manager_gameold_func(u32 address)
             entry20 = vm_get_var(screenPtr + 0x14);
             entry24 = vm_get_var(screenPtr + 0x18);
         }
+        g_screenLoadResourcePendingScreen = 0;
+        g_screenLoadResourcePendingParam = 0;
         screenStructNotifyLoadRes = 1;
         DEBUG_PRINT("[call]SCREEN_NotifyLoadResource(entry:0x%x)\n", tmp2);
     }
@@ -9577,7 +9878,7 @@ static bool hook_vm_manager_gameold_func(u32 address)
     }
     else if (idx == 69)
     {
-        uc_reg_write(MTK, UC_ARM_REG_R0, &g_curKeyDownState);
+        vm_set_call_result(g_curKeyDownState);
     }
 
     else if (idx == 81)
@@ -9940,6 +10241,7 @@ static bool hook_vm_manager_gameold_func(u32 address)
         assert(0);
     }
     // bx lr实现
+gameold_func_return:
     uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
     vm_bx(tmp1);
     return true;
