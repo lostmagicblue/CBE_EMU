@@ -229,6 +229,10 @@ static u32 g_currentScreenDataPackage = 0;
 static u32 g_poolModuleR9s[16];
 static u32 g_poolModuleR9Count = 0;
 static u32 g_screenRootExitArmed = 0;
+static u32 g_screenRootExitPending = 0;
+static u32 g_screenRootExitPendingRoot = 0;
+static u32 g_screenRootExitPendingRemoved = 0;
+static u32 g_screenRootExitPendingTick = 0;
 static volatile u32 g_hostQuitRequested = 0;
 static volatile u32 g_hostQuitCleanupStarted = 0;
 static volatile u32 g_vmThreadFinished = 0;
@@ -242,6 +246,7 @@ static char g_lastSceLoadName[96] = "-";
 #define VM_SCREEN_EXIT_DESTROY 0
 #define VM_SCREEN_EXIT_PAUSE 1
 #define VM_SCREEN_EXIT_SKIP 2
+#define VM_SCREEN_ROOT_EXIT_GRACE_TICKS 15
 
 static bool g_vm_net_mock_pending_scene_save_valid = false;
 static char g_vm_net_mock_pending_scene_save_scene[64];
@@ -936,6 +941,57 @@ static bool vm_screen_is_entry_root(u32 screen)
     return vm_get_var(screen) == 0 && vm_get_var(screen + 4) == 0;
 }
 
+static void vm_screen_root_exit_cancel(const char *reason)
+{
+    if (!g_screenRootExitPending)
+        return;
+
+    vm_autotest_note("screen_mgr root_exit_cancel reason=%s root=%08x removed=%08x tick=%u\n",
+                     reason ? reason : "unknown",
+                     g_screenRootExitPendingRoot,
+                     g_screenRootExitPendingRemoved,
+                     g_schedulerTick);
+    g_screenRootExitPending = 0;
+    g_screenRootExitPendingRoot = 0;
+    g_screenRootExitPendingRemoved = 0;
+    g_screenRootExitPendingTick = 0;
+}
+
+static void vm_screen_root_exit_arm_pending(u32 removedScreen, u32 rootScreen)
+{
+    g_screenRootExitPending = 1;
+    g_screenRootExitPendingRoot = rootScreen;
+    g_screenRootExitPendingRemoved = removedScreen;
+    g_screenRootExitPendingTick = g_schedulerTick;
+    vm_autotest_note("screen_mgr root_exit_pending caller=%08x removed=%08x root=%08x tick=%u\n",
+                     lastAddress, removedScreen, rootScreen, g_schedulerTick);
+}
+
+static void vm_screen_root_exit_maybe_request(void)
+{
+    if (!g_screenRootExitPending || g_hostQuitRequested || g_hostQuitCleanupStarted)
+        return;
+
+    if (g_screenStackCount != 1 ||
+        vmAddedScreen != g_screenRootExitPendingRoot ||
+        !vm_screen_is_entry_root(g_screenRootExitPendingRoot))
+    {
+        vm_screen_root_exit_cancel("screen_changed");
+        return;
+    }
+
+    if (g_schedulerTick - g_screenRootExitPendingTick < VM_SCREEN_ROOT_EXIT_GRACE_TICKS)
+        return;
+
+    vm_autotest_note("screen_mgr root_exit_confirm root=%08x removed=%08x depth=%u waited=%u\n",
+                     g_screenRootExitPendingRoot,
+                     g_screenRootExitPendingRemoved,
+                     g_screenStackCount,
+                     g_schedulerTick - g_screenRootExitPendingTick);
+    g_screenRootExitPending = 0;
+    vm_request_host_quit("screen_root_exit");
+}
+
 static bool vm_infer_battle_module_from_screen(u32 screen, u32 *codeBase, u32 *moduleR9)
 {
     u32 init = 0;
@@ -992,6 +1048,8 @@ static void vm_screen_stack_push_with_data_package(u32 screen, u32 param, u32 fl
 {
     if (screen == 0)
         return;
+
+    vm_screen_root_exit_cancel("stack_push");
 
     int existing = vm_screen_stack_find(screen);
     if (existing >= 0)
@@ -1557,6 +1615,10 @@ static void vm_clear_screen_state_after_quit(void)
     memset(g_poolModuleR9s, 0, sizeof(g_poolModuleR9s));
     g_poolModuleR9Count = 0;
     g_screenRootExitArmed = 0;
+    g_screenRootExitPending = 0;
+    g_screenRootExitPendingRoot = 0;
+    g_screenRootExitPendingRemoved = 0;
+    g_screenRootExitPendingTick = 0;
     vm_set_var(VM_SCREEN_nextSubTScreen_ADDRESS, 0);
 }
 
@@ -2702,7 +2764,11 @@ static uc_err scheduler_tick(void)
     uc_err err = scheduler_dispatch_timers();
     if (err != UC_ERR_OK)
         return err;
-    return scheduler_dispatch_net_tasks();
+    err = scheduler_dispatch_net_tasks();
+    if (err != UC_ERR_OK)
+        return err;
+    vm_screen_root_exit_maybe_request();
+    return UC_ERR_OK;
 }
 
 /**
@@ -4913,6 +4979,7 @@ u8 *SimpleRamMatch(u8 *start, u8 *end, u8 *matchStart, int matchLen)
 #define LOAD_CBE_PATH "CBE/武林外传(新品).CBE"
 #define LOAD_CBE_PATH "CBE/众神之战.CBE"
 #define LOAD_CBE_PATH "CBE/恶魔城登录版.CBE"
+#define LOAD_CBE_PATH "CBE/恶魔城登录版.CBE"
 #define LOAD_CBE_PATH "CBE/江湖OL.CBE"
 
 
@@ -5013,6 +5080,10 @@ static void vm_reset_runtime_state_for_restart(void)
     g_currentScreenModuleBase = 0;
     g_currentScreenDataPackage = 0;
     g_screenRootExitArmed = 0;
+    g_screenRootExitPending = 0;
+    g_screenRootExitPendingRoot = 0;
+    g_screenRootExitPendingRemoved = 0;
+    g_screenRootExitPendingTick = 0;
     g_hostQuitRequested = 0;
     g_hostQuitCleanupStarted = 0;
     g_vmThreadFinished = 0;
@@ -5488,9 +5559,6 @@ static void vm_note_castlevania_wpay_pc(u32 pc)
     else if (pc == 0x01002746)
         phase = "game_pay_call";
     else
-        return;
-
-    if (!g_autotestEnabled)
         return;
 
     uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
@@ -6017,6 +6085,7 @@ void RunArmProgram(void *param)
                 u32 _frameTick = SDL_GetTicks();
                 while (true)
                 {
+                    bool clearTransientInputBeforeIdle = false;
                     p = scheduler_tick();
                     if (p != UC_ERR_OK)
                         break;
@@ -6121,6 +6190,7 @@ void RunArmProgram(void *param)
                                     printf("SCR_Event异常:%s\n", uc_strerror(p));
                                     assert(0);
                                 }
+                                clearTransientInputBeforeIdle = true;
                                 scheduler_note_screen_data_package(screenThisPtr);
                                 p = scheduler_flush_post_vm_business_send_ready("screen_logic_input");
                                 if (p != UC_ERR_OK)
@@ -6132,6 +6202,14 @@ void RunArmProgram(void *param)
                     }
                     if (screenStructChange == 1 || g_screenRemovedWithoutNext)
                         break;
+                    if (clearTransientInputBeforeIdle)
+                    {
+                        /* Event logic already saw these one-shot flags; keep hold state for idle. */
+                        vm_clear_key_down_state();
+                        simulateTouchDown = 0;
+                        simulateTouchUp = 0;
+                        simulateTouchDrag = 0;
+                    }
                     if (1)
                     {
                         if (screenLogicEntry && !vm_is_pool_entry(screenLogicEntry))
@@ -10562,11 +10640,7 @@ static bool hook_vm_manager_screen_func(u32 address)
             screenStructChange = 1;
             g_screenRemovedWithoutNext = 0;
             if (requestAppClose)
-            {
-                vm_autotest_note("screen_mgr root_exit caller=%08x removed=%08x root=%08x depth=%u\n",
-                                 lastAddress, tmp1, tmp3, g_screenStackCount);
-                vm_request_host_quit("screen_root_exit");
-            }
+                vm_screen_root_exit_arm_pending(tmp1, tmp3);
         }
         else if (tmp4 && removingCurrent)
         {
@@ -11069,6 +11143,7 @@ static bool hook_vm_manager_gameold_func(u32 address)
         // MEMORY:016E4394 DCD 0x16C4D3B Remuse
         // MEMORY:016E4398 DCD 0x16C4D2D LoadResource
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_screen_root_exit_cancel("old_screen_change");
         vm_set_var(VM_SCREEN_nextSubTScreen_ADDRESS, tmp1);
         tmp2 = vm_get_var(tmp1 + 8);
         DEBUG_PRINT("[call]SCREEN_ChangeScreen(%x)\n", tmp1);
