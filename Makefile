@@ -29,6 +29,6 @@ obj/main.o: src/main.c src/mock-server.c src/vmFunc.c src/hookRam.c src/vmEvent.
 obj/gifDecode.o: src/gifDecode.c
 	$(CC) -g  -w -c src/gifDecode.c -o obj/gifDecode.o
 obj/resource.o: resource.rc
-	windres $< -O coff -o $@	
+	windres $< -O coff -o $@
 build:
 	$(CC) $(OBJS) -o bin/main.exe -g -w -lpthread -liconv -lm -lmingw32 -lkernel32 -Wall -lws2_32 -DNETWORK_SUPPORT $(UNICORN) -L$(SDL2)/lib/ -lSDL2main -lSDL2
