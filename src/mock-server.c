@@ -2374,14 +2374,18 @@ static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t
 
     u32 pc = (u32)address & ~1u;
     u32 moduleR9 = vm_module_r9_for_pool_pc(pc);
+    u32 currentR9 = 0;
+
+    uc_reg_read(uc, UC_ARM_REG_R9, &currentR9);
+    if (currentR9 && vm_pool_module_r9_matches_pc(pc, currentR9))
+        vm_dl_note_sp_bf(currentR9, "pool-current");
 
     if (moduleR9 != 0)
     {
-        u32 currentR9 = 0;
-        uc_reg_read(uc, UC_ARM_REG_R9, &currentR9);
         if (currentR9 != moduleR9)
         {
             uc_reg_write(uc, UC_ARM_REG_R9, &moduleR9);
+            vm_dl_note_sp_bf(moduleR9, "pool-switch");
             if (g_autotestEnabled && s_poolR9SwitchTraceCount < 64)
             {
                 ++s_poolR9SwitchTraceCount;
@@ -2390,6 +2394,7 @@ static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t
             }
         }
     }
+
 }
 
 

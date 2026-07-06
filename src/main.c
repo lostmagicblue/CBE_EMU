@@ -226,6 +226,7 @@ static u32 g_screenLoadResourcePendingParam = 0;
 static u32 g_currentScreenThis = 0;
 u32 g_currentScreenModuleBase = 0;
 static u32 g_currentScreenDataPackage = 0;
+static u32 g_dlSpBf = 0;
 static u32 g_poolModuleR9s[16];
 static u32 g_poolModuleR9Count = 0;
 static u32 g_screenRootExitArmed = 0;
@@ -788,6 +789,7 @@ static void scheduler_normalize_startup_screen_state(void)
 static uc_err vm_emu_start(u32 begin, u32 until);
 static bool vm_is_pool_entry(u32 entry);
 static void vm_restore_r9_for_entry(u32 entry);
+static void vm_dl_note_sp_bf(u32 moduleR9, const char *reason);
 static uc_err vm_run_host_quit_cleanup(u32 exitAddr, u32 thumbExitAddr);
 static void vm_request_host_quit(const char *reason);
 static void scheduler_prepare_screen_call(u32 screenThisPtr);
@@ -805,6 +807,20 @@ static bool vm_is_writable_vm_range(u32 addr, u32 len)
     if (addr >= STACK_ADDRESS && addr + len <= STACK_ADDRESS + 0x100000u)
         return true;
     return false;
+}
+
+static void vm_trace_screen_data_package_change(const char *phase, u32 screen, u32 oldDataPackage, u32 newDataPackage, u32 globalDataPackage)
+{
+    static u32 s_logCount = 0;
+    if (oldDataPackage == newDataPackage || s_logCount >= 64)
+        return;
+    ++s_logCount;
+    printf("[info][screen] dp_change phase=%s screen=%08x old=%08x new=%08x global=%08x caller=%08x current=%08x this=%08x depth=%u\n",
+           phase ? phase : "-", screen, oldDataPackage, newDataPackage, globalDataPackage,
+           lastAddress, vmAddedScreen, g_currentScreenThis, g_screenStackCount);
+    vm_autotest_note("screen_dp_change phase=%s screen=%08x old=%08x new=%08x global=%08x caller=%08x current=%08x this=%08x depth=%u\n",
+                     phase ? phase : "-", screen, oldDataPackage, newDataPackage, globalDataPackage,
+                     lastAddress, vmAddedScreen, g_currentScreenThis, g_screenStackCount);
 }
 
 static int vm_screen_stack_find(u32 screen)
@@ -867,7 +883,12 @@ static void vm_screen_stack_update_data_package(u32 screen, u32 dataPackage)
 {
     int existing = vm_screen_stack_find_related(screen);
     if (existing >= 0)
+    {
+        u32 oldDataPackage = g_screenStackDataPackage[(u32)existing];
         g_screenStackDataPackage[(u32)existing] = dataPackage;
+        vm_trace_screen_data_package_change("stack-update", g_screenStack[(u32)existing],
+                                            oldDataPackage, dataPackage, vm_current_data_package());
+    }
 }
 
 static u32 vm_screen_default_call_param(u32 screen)
@@ -928,7 +949,9 @@ static void vm_screen_stack_preserve_active_if_needed(void)
         return;
 
     u32 moduleBase = g_currentScreenModuleBase ? g_currentScreenModuleBase : vm_screen_stack_lookup_module_base(activeScreen);
-    u32 dataPackage = g_currentScreenDataPackage ? g_currentScreenDataPackage : vm_current_data_package();
+    u32 dataPackage = vm_current_data_package();
+    if (dataPackage == 0)
+        dataPackage = g_currentScreenDataPackage;
     vm_screen_stack_push_with_data_package(activeScreen, activeParam, 1, moduleBase, dataPackage);
     vm_autotest_note("screen_mgr preserve_active screen=%08x param=%08x module=%08x dp=%08x depth=%u\n",
                      activeScreen, activeParam, moduleBase, dataPackage, g_screenStackCount);
@@ -1081,11 +1104,12 @@ static void vm_screen_stack_push_with_data_package(u32 screen, u32 param, u32 fl
     g_screenStackParam[g_screenStackCount] = param;
     g_screenStackModuleBase[g_screenStackCount] = moduleBase;
     g_screenStackDataPackage[g_screenStackCount] = dataPackage;
+    vm_trace_screen_data_package_change("stack-push", screen, 0, dataPackage, vm_current_data_package());
     g_screenStackFlags[g_screenStackCount] = (u8)flags;
     g_screenStackInited[g_screenStackCount] = 0;
     g_screenStackCount++;
     if (moduleBase != 0)
-        vm_pool_module_remember_r9(moduleBase);
+        vm_dl_note_sp_bf(moduleBase, "screen-push");
     if (moduleBase != 0 || g_screenStackCount >= 3)
         g_screenRootExitArmed = 1;
 }
@@ -1285,6 +1309,38 @@ static bool vm_pool_module_base_has_code(u32 codeBase)
     return false;
 }
 
+static bool vm_cbe_api_ptr_looks_callable(u32 target)
+{
+    u32 pc = target & ~1u;
+    u32 dataEnd = Program_Data_Address + g_cbeInfo.headerInt4;
+    u32 codeEnd = Program_ROM_Address + g_cbeInfo.headerInt2;
+
+    if (pc == 0)
+        return false;
+    if (pc == PROGRAM_EXIT_ADDR || vm_address_in_range(pc, VM_NATIVE_DISPATCH_ADDRESS, 4))
+        return true;
+    if (vm_is_manager_func_stub_address(pc))
+        return true;
+    if (vm_is_pool_entry(pc))
+        return true;
+    if (Program_Data_Address && dataEnd >= Program_Data_Address &&
+        pc >= Program_Data_Address && pc < dataEnd)
+    {
+        return false;
+    }
+    if (Program_ROM_Address && Program_Data_Address > Program_ROM_Address &&
+        pc >= Program_ROM_Address && pc < Program_Data_Address)
+    {
+        return true;
+    }
+    if (Program_ROM_Address && codeEnd >= Program_ROM_Address &&
+        pc >= Program_ROM_Address && pc < codeEnd)
+    {
+        return true;
+    }
+    return false;
+}
+
 static bool vm_pool_module_r9_matches_pc(u32 pc, u32 moduleR9)
 {
     const u32 moduleR9Delta = 0x14000u;
@@ -1307,6 +1363,30 @@ static bool vm_pool_module_r9_matches_pc(u32 pc, u32 moduleR9)
     if (pc < codeBase || pc >= codeBase + moduleWindowSize)
         return false;
     return vm_pool_module_base_has_code(codeBase);
+}
+
+/*
+ * Firmware dynamic-module callbacks restore R9 through KEEP_SP by loading the
+ * global sp_bf value into R9. We do not execute that loader glue directly, so
+ * mirror the active sp_bf on the host and prefer it before structural fallback.
+ */
+static void vm_dl_note_sp_bf(u32 moduleR9, const char *reason)
+{
+    static u32 s_traceCount = 0;
+    if (!moduleR9)
+        return;
+    if (!vm_pool_module_r9_matches_pc(moduleR9 - 0x14000u, moduleR9))
+        return;
+    if (g_dlSpBf == moduleR9)
+        return;
+    g_dlSpBf = moduleR9;
+    vm_pool_module_remember_r9(moduleR9);
+    if (g_autotestEnabled && s_traceCount < 32)
+    {
+        ++s_traceCount;
+        vm_autotest_note("dl_sp_bf reason=%s r9=%08x count=%u\n",
+                         reason ? reason : "-", moduleR9, s_traceCount);
+    }
 }
 
 static void vm_pool_module_remember_r9(u32 moduleR9)
@@ -1352,13 +1432,20 @@ static u32 vm_module_r9_for_pool_pc(u32 pc)
     const u32 moduleR9Delta = 0x14000u;
     const u32 moduleAlign = 0x80000u;
     u32 moduleR9 = 0;
+    u32 currentR9 = 0;
     u32 codeBase = 0;
-    u32 inferredCodeBase = 0;
-    u32 inferredModuleR9 = 0;
+    bool allowRememberedFallback = false;
 
     pc &= ~1u;
     if (!vm_is_pool_entry(pc))
         return 0;
+
+    uc_reg_read(MTK, UC_ARM_REG_R9, &currentR9);
+    if (currentR9 && vm_pool_module_r9_matches_pc(pc, currentR9))
+        return currentR9;
+
+    if (g_dlSpBf && vm_pool_module_r9_matches_pc(pc, g_dlSpBf))
+        return g_dlSpBf;
 
     if (g_currentScreenModuleBase && vm_pool_module_r9_matches_pc(pc, g_currentScreenModuleBase))
         return g_currentScreenModuleBase;
@@ -1374,17 +1461,23 @@ static u32 vm_module_r9_for_pool_pc(u32 pc)
             return moduleR9;
     }
 
-    for (u32 i = g_poolModuleR9Count; i > 0; --i)
-    {
-        moduleR9 = g_poolModuleR9s[i - 1];
-        if (moduleR9 && vm_pool_module_r9_matches_pc(pc, moduleR9))
-            return moduleR9;
-    }
+    /* The screen callback layout used by some pool modules overlaps with non-battle
+       loading/transition screens. A blind battle-style R9 guess here can hijack
+       ordinary mmGame flows, so runtime switching stays with tracked context only. */
 
-    if (vm_infer_battle_module_from_screen(vmAddedScreen, &inferredCodeBase, &inferredModuleR9) &&
-        pc >= inferredCodeBase && pc < inferredCodeBase + 0x28000u)
+    allowRememberedFallback =
+        (currentR9 >= VM_Memory_Pool_ADDRESS && currentR9 < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE) ||
+        (g_currentScreenModuleBase >= VM_Memory_Pool_ADDRESS && g_currentScreenModuleBase < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE) ||
+        (vm_screen_stack_lookup_module_base(vmAddedScreen) >= VM_Memory_Pool_ADDRESS &&
+         vm_screen_stack_lookup_module_base(vmAddedScreen) < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE);
+    if (allowRememberedFallback)
     {
-        return inferredModuleR9;
+        for (u32 i = g_poolModuleR9Count; i > 0; --i)
+        {
+            moduleR9 = g_poolModuleR9s[i - 1];
+            if (moduleR9 && vm_pool_module_r9_matches_pc(pc, moduleR9))
+                return moduleR9;
+        }
     }
 
     codeBase = pc & ~(moduleAlign - 1u);
@@ -1392,9 +1485,7 @@ static u32 vm_module_r9_for_pool_pc(u32 pc)
     if (pc >= codeBase + 0xA818u && pc < codeBase + 0xAB1Cu &&
         vm_pool_module_r9_matches_pc(pc, moduleR9) &&
         vm_pool_battle_chat_context_valid(moduleR9))
-    {
         return moduleR9;
-    }
 
     return 0;
 }
@@ -1612,6 +1703,7 @@ static void vm_clear_screen_state_after_quit(void)
     g_currentScreenThis = 0;
     g_currentScreenModuleBase = 0;
     g_currentScreenDataPackage = 0;
+    g_dlSpBf = 0;
     memset(g_poolModuleR9s, 0, sizeof(g_poolModuleR9s));
     g_poolModuleR9Count = 0;
     g_screenRootExitArmed = 0;
@@ -1729,25 +1821,54 @@ static void scheduler_prepare_screen_call(u32 screenThisPtr)
     {
         g_currentScreenModuleBase = vm_screen_stack_lookup_module_base(screenThisPtr + 0x18);
     }
+    if (g_currentScreenModuleBase)
+        vm_dl_note_sp_bf(g_currentScreenModuleBase, "screen-prepare");
     u32 dataPackage = vm_screen_stack_lookup_data_package(screenThisPtr + 0x18);
     if (dataPackage)
     {
+        u32 oldDataPackage = g_currentScreenDataPackage;
         vm_restore_data_package(dataPackage);
         g_currentScreenDataPackage = dataPackage;
+        vm_trace_screen_data_package_change("prepare-stack", screenThisPtr + 0x18,
+                                            oldDataPackage, dataPackage, vm_current_data_package());
     }
-    else if (g_currentScreenDataPackage == 0)
+    else
     {
-        g_currentScreenDataPackage = vm_current_data_package();
+        u32 currentDataPackage = vm_current_data_package();
+        if (currentDataPackage != 0)
+        {
+            u32 oldDataPackage = g_currentScreenDataPackage;
+            g_currentScreenDataPackage = currentDataPackage;
+            vm_trace_screen_data_package_change("prepare-current", screenThisPtr + 0x18,
+                                                oldDataPackage, currentDataPackage, currentDataPackage);
+        }
     }
 }
 
 static void scheduler_note_screen_data_package(u32 screenThisPtr)
 {
+    static u32 s_skipLogCount = 0;
     if (screenThisPtr == 0)
         return;
+    u32 expectedScreen = screenThisPtr + 0x18;
+    if (vmAddedScreen == 0 || vmAddedScreen != expectedScreen)
+    {
+        if (s_skipLogCount < 32)
+        {
+            ++s_skipLogCount;
+            printf("[info][screen] dp_capture_skip expected=%08x current=%08x this=%08x caller=%08x depth=%u\n",
+                   expectedScreen, vmAddedScreen, screenThisPtr, lastAddress, g_screenStackCount);
+            vm_autotest_note("screen_dp_capture_skip expected=%08x current=%08x this=%08x caller=%08x depth=%u\n",
+                             expectedScreen, vmAddedScreen, screenThisPtr, lastAddress, g_screenStackCount);
+        }
+        return;
+    }
     u32 dataPackage = vm_current_data_package();
     if (dataPackage == 0)
         return;
+    u32 oldDataPackage = g_currentScreenDataPackage;
+    vm_trace_screen_data_package_change("capture-current", screenThisPtr + 0x18,
+                                        oldDataPackage, dataPackage, dataPackage);
     g_currentScreenDataPackage = dataPackage;
     vm_screen_stack_update_data_package(screenThisPtr + 0x18, dataPackage);
 }
@@ -5079,6 +5200,7 @@ static void vm_reset_runtime_state_for_restart(void)
     g_currentScreenThis = 0;
     g_currentScreenModuleBase = 0;
     g_currentScreenDataPackage = 0;
+    g_dlSpBf = 0;
     g_screenRootExitArmed = 0;
     g_screenRootExitPending = 0;
     g_screenRootExitPendingRoot = 0;
@@ -6258,6 +6380,8 @@ void RunArmProgram(void *param)
                         SDL_Delay(100 - _elapsed);
                     _frameTick = SDL_GetTicks();
                 }
+                if (g_hostQuitCleanupStarted)
+                    break;
                 uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
                 scheduler_prepare_screen_call(screenThisPtr);
                 uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
@@ -6281,13 +6405,18 @@ void RunArmProgram(void *param)
                             g_currentScreenModuleBase = removedModuleBase;
                         if (removedDataPackage)
                         {
+                            u32 oldDataPackage = g_currentScreenDataPackage;
                             g_currentScreenDataPackage = removedDataPackage;
                             vm_restore_data_package(removedDataPackage);
+                            vm_trace_screen_data_package_change("destroy-removed", removedThis + 0x18,
+                                                                oldDataPackage, removedDataPackage, vm_current_data_package());
                         }
                         uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
                         uc_reg_write(MTK, UC_ARM_REG_R0, &removedThis);
                         p = vm_emu_start(screenDestoryEntry, exitAddr);
                         g_currentScreenThis = savedScreenThis;
+                        vm_trace_screen_data_package_change("destroy-restore", removedThis + 0x18,
+                                                            g_currentScreenDataPackage, savedDataPackage, savedGlobalDataPackage);
                         g_currentScreenModuleBase = savedModuleBase;
                         g_currentScreenDataPackage = savedDataPackage;
                         vm_restore_data_package(savedGlobalDataPackage);
@@ -6297,6 +6426,9 @@ void RunArmProgram(void *param)
                             break;
                         }
                     }
+                }
+                else if (g_screenExitMode == VM_SCREEN_EXIT_SKIP)
+                {
                 }
                 else if (g_screenExitMode == VM_SCREEN_EXIT_PAUSE)
                 {
@@ -10543,6 +10675,8 @@ static bool hook_vm_manager_screen_func(u32 address)
                 uc_reg_read(MTK, UC_ARM_REG_R9, &moduleBase);
             if (!moduleBase)
                 moduleBase = vm_screen_stack_lookup_module_base(tmp1);
+            if (moduleBase)
+                vm_dl_note_sp_bf(moduleBase, "screen-change");
             vm_autotest_note("screen_mgr idx=%u type=change caller=%08x screen=%08x param=%08x flags=%u old=%08x\n",
                              idx, lastAddress, tmp1, tmp2, tmp3, vmAddedScreen);
             vm_screen_stack_replace_top(tmp1, tmp2, tmp3, moduleBase);
@@ -10574,6 +10708,8 @@ static bool hook_vm_manager_screen_func(u32 address)
             uc_reg_read(MTK, UC_ARM_REG_R9, &moduleBase);
         if (tmp1 != 0 && tmp1 != vmAddedScreen)
             vm_screen_stack_preserve_active_if_needed();
+        if (moduleBase)
+            vm_dl_note_sp_bf(moduleBase, "screen-add");
         vm_screen_stack_push(tmp1, tmp2, tmp3, moduleBase);
         if (tmp1 != 0)
             vmAddedScreen = tmp1;
@@ -10633,6 +10769,10 @@ static bool hook_vm_manager_screen_func(u32 address)
             vmAddedScreen = tmp3;
             g_currentScreenThis = tmp3 - 0x18;
             g_currentScreenModuleBase = tmp5;
+            if (tmp5)
+                vm_dl_note_sp_bf(tmp5, "screen-remove-newtop");
+            vm_trace_screen_data_package_change("remove-newtop", tmp3,
+                                                g_currentScreenDataPackage, newTopDataPackage, vm_current_data_package());
             g_currentScreenDataPackage = newTopDataPackage;
             vm_restore_data_package(newTopDataPackage);
             vm_set_var(VM_SCREEN_nextSubTScreen_ADDRESS, tmp3);
