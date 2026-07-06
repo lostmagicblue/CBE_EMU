@@ -209,6 +209,7 @@ u32 vmAddedScreen = 0;
 static u32 g_screenStack[32];
 static u32 g_screenStackParam[32];
 static u32 g_screenStackModuleBase[32];
+static u32 g_screenStackDataPackage[32];
 static u8 g_screenStackFlags[32];
 static u8 g_screenStackInited[32];
 static u32 g_screenStackCount = 0;
@@ -218,17 +219,25 @@ static u32 g_screenEnterExistingNoCallback = 0;
 static u32 g_activeScreenRemovedThisFrame = 0;
 static u32 g_activeScreenRemovedThis = 0;
 static u32 g_activeScreenRemovedModuleBase = 0;
+static u32 g_activeScreenRemovedDataPackage = 0;
 static u32 g_screenExitMode = 0;
 static u32 g_screenLoadResourcePendingScreen = 0;
 static u32 g_screenLoadResourcePendingParam = 0;
 static u32 g_currentScreenThis = 0;
 u32 g_currentScreenModuleBase = 0;
+static u32 g_currentScreenDataPackage = 0;
+static u32 g_poolModuleR9s[16];
+static u32 g_poolModuleR9Count = 0;
 static u32 g_screenRootExitArmed = 0;
 static volatile u32 g_hostQuitRequested = 0;
 static volatile u32 g_hostQuitCleanupStarted = 0;
 static volatile u32 g_vmThreadFinished = 0;
 static u32 g_appMainEntry = 0;
 static u32 g_appExitEntry = 0;
+static u8 g_wpayMockFlowActive = 0;
+static u32 g_lastSceLoadCtx = 0;
+static u32 g_lastSceLoadNamePtr = 0;
+static char g_lastSceLoadName[96] = "-";
 
 #define VM_SCREEN_EXIT_DESTROY 0
 #define VM_SCREEN_EXIT_PAUSE 1
@@ -537,6 +546,165 @@ static int vm_lcd_try_unpack_packed_rect(u32 p0, u32 p1, int *x, int *y, int *w,
     return 1;
 }
 
+static int vm_lcd_image_pitch_bytes(int width)
+{
+    return (((4 - width) & 3) + width) * PIXEL_PER_BYTE;
+}
+
+static bool vm_lcd_read_image_info(u32 imageInfo, u32 *pixels, int *width, int *height)
+{
+    u8 header[8];
+    if (imageInfo == 0)
+        return false;
+    if (uc_mem_read(MTK, imageInfo, header, sizeof(header)) != UC_ERR_OK)
+        return false;
+
+    *pixels = vm_get_var(imageInfo);
+    *width = (int)vm_get_var_short(imageInfo + 4);
+    *height = (int)vm_get_var_short(imageInfo + 6);
+    return *pixels != 0 && *width > 0 && *height > 0;
+}
+
+static void vm_lcd_call_draw_image_clip_ex(u32 imageInfo, int srcX, int srcY, int w, int h, int dstX, int dstY, bool alpha)
+{
+    u32 savedSp = 0;
+    u32 tempSp = 0;
+    u32 r0 = VM_screenImageStruct_ADDRESS;
+    u32 r1 = imageInfo;
+    u32 r2 = (u32)srcX;
+    u32 r3 = (u32)srcY;
+
+    if (w <= 0 || h <= 0)
+        return;
+
+    uc_reg_read(MTK, UC_ARM_REG_SP, &savedSp);
+    tempSp = savedSp - 16;
+    vm_set_var(tempSp, (u32)w);
+    vm_set_var(tempSp + 4, (u32)h);
+    vm_set_var(tempSp + 8, (u32)dstX);
+    vm_set_var(tempSp + 12, (u32)dstY);
+
+    uc_reg_write(MTK, UC_ARM_REG_R0, &r0);
+    uc_reg_write(MTK, UC_ARM_REG_R1, &r1);
+    uc_reg_write(MTK, UC_ARM_REG_R2, &r2);
+    uc_reg_write(MTK, UC_ARM_REG_R3, &r3);
+    uc_reg_write(MTK, UC_ARM_REG_SP, &tempSp);
+    if (alpha)
+        vm_vMDrawImageClipAndAlphaEx();
+    else
+        vM_DrawImageWithClipEx();
+    uc_reg_write(MTK, UC_ARM_REG_SP, &savedSp);
+}
+
+static int vm_lcd_draw_image_to_screen(u32 imageInfo, int dstX, int dstY)
+{
+    u32 srcPixels = 0;
+    int srcW = 0;
+    int srcH = 0;
+    int srcX = 0;
+    int srcY = 0;
+    int w;
+    int h;
+    u8 rowBuf[LCD_WIDTH * PIXEL_PER_BYTE];
+
+    if (!vm_lcd_read_image_info(imageInfo, &srcPixels, &srcW, &srcH))
+        return 0;
+    if (dstX >= LCD_WIDTH || dstY >= LCD_HEIGHT)
+        return 0;
+
+    w = srcW;
+    h = srcH;
+    if (dstX < 0)
+    {
+        srcX = -dstX;
+        w += dstX;
+        dstX = 0;
+    }
+    if (dstY < 0)
+    {
+        srcY = -dstY;
+        h += dstY;
+        dstY = 0;
+    }
+    if (srcX >= srcW || srcY >= srcH || w <= 0 || h <= 0)
+        return 1;
+    if (srcX + w > srcW)
+        w = srcW - srcX;
+    if (srcY + h > srcH)
+        h = srcH - srcY;
+    if (dstX + w > LCD_WIDTH)
+        w = LCD_WIDTH - dstX;
+    if (dstY + h > LCD_HEIGHT)
+        h = LCD_HEIGHT - dstY;
+    if (w <= 0 || h <= 0)
+        return 1;
+
+    int srcPitch = vm_lcd_image_pitch_bytes(srcW);
+    int dstPitch = LCD_PITCH * PIXEL_PER_BYTE;
+    int copyBytes = w * PIXEL_PER_BYTE;
+    if (copyBytes > (int)sizeof(rowBuf))
+        return 0;
+
+    for (int row = 0; row < h; ++row)
+    {
+        u32 srcOff = (u32)((srcY + row) * srcPitch + srcX * PIXEL_PER_BYTE);
+        u32 dstOff = (u32)((dstY + row) * dstPitch + dstX * PIXEL_PER_BYTE);
+        if (uc_mem_read(MTK, srcPixels + srcOff, rowBuf, copyBytes) != UC_ERR_OK)
+            return 0;
+        uc_mem_write(MTK, VM_screenImage_ADDRESS + dstOff, rowBuf, copyBytes);
+        memcpy(Lcd_Cache_Buffer + dstOff, rowBuf, copyBytes);
+    }
+    return 1;
+}
+
+static int vm_lcd_draw_image_with_alpha_to_screen(u32 imageInfo, int dstX, int dstY)
+{
+    u32 srcPixels = 0;
+    int srcW = 0;
+    int srcH = 0;
+
+    if (!vm_lcd_read_image_info(imageInfo, &srcPixels, &srcW, &srcH))
+        return 0;
+    (void)srcPixels;
+    if (dstX >= LCD_WIDTH || dstY >= LCD_HEIGHT)
+        return 0;
+    vm_lcd_call_draw_image_clip_ex(imageInfo, 0, 0, srcW, srcH, dstX, dstY, true);
+    return 1;
+}
+
+static u32 vm_lcd_pack_coord(int x, int y)
+{
+    return ((u32)(u16)y << 16) | (u16)x;
+}
+
+static int vm_lcd_draw_image_with_clip_packed(u32 imageInfo, u32 srcPacked, u32 dstStartPacked, u32 dstEndPacked, bool alpha)
+{
+    int srcX = vm_lcd_coord_from_reg(srcPacked);
+    int srcY = vm_lcd_coord_from_reg(srcPacked >> 16);
+    int dstX = vm_lcd_coord_from_reg(dstStartPacked);
+    int dstY = vm_lcd_coord_from_reg(dstStartPacked >> 16);
+    int endX = vm_lcd_coord_from_reg(dstEndPacked);
+    int endY = vm_lcd_coord_from_reg(dstEndPacked >> 16);
+
+    if (imageInfo == 0 ||
+        endX <= dstX ||
+        endY <= dstY ||
+        dstX < 0 ||
+        dstY < 0 ||
+        dstX >= LCD_WIDTH - 1 ||
+        dstY >= LCD_HEIGHT - 1)
+    {
+        return 0;
+    }
+    if (endX > LCD_WIDTH - 1)
+        endX = LCD_WIDTH - 1;
+    if (endY > LCD_HEIGHT - 1)
+        endY = LCD_HEIGHT - 1;
+
+    vm_lcd_call_draw_image_clip_ex(imageInfo, srcX, srcY, endX - dstX + 1, endY - dstY + 1, dstX, dstY, alpha);
+    return 1;
+}
+
 static u32 vm_df_get_resource_by_id(u32 id)
 {
     return vm_DF_GetResourceByResourceID(id);
@@ -619,6 +787,7 @@ static uc_err vm_run_host_quit_cleanup(u32 exitAddr, u32 thumbExitAddr);
 static void vm_request_host_quit(const char *reason);
 static void scheduler_prepare_screen_call(u32 screenThisPtr);
 static void vm_close_open_files_for_restart(void);
+static void vm_pool_module_remember_r9(u32 moduleR9);
 
 static bool vm_is_writable_vm_range(u32 addr, u32 len)
 {
@@ -670,6 +839,32 @@ static u32 vm_screen_stack_lookup_module_base(u32 screen)
     return g_screenStackModuleBase[(u32)existing];
 }
 
+static u32 vm_current_data_package(void)
+{
+    return vm_get_var(VM_DreamFactory_DataPackage_ADDRESS);
+}
+
+static void vm_restore_data_package(u32 dataPackage)
+{
+    if (dataPackage)
+        vm_set_var(VM_DreamFactory_DataPackage_ADDRESS, dataPackage);
+}
+
+static u32 vm_screen_stack_lookup_data_package(u32 screen)
+{
+    int existing = vm_screen_stack_find_related(screen);
+    if (existing < 0)
+        return 0;
+    return g_screenStackDataPackage[(u32)existing];
+}
+
+static void vm_screen_stack_update_data_package(u32 screen, u32 dataPackage)
+{
+    int existing = vm_screen_stack_find_related(screen);
+    if (existing >= 0)
+        g_screenStackDataPackage[(u32)existing] = dataPackage;
+}
+
 static u32 vm_screen_default_call_param(u32 screen)
 {
     if (screen == 0)
@@ -710,6 +905,28 @@ static u32 vm_screen_stack_lookup_flags(u32 screen)
     if (existing < 0)
         return 1;
     return g_screenStackFlags[(u32)existing];
+}
+
+static void vm_screen_stack_push_with_data_package(u32 screen, u32 param, u32 flags, u32 moduleBase, u32 dataPackage);
+static void vm_screen_stack_push(u32 screen, u32 param, u32 flags, u32 moduleBase);
+
+static void vm_screen_stack_preserve_active_if_needed(void)
+{
+    u32 activeScreen = vmAddedScreen;
+    u32 activeParam = g_currentScreenThis;
+    if (activeScreen == 0 && activeParam)
+        activeScreen = activeParam + 0x18;
+    if (activeParam == 0)
+        activeParam = vm_screen_stack_lookup_param(activeScreen);
+
+    if (activeScreen == 0 || vm_screen_stack_find_related(activeScreen) >= 0)
+        return;
+
+    u32 moduleBase = g_currentScreenModuleBase ? g_currentScreenModuleBase : vm_screen_stack_lookup_module_base(activeScreen);
+    u32 dataPackage = g_currentScreenDataPackage ? g_currentScreenDataPackage : vm_current_data_package();
+    vm_screen_stack_push_with_data_package(activeScreen, activeParam, 1, moduleBase, dataPackage);
+    vm_autotest_note("screen_mgr preserve_active screen=%08x param=%08x module=%08x dp=%08x depth=%u\n",
+                     activeScreen, activeParam, moduleBase, dataPackage, g_screenStackCount);
 }
 
 static bool vm_screen_is_entry_root(u32 screen)
@@ -771,7 +988,7 @@ static bool vm_infer_battle_module_from_screen(u32 screen, u32 *codeBase, u32 *m
     return true;
 }
 
-static void vm_screen_stack_push(u32 screen, u32 param, u32 flags, u32 moduleBase)
+static void vm_screen_stack_push_with_data_package(u32 screen, u32 param, u32 flags, u32 moduleBase, u32 dataPackage)
 {
     if (screen == 0)
         return;
@@ -784,6 +1001,7 @@ static void vm_screen_stack_push(u32 screen, u32 param, u32 flags, u32 moduleBas
             g_screenStack[i] = g_screenStack[i + 1];
             g_screenStackParam[i] = g_screenStackParam[i + 1];
             g_screenStackModuleBase[i] = g_screenStackModuleBase[i + 1];
+            g_screenStackDataPackage[i] = g_screenStackDataPackage[i + 1];
             g_screenStackFlags[i] = g_screenStackFlags[i + 1];
             g_screenStackInited[i] = g_screenStackInited[i + 1];
         }
@@ -795,6 +1013,7 @@ static void vm_screen_stack_push(u32 screen, u32 param, u32 flags, u32 moduleBas
         memmove(g_screenStack, g_screenStack + 1, (sizeof(g_screenStack) / sizeof(g_screenStack[0]) - 1) * sizeof(g_screenStack[0]));
         memmove(g_screenStackParam, g_screenStackParam + 1, (sizeof(g_screenStackParam) / sizeof(g_screenStackParam[0]) - 1) * sizeof(g_screenStackParam[0]));
         memmove(g_screenStackModuleBase, g_screenStackModuleBase + 1, (sizeof(g_screenStackModuleBase) / sizeof(g_screenStackModuleBase[0]) - 1) * sizeof(g_screenStackModuleBase[0]));
+        memmove(g_screenStackDataPackage, g_screenStackDataPackage + 1, (sizeof(g_screenStackDataPackage) / sizeof(g_screenStackDataPackage[0]) - 1) * sizeof(g_screenStackDataPackage[0]));
         memmove(g_screenStackFlags, g_screenStackFlags + 1, (sizeof(g_screenStackFlags) / sizeof(g_screenStackFlags[0]) - 1) * sizeof(g_screenStackFlags[0]));
         memmove(g_screenStackInited, g_screenStackInited + 1, (sizeof(g_screenStackInited) / sizeof(g_screenStackInited[0]) - 1) * sizeof(g_screenStackInited[0]));
         g_screenStackCount--;
@@ -803,11 +1022,19 @@ static void vm_screen_stack_push(u32 screen, u32 param, u32 flags, u32 moduleBas
     g_screenStack[g_screenStackCount] = screen;
     g_screenStackParam[g_screenStackCount] = param;
     g_screenStackModuleBase[g_screenStackCount] = moduleBase;
+    g_screenStackDataPackage[g_screenStackCount] = dataPackage;
     g_screenStackFlags[g_screenStackCount] = (u8)flags;
     g_screenStackInited[g_screenStackCount] = 0;
     g_screenStackCount++;
+    if (moduleBase != 0)
+        vm_pool_module_remember_r9(moduleBase);
     if (moduleBase != 0 || g_screenStackCount >= 3)
         g_screenRootExitArmed = 1;
+}
+
+static void vm_screen_stack_push(u32 screen, u32 param, u32 flags, u32 moduleBase)
+{
+    vm_screen_stack_push_with_data_package(screen, param, flags, moduleBase, vm_current_data_package());
 }
 
 static void vm_screen_stack_replace_top(u32 screen, u32 param, u32 flags, u32 moduleBase)
@@ -817,7 +1044,7 @@ static void vm_screen_stack_replace_top(u32 screen, u32 param, u32 flags, u32 mo
     vm_screen_stack_push(screen, param, flags, moduleBase);
 }
 
-static bool vm_screen_stack_remove(u32 screen, u32 *newTop, u32 *newTopParam, u32 *newTopModuleBase)
+static bool vm_screen_stack_remove(u32 screen, u32 *newTop, u32 *newTopParam, u32 *newTopModuleBase, u32 *newTopDataPackage)
 {
     int existing = vm_screen_stack_find_related(screen);
     if (existing < 0)
@@ -828,6 +1055,8 @@ static bool vm_screen_stack_remove(u32 screen, u32 *newTop, u32 *newTopParam, u3
             *newTopParam = g_screenStackCount ? g_screenStackParam[g_screenStackCount - 1] : 0;
         if (newTopModuleBase)
             *newTopModuleBase = g_screenStackCount ? g_screenStackModuleBase[g_screenStackCount - 1] : 0;
+        if (newTopDataPackage)
+            *newTopDataPackage = g_screenStackCount ? g_screenStackDataPackage[g_screenStackCount - 1] : 0;
         return false;
     }
 
@@ -836,6 +1065,7 @@ static bool vm_screen_stack_remove(u32 screen, u32 *newTop, u32 *newTopParam, u3
         g_screenStack[i] = g_screenStack[i + 1];
         g_screenStackParam[i] = g_screenStackParam[i + 1];
         g_screenStackModuleBase[i] = g_screenStackModuleBase[i + 1];
+        g_screenStackDataPackage[i] = g_screenStackDataPackage[i + 1];
         g_screenStackFlags[i] = g_screenStackFlags[i + 1];
         g_screenStackInited[i] = g_screenStackInited[i + 1];
     }
@@ -847,6 +1077,8 @@ static bool vm_screen_stack_remove(u32 screen, u32 *newTop, u32 *newTopParam, u3
         *newTopParam = g_screenStackCount ? g_screenStackParam[g_screenStackCount - 1] : 0;
     if (newTopModuleBase)
         *newTopModuleBase = g_screenStackCount ? g_screenStackModuleBase[g_screenStackCount - 1] : 0;
+    if (newTopDataPackage)
+        *newTopDataPackage = g_screenStackCount ? g_screenStackDataPackage[g_screenStackCount - 1] : 0;
     return true;
 }
 
@@ -977,9 +1209,143 @@ static bool vm_is_pool_entry(u32 entry)
     return pc >= VM_Memory_Pool_ADDRESS && pc < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE;
 }
 
+static bool vm_pool_module_base_has_code(u32 codeBase)
+{
+    u8 probe[16];
+    if (codeBase < VM_Memory_Pool_ADDRESS ||
+        codeBase + sizeof(probe) > VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
+    {
+        return false;
+    }
+    if (uc_mem_read(MTK, codeBase, probe, sizeof(probe)) != UC_ERR_OK)
+        return false;
+    for (u32 i = 0; i < sizeof(probe); ++i)
+    {
+        if (probe[i] != 0)
+            return true;
+    }
+    return false;
+}
+
+static bool vm_pool_module_r9_matches_pc(u32 pc, u32 moduleR9)
+{
+    const u32 moduleR9Delta = 0x14000u;
+    const u32 moduleWindowSize = 0x28000u;
+    u32 codeBase;
+
+    pc &= ~1u;
+    if (moduleR9 < VM_Memory_Pool_ADDRESS + moduleR9Delta ||
+        moduleR9 >= VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
+    {
+        return false;
+    }
+
+    codeBase = moduleR9 - moduleR9Delta;
+    if (codeBase < VM_Memory_Pool_ADDRESS ||
+        codeBase + moduleWindowSize > VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
+    {
+        return false;
+    }
+    if (pc < codeBase || pc >= codeBase + moduleWindowSize)
+        return false;
+    return vm_pool_module_base_has_code(codeBase);
+}
+
+static void vm_pool_module_remember_r9(u32 moduleR9)
+{
+    if (!vm_pool_module_r9_matches_pc(moduleR9 - 0x14000u, moduleR9))
+        return;
+    for (u32 i = 0; i < g_poolModuleR9Count; ++i)
+    {
+        if (g_poolModuleR9s[i] == moduleR9)
+            return;
+    }
+    if (g_poolModuleR9Count >= sizeof(g_poolModuleR9s) / sizeof(g_poolModuleR9s[0]))
+    {
+        memmove(g_poolModuleR9s, g_poolModuleR9s + 1,
+                (sizeof(g_poolModuleR9s) / sizeof(g_poolModuleR9s[0]) - 1) * sizeof(g_poolModuleR9s[0]));
+        g_poolModuleR9Count--;
+    }
+    g_poolModuleR9s[g_poolModuleR9Count++] = moduleR9;
+}
+
+static bool vm_pool_battle_chat_context_valid(u32 moduleR9)
+{
+    u32 uiObj = 0;
+    u32 widthFunc = 0;
+    if (moduleR9 < VM_Memory_Pool_ADDRESS ||
+        moduleR9 + 0x2020u >= VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
+    {
+        return false;
+    }
+    if (uc_mem_read(MTK, moduleR9 + 0x2018u, &uiObj, sizeof(uiObj)) != UC_ERR_OK)
+        return false;
+    if (uiObj == 0 || !vm_is_writable_vm_range(uiObj, 0x20))
+        return false;
+    if (uc_mem_read(MTK, uiObj + 0x18u, &widthFunc, sizeof(widthFunc)) != UC_ERR_OK)
+        return false;
+    return widthFunc != 0 &&
+           (vm_is_pool_entry(widthFunc) ||
+            (widthFunc >= Program_ROM_Address && widthFunc < Program_ROM_Address + Program_ROM_Mapped_Size));
+}
+
+static u32 vm_module_r9_for_pool_pc(u32 pc)
+{
+    const u32 moduleR9Delta = 0x14000u;
+    const u32 moduleAlign = 0x80000u;
+    u32 moduleR9 = 0;
+    u32 codeBase = 0;
+    u32 inferredCodeBase = 0;
+    u32 inferredModuleR9 = 0;
+
+    pc &= ~1u;
+    if (!vm_is_pool_entry(pc))
+        return 0;
+
+    if (g_currentScreenModuleBase && vm_pool_module_r9_matches_pc(pc, g_currentScreenModuleBase))
+        return g_currentScreenModuleBase;
+
+    moduleR9 = vm_screen_stack_lookup_module_base(vmAddedScreen);
+    if (moduleR9 && vm_pool_module_r9_matches_pc(pc, moduleR9))
+        return moduleR9;
+
+    for (u32 i = g_screenStackCount; i > 0; --i)
+    {
+        moduleR9 = g_screenStackModuleBase[i - 1];
+        if (moduleR9 && vm_pool_module_r9_matches_pc(pc, moduleR9))
+            return moduleR9;
+    }
+
+    for (u32 i = g_poolModuleR9Count; i > 0; --i)
+    {
+        moduleR9 = g_poolModuleR9s[i - 1];
+        if (moduleR9 && vm_pool_module_r9_matches_pc(pc, moduleR9))
+            return moduleR9;
+    }
+
+    if (vm_infer_battle_module_from_screen(vmAddedScreen, &inferredCodeBase, &inferredModuleR9) &&
+        pc >= inferredCodeBase && pc < inferredCodeBase + 0x28000u)
+    {
+        return inferredModuleR9;
+    }
+
+    codeBase = pc & ~(moduleAlign - 1u);
+    moduleR9 = codeBase + moduleR9Delta;
+    if (pc >= codeBase + 0xA818u && pc < codeBase + 0xAB1Cu &&
+        vm_pool_module_r9_matches_pc(pc, moduleR9) &&
+        vm_pool_battle_chat_context_valid(moduleR9))
+    {
+        return moduleR9;
+    }
+
+    return 0;
+}
+
 static void vm_restore_r9_for_entry(u32 entry)
 {
-    u32 r9 = vm_is_pool_entry(entry) && g_currentScreenModuleBase ? g_currentScreenModuleBase : Global_R9;
+    u32 r9 = vm_module_r9_for_pool_pc(entry);
+    if (r9 == 0)
+        r9 = vm_is_pool_entry(entry) && g_currentScreenModuleBase ? g_currentScreenModuleBase : Global_R9;
     if (r9)
     {
         if (vm_is_pool_entry(entry))
@@ -1100,6 +1466,21 @@ static void vm_request_host_quit(const char *reason)
     vm_autotest_note("host_quit_request reason=%s\n", reason ? reason : "unknown");
 }
 
+static void scheduler_clear_pending_async_tasks(void)
+{
+    memset(g_timerTasks, 0, sizeof(g_timerTasks));
+    memset(g_netTasks, 0, sizeof(g_netTasks));
+    memset(g_netChannels, 0, sizeof(g_netChannels));
+    g_netTaskDispatchDepth = 0;
+    g_netTaskDispatchSlot = -1;
+    g_netBusinessSendReadyDeferred = 0;
+    g_netBusinessSendReadyRerun = 0;
+    g_netBusinessSendReadyPostVm = 0;
+    g_loginTail42AllocPending = 0;
+    g_loginTail42FlushPending = 0;
+    g_wpayMockFlowActive = 0;
+}
+
 static u32 vm_screen_call_param_for_quit(u32 screen, u32 savedParam)
 {
     if (savedParam)
@@ -1107,7 +1488,7 @@ static u32 vm_screen_call_param_for_quit(u32 screen, u32 savedParam)
     return vm_screen_default_call_param(screen);
 }
 
-static uc_err vm_destroy_screen_for_quit(u32 screen, u32 param, u32 moduleBase,
+static uc_err vm_destroy_screen_for_quit(u32 screen, u32 param, u32 moduleBase, u32 dataPackage,
                                          u32 exitAddr, u32 thumbExitAddr,
                                          const char *kind)
 {
@@ -1120,14 +1501,21 @@ static uc_err vm_destroy_screen_for_quit(u32 screen, u32 param, u32 moduleBase,
 
     u32 savedModuleBase = g_currentScreenModuleBase;
     u32 savedScreenThis = g_currentScreenThis;
+    u32 savedDataPackage = g_currentScreenDataPackage;
+    u32 savedGlobalDataPackage = vm_current_data_package();
     if (moduleBase)
         g_currentScreenModuleBase = moduleBase;
+    if (dataPackage)
+    {
+        g_currentScreenDataPackage = dataPackage;
+        vm_restore_data_package(dataPackage);
+    }
     g_currentScreenThis = param;
 
-    printf("[info][screen] quit destroy kind=%s screen=%08x this=%08x destroy=%08x module=%08x\n",
-           kind ? kind : "screen", screen, param, destroyEntry, g_currentScreenModuleBase);
-    vm_autotest_note("screen_quit_destroy kind=%s screen=%08x this=%08x destroy=%08x module=%08x\n",
-                     kind ? kind : "screen", screen, param, destroyEntry, g_currentScreenModuleBase);
+    printf("[info][screen] quit destroy kind=%s screen=%08x this=%08x destroy=%08x module=%08x dp=%08x\n",
+           kind ? kind : "screen", screen, param, destroyEntry, g_currentScreenModuleBase, dataPackage);
+    vm_autotest_note("screen_quit_destroy kind=%s screen=%08x this=%08x destroy=%08x module=%08x dp=%08x\n",
+                     kind ? kind : "screen", screen, param, destroyEntry, g_currentScreenModuleBase, dataPackage);
 
     uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
     scheduler_prepare_screen_call(param);
@@ -1136,6 +1524,8 @@ static uc_err vm_destroy_screen_for_quit(u32 screen, u32 param, u32 moduleBase,
 
     g_currentScreenThis = savedScreenThis;
     g_currentScreenModuleBase = savedModuleBase;
+    g_currentScreenDataPackage = savedDataPackage;
+    vm_restore_data_package(savedGlobalDataPackage);
     return err;
 }
 
@@ -1147,6 +1537,7 @@ static void vm_clear_screen_state_after_quit(void)
     memset(g_screenStack, 0, sizeof(g_screenStack));
     memset(g_screenStackParam, 0, sizeof(g_screenStackParam));
     memset(g_screenStackModuleBase, 0, sizeof(g_screenStackModuleBase));
+    memset(g_screenStackDataPackage, 0, sizeof(g_screenStackDataPackage));
     memset(g_screenStackFlags, 0, sizeof(g_screenStackFlags));
     memset(g_screenStackInited, 0, sizeof(g_screenStackInited));
     g_screenStackCount = 0;
@@ -1156,11 +1547,15 @@ static void vm_clear_screen_state_after_quit(void)
     g_activeScreenRemovedThisFrame = 0;
     g_activeScreenRemovedThis = 0;
     g_activeScreenRemovedModuleBase = 0;
+    g_activeScreenRemovedDataPackage = 0;
     g_screenExitMode = VM_SCREEN_EXIT_SKIP;
     g_screenLoadResourcePendingScreen = 0;
     g_screenLoadResourcePendingParam = 0;
     g_currentScreenThis = 0;
     g_currentScreenModuleBase = 0;
+    g_currentScreenDataPackage = 0;
+    memset(g_poolModuleR9s, 0, sizeof(g_poolModuleR9s));
+    g_poolModuleR9Count = 0;
     g_screenRootExitArmed = 0;
     vm_set_var(VM_SCREEN_nextSubTScreen_ADDRESS, 0);
 }
@@ -1191,6 +1586,7 @@ static uc_err vm_run_host_quit_cleanup(u32 exitAddr, u32 thumbExitAddr)
     u32 screens[32];
     u32 params[32];
     u32 modules[32];
+    u32 dataPackages[32];
     u32 count = g_screenStackCount;
     if (count > sizeof(screens) / sizeof(screens[0]))
         count = sizeof(screens) / sizeof(screens[0]);
@@ -1200,6 +1596,7 @@ static uc_err vm_run_host_quit_cleanup(u32 exitAddr, u32 thumbExitAddr)
         screens[i] = g_screenStack[i];
         params[i] = vm_screen_call_param_for_quit(g_screenStack[i], g_screenStackParam[i]);
         modules[i] = g_screenStackModuleBase[i];
+        dataPackages[i] = g_screenStackDataPackage[i];
     }
 
     bool activeInStack = false;
@@ -1218,12 +1615,15 @@ static uc_err vm_run_host_quit_cleanup(u32 exitAddr, u32 thumbExitAddr)
             screens[count] = vmAddedScreen;
             params[count] = g_currentScreenThis ? g_currentScreenThis : vmAddedScreen;
             modules[count] = g_currentScreenModuleBase ? g_currentScreenModuleBase : vm_screen_stack_lookup_module_base(vmAddedScreen);
+            dataPackages[count] = g_currentScreenDataPackage ? g_currentScreenDataPackage : vm_screen_stack_lookup_data_package(vmAddedScreen);
             ++count;
         }
     }
 
     printf("[info][screen] host quit cleanup begin depth=%u current=%08x\n", count, vmAddedScreen);
     vm_autotest_note("screen_quit_begin depth=%u current=%08x\n", count, vmAddedScreen);
+
+    scheduler_clear_pending_async_tasks();
 
     u32 one = 1;
     vm_set_var(VM_SCREEN_isInQuit_ADDRESS, one);
@@ -1232,7 +1632,7 @@ static uc_err vm_run_host_quit_cleanup(u32 exitAddr, u32 thumbExitAddr)
     for (u32 i = count; i > 0; --i)
     {
         u32 idx = i - 1;
-        err = vm_destroy_screen_for_quit(screens[idx], params[idx], modules[idx],
+        err = vm_destroy_screen_for_quit(screens[idx], params[idx], modules[idx], dataPackages[idx],
                                          exitAddr, thumbExitAddr, "stack");
         if (err != UC_ERR_OK)
             break;
@@ -1267,6 +1667,27 @@ static void scheduler_prepare_screen_call(u32 screenThisPtr)
     {
         g_currentScreenModuleBase = vm_screen_stack_lookup_module_base(screenThisPtr + 0x18);
     }
+    u32 dataPackage = vm_screen_stack_lookup_data_package(screenThisPtr + 0x18);
+    if (dataPackage)
+    {
+        vm_restore_data_package(dataPackage);
+        g_currentScreenDataPackage = dataPackage;
+    }
+    else if (g_currentScreenDataPackage == 0)
+    {
+        g_currentScreenDataPackage = vm_current_data_package();
+    }
+}
+
+static void scheduler_note_screen_data_package(u32 screenThisPtr)
+{
+    if (screenThisPtr == 0)
+        return;
+    u32 dataPackage = vm_current_data_package();
+    if (dataPackage == 0)
+        return;
+    g_currentScreenDataPackage = dataPackage;
+    vm_screen_stack_update_data_package(screenThisPtr + 0x18, dataPackage);
 }
 
 static u32 scheduler_get_tick_ms(void)
@@ -1277,17 +1698,32 @@ static u32 scheduler_get_tick_ms(void)
     return now - g_schedulerStartTicks;
 }
 
+static u32 scheduler_effective_timer_delay(u32 delayMs, u32 callback)
+{
+    /* WPay Ker42 waits 15s after SMS success before polling confirm. */
+    if (g_wpayMockFlowActive && callback == 0x05187781u && delayMs > 1000u)
+    {
+        printf("[info][wpay] timer_fast_forward raw_delay=%u delay=1000 cb=%08x\n",
+               delayMs, callback);
+        vm_autotest_note("wpay_timer_fast_forward raw_delay=%u delay=1000 cb=%08x\n",
+                         delayMs, callback);
+        return 1000u;
+    }
+    return delayMs;
+}
+
 static u32 scheduler_start_timer(u32 delayMs, u32 callback, u32 context)
 {
     if (callback == 0)
         return vm_set_call_result(0);
+    u32 effectiveDelayMs = scheduler_effective_timer_delay(delayMs, callback);
     for (u32 i = 0; i < VM_SCHED_MAX_TIMERS; ++i)
     {
         if (!g_timerTasks[i].active)
         {
             g_timerTasks[i].active = 1;
             g_timerTasks[i].handle = (u16)(VM_SCHED_TIMER_BASE_ID + i);
-            g_timerTasks[i].remainingTicks = (delayMs + VM_SCHED_FRAME_MS - 1) / VM_SCHED_FRAME_MS;
+            g_timerTasks[i].remainingTicks = (effectiveDelayMs + VM_SCHED_FRAME_MS - 1) / VM_SCHED_FRAME_MS;
             if (g_timerTasks[i].remainingTicks == 0)
                 g_timerTasks[i].remainingTicks = 1;
             g_timerTasks[i].callback = callback;
@@ -1657,6 +2093,69 @@ static uc_err scheduler_dispatch_net_tasks(void)
  * translation unit while it still depends on emulator-local static helpers. */
 #include "mock-server.c"
 static uc_err scheduler_dispatch_input_event(vm_event *evt);
+
+static u32 vm_net_queue_http_get_mock_response(u32 urlPtr, u32 callback, u32 context)
+{
+    char url[512];
+    const u8 defaultBody[] = {1};
+    const u8 wpayPaySuccessBody[] = {
+        1,       /* WAPPAY packet ok */
+        0, 1,    /* pay type */
+        0, 1,    /* pay amount/count */
+        1,       /* allow default handling */
+        1,       /* auto confirm flag */
+        0, 8,    /* SMS destination length */
+        '1', '0', '6', '5', '8', '8', '8', '8',
+        1,       /* message enabled */
+        0, 5,    /* SMS body length */
+        'P', 'A', 'Y', 'O', 'K',
+        0, 1,    /* retry/progress interval, seconds */
+        1,       /* consume-service packet ok */
+        1,       /* consume-service default flag */
+        1,       /* consume-service channel */
+        0,       /* service id */
+        0,       /* service name */
+        0,       /* item name */
+        0,       /* order id */
+        0,       /* extra */
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0};
+    const u8 *body = defaultBody;
+    u32 bodyLen = (u32)sizeof(defaultBody);
+    u32 responsePtr;
+
+    vm_readStringByPtrLimited(urlPtr, (u8 *)url, sizeof(url));
+    if (strstr(url, "ac=confirm&") != NULL)
+    {
+        g_wpayMockFlowActive = 0;
+        scheduler_queue_net_event(1, 0, 0, 0, callback, context);
+        scheduler_queue_net_event(0, 0, 0, 0, callback, context);
+        printf("[info][network] http_get_mock url=%s events=1,0 cb=%08x ctx=%08x\n",
+               url[0] ? url : "-", callback, context);
+        vm_autotest_note("http_get_mock url=%s events=1,0 cb=%08x ctx=%08x\n",
+                         url[0] ? url : "-", callback, context);
+        return 1;
+    }
+
+    if (strstr(url, "ac=pay&") != NULL)
+    {
+        g_wpayMockFlowActive = 1;
+        body = wpayPaySuccessBody;
+        bodyLen = (u32)sizeof(wpayPaySuccessBody);
+    }
+
+    responsePtr = vm_net_mock_sync_buffer_to_vm(body, bodyLen);
+    if (responsePtr == 0)
+        return 0;
+
+    scheduler_queue_net_event(0, responsePtr, bodyLen, bodyLen, callback, context);
+    printf("[info][network] http_get_mock url=%s body=%u cb=%08x ctx=%08x\n",
+           url[0] ? url : "-", bodyLen, callback, context);
+    vm_autotest_note("http_get_mock url=%s body=%u cb=%08x ctx=%08x\n",
+                     url[0] ? url : "-", bodyLen, callback, context);
+    return responsePtr;
+}
 
 typedef struct
 {
@@ -4415,7 +4914,6 @@ u8 *SimpleRamMatch(u8 *start, u8 *end, u8 *matchStart, int matchLen)
 #define LOAD_CBE_PATH "CBE/众神之战.CBE"
 #define LOAD_CBE_PATH "CBE/恶魔城登录版.CBE"
 #define LOAD_CBE_PATH "CBE/江湖OL.CBE"
-#define LOAD_CBE_PATH "CBE/恶魔城登录版.CBE"
 
 
 static int vm_ascii_stricmp(const char *a, const char *b)
@@ -4497,6 +4995,7 @@ static void vm_reset_runtime_state_for_restart(void)
     memset(g_screenStack, 0, sizeof(g_screenStack));
     memset(g_screenStackParam, 0, sizeof(g_screenStackParam));
     memset(g_screenStackModuleBase, 0, sizeof(g_screenStackModuleBase));
+    memset(g_screenStackDataPackage, 0, sizeof(g_screenStackDataPackage));
     memset(g_screenStackFlags, 0, sizeof(g_screenStackFlags));
     memset(g_screenStackInited, 0, sizeof(g_screenStackInited));
     g_screenStackCount = 0;
@@ -4506,11 +5005,13 @@ static void vm_reset_runtime_state_for_restart(void)
     g_activeScreenRemovedThisFrame = 0;
     g_activeScreenRemovedThis = 0;
     g_activeScreenRemovedModuleBase = 0;
+    g_activeScreenRemovedDataPackage = 0;
     g_screenExitMode = VM_SCREEN_EXIT_DESTROY;
     g_screenLoadResourcePendingScreen = 0;
     g_screenLoadResourcePendingParam = 0;
     g_currentScreenThis = 0;
     g_currentScreenModuleBase = 0;
+    g_currentScreenDataPackage = 0;
     g_screenRootExitArmed = 0;
     g_hostQuitRequested = 0;
     g_hostQuitCleanupStarted = 0;
@@ -4922,6 +5423,145 @@ static u32 vm_persist_write_file(const char *path, const u8 *buffer, u32 size)
     return (u32)writeLen;
 }
 
+static void vm_note_sce_load_entry_pc(u32 pc)
+{
+    if (pc != 0x010140EC)
+        return;
+
+    u32 ctx = 0;
+    u32 namePtr = 0;
+    u32 dp = vm_get_var(VM_DreamFactory_DataPackage_ADDRESS);
+    char name[96] = "-";
+    uc_reg_read(MTK, UC_ARM_REG_R0, &ctx);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &namePtr);
+    if (namePtr)
+        vm_read_path_string(namePtr, name, sizeof(name));
+    g_lastSceLoadCtx = ctx;
+    g_lastSceLoadNamePtr = namePtr;
+    snprintf(g_lastSceLoadName, sizeof(g_lastSceLoadName), "%s", name);
+    if (!g_autotestEnabled)
+        return;
+    vm_autotest_note("sce_load_entry pc=%08x ctx=%08x name_ptr=%08x name=%s df_pkg=%08x current=%08x this=%08x depth=%u\n",
+                     pc, ctx, namePtr, name, dp, vmAddedScreen, g_currentScreenThis, g_screenStackCount);
+}
+
+static void vm_trace_read_guest_string(u32 ptr, char *out, size_t outSize)
+{
+    u8 first = 0;
+    if (outSize == 0)
+        return;
+    snprintf(out, outSize, "-");
+    if (ptr == 0)
+        return;
+    if (uc_mem_read(MTK, ptr, &first, 1) != UC_ERR_OK)
+        return;
+    vm_read_path_string(ptr, out, outSize);
+    if (out[0] == 0)
+        snprintf(out, outSize, "-");
+}
+
+static void vm_note_castlevania_wpay_pc(u32 pc)
+{
+    const char *phase = NULL;
+    u32 r0 = 0, r1 = 0, r2 = 0, r3 = 0, lr = 0;
+    u32 payBase = Global_R9 ? Global_R9 + 0x2c44 : 0;
+    u32 savedLenOrPtr = 0;
+    u32 savedText = 0;
+    u32 savedFlag = 0;
+    char s0[64];
+    char s1[64];
+
+    if (pc == 0x051812DA)
+        phase = "wpay_http_pay";
+    else if (pc == 0x05183F7C)
+        phase = "wpay_http_confirm";
+    else if (pc == 0x05186D9E)
+        phase = "wpay_sms";
+    else if (pc == 0x010026D8)
+        phase = "game_pay_entry";
+    else if (pc == 0x01002712)
+        phase = "game_pay_check";
+    else if (pc == 0x0100271A)
+        phase = "game_pay_save";
+    else if (pc == 0x01002734)
+        phase = "game_pay_clear";
+    else if (pc == 0x01002746)
+        phase = "game_pay_call";
+    else
+        return;
+
+    if (!g_autotestEnabled)
+        return;
+
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+    uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+    uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    if (payBase)
+    {
+        savedLenOrPtr = vm_get_var(payBase + 8);
+        savedText = vm_get_var(payBase + 0xc);
+        savedFlag = vm_get_var_byte(payBase + 0x10);
+    }
+    vm_trace_read_guest_string(r0, s0, sizeof(s0));
+    vm_trace_read_guest_string(r1, s1, sizeof(s1));
+
+    printf("[info][wpay_trace] %s pc=%08x r0=%08x r1=%08x r2=%08x r3=%08x lr=%08x saved8=%08x savedc=%08x saved10=%u s0=%s s1=%s\n",
+           phase, pc, r0, r1, r2, r3, lr, savedLenOrPtr, savedText, savedFlag, s0, s1);
+    if (g_autotestEnabled)
+    {
+        vm_autotest_note("wpay_trace %s pc=%08x r0=%08x r1=%08x r2=%08x r3=%08x lr=%08x saved8=%08x savedc=%08x saved10=%u s0=%s s1=%s\n",
+                         phase, pc, r0, r1, r2, r3, lr, savedLenOrPtr, savedText, savedFlag, s0, s1);
+    }
+}
+
+static void vm_note_stream_data_result(const char *manager, u32 caller, u32 resPtr,
+                                       u32 a2, u32 a3, u32 a4, u32 result)
+{
+    bool interesting = resPtr == 0 || result == 0 ||
+                       (caller >= 0x01014100 && caller <= 0x01014120);
+    if (!interesting)
+        return;
+
+    char resHead[64] = "-";
+    char outHead[64] = "-";
+    u32 outLen = a4 ? vm_get_var(a4) : 0;
+    if (resPtr)
+        vm_autotest_format_mem_hex(resPtr, 12, resHead, sizeof(resHead));
+    if (result)
+        vm_autotest_format_mem_hex(result, 12, outHead, sizeof(outHead));
+    if (resPtr == 0 || result == 0)
+    {
+        printf("[warn][resource] stream_data_result manager=%s caller=%08x sce_ctx=%08x sce_name_ptr=%08x sce_name=%s res=%08x result=%08x a2=%08x a3=%08x a4=%08x out_len=%u df_pkg=%08x current=%08x this=%08x depth=%u\n",
+               manager ? manager : "-",
+               caller, g_lastSceLoadCtx, g_lastSceLoadNamePtr, g_lastSceLoadName,
+               resPtr, result, a2, a3, a4, outLen,
+               vm_get_var(VM_DreamFactory_DataPackage_ADDRESS),
+               vmAddedScreen, g_currentScreenThis, g_screenStackCount);
+    }
+    if (g_autotestEnabled)
+    {
+        vm_autotest_note("stream_data_result manager=%s caller=%08x res=%08x a2=%08x a3=%08x a4=%08x out_len=%u result=%08x res_head=%s out_head=%s df_pkg=%08x current=%08x this=%08x depth=%u\n",
+                         manager ? manager : "-",
+                         caller, resPtr, a2, a3, a4, outLen, result,
+                         resHead, outHead,
+                         vm_get_var(VM_DreamFactory_DataPackage_ADDRESS),
+                         vmAddedScreen, g_currentScreenThis, g_screenStackCount);
+    }
+}
+
+static bool vm_host_cbe_sibling_file_exists(const char *name)
+{
+    char path[256];
+    if (vm_host_file_exists(name))
+        return true;
+    if (name == NULL || name[0] == 0 || strchr(name, '/') != NULL || strchr(name, '\\') != NULL)
+        return false;
+    snprintf(path, sizeof(path), "CBE/%s", name);
+    return vm_host_file_exists(path);
+}
+
 static void vm_storage_read_name(u32 namePtr, char *out, size_t outSize)
 {
     size_t pos = 0;
@@ -5321,6 +5961,7 @@ void RunArmProgram(void *param)
                     g_screenEnterExistingNoCallback = 0;
                     g_currentScreenThis = 0;
                     g_currentScreenModuleBase = 0;
+                    g_currentScreenDataPackage = 0;
                     continue;
                 }
                 u32 screenModuleBase = vm_screen_stack_lookup_module_base(screenFuncPtr);
@@ -5370,6 +6011,8 @@ void RunArmProgram(void *param)
                 printf("ScreenInit Ok\n");
             }
             if (p == UC_ERR_OK)
+                scheduler_note_screen_data_package(screenThisPtr);
+            if (p == UC_ERR_OK)
             {
                 u32 _frameTick = SDL_GetTicks();
                 while (true)
@@ -5405,6 +6048,7 @@ void RunArmProgram(void *param)
                                 printf("SCR_ResourceLoad异常:%s\n", uc_strerror(p));
                                 assert(0);
                             }
+                            scheduler_note_screen_data_package(resParam);
                         }
                         else
                         {
@@ -5477,6 +6121,7 @@ void RunArmProgram(void *param)
                                     printf("SCR_Event异常:%s\n", uc_strerror(p));
                                     assert(0);
                                 }
+                                scheduler_note_screen_data_package(screenThisPtr);
                                 p = scheduler_flush_post_vm_business_send_ready("screen_logic_input");
                                 if (p != UC_ERR_OK)
                                     break;
@@ -5504,6 +6149,7 @@ void RunArmProgram(void *param)
                                 printf("SCR_Logic异常:%s\n", uc_strerror(p));
                                 assert(0);
                             }
+                            scheduler_note_screen_data_package(screenThisPtr);
                             p = scheduler_flush_post_vm_business_send_ready("screen_logic");
                             if (p != UC_ERR_OK)
                                 break;
@@ -5523,6 +6169,7 @@ void RunArmProgram(void *param)
                             printf("SCR_Render异常:%s\n", uc_strerror(p));
                             assert(0);
                         }
+                        scheduler_note_screen_data_package(screenThisPtr);
                         if (screenStructChange == 1 || g_screenRemovedWithoutNext)
                             break;
                     }
@@ -5540,21 +6187,32 @@ void RunArmProgram(void *param)
                 {
                     u32 removedThis = g_activeScreenRemovedThis ? g_activeScreenRemovedThis : screenThisPtr;
                     u32 removedModuleBase = g_activeScreenRemovedModuleBase;
+                    u32 removedDataPackage = g_activeScreenRemovedDataPackage;
                     g_activeScreenRemovedThisFrame = 0;
                     g_activeScreenRemovedThis = 0;
                     g_activeScreenRemovedModuleBase = 0;
+                    g_activeScreenRemovedDataPackage = 0;
                     if (screenDestoryEntry)
                     {
                         u32 savedScreenThis = g_currentScreenThis;
                         u32 savedModuleBase = g_currentScreenModuleBase;
+                        u32 savedDataPackage = g_currentScreenDataPackage;
+                        u32 savedGlobalDataPackage = vm_current_data_package();
                         g_currentScreenThis = removedThis;
                         if (removedModuleBase)
                             g_currentScreenModuleBase = removedModuleBase;
+                        if (removedDataPackage)
+                        {
+                            g_currentScreenDataPackage = removedDataPackage;
+                            vm_restore_data_package(removedDataPackage);
+                        }
                         uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
                         uc_reg_write(MTK, UC_ARM_REG_R0, &removedThis);
                         p = vm_emu_start(screenDestoryEntry, exitAddr);
                         g_currentScreenThis = savedScreenThis;
                         g_currentScreenModuleBase = savedModuleBase;
+                        g_currentScreenDataPackage = savedDataPackage;
+                        vm_restore_data_package(savedGlobalDataPackage);
                         if (p != UC_ERR_OK)
                         {
                             printf("SCR_Destory异常\n");
@@ -6046,7 +6704,7 @@ static bool hook_vm_manager_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         if (tmp1)
         {
-            for (tmp2 = 0; tmp2 < 40; tmp2++)
+            for (tmp2 = 0; tmp2 < 52; tmp2++)
             {
                 tmp3 = VM_MANAGER_FUNC_LIST_ADDRESS + tmp2 * 4;
                 vm_set_var(tmp1 + tmp2 * 4, tmp3);
@@ -6322,8 +6980,19 @@ return 4;
     }
     else if (idx == 5)
     {
-        printf("[call]vMGetIMSI\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        snprintf((char *)cbeTextString, mySizeOf(cbeTextString), "460001234567890");
+        tmp3 = strlen((char *)cbeTextString) + 1;
+        if (tmp2 && tmp2 < tmp3)
+            tmp3 = tmp2;
+        if (tmp1 && tmp3 > 0)
+        {
+            if (tmp3 <= strlen((char *)cbeTextString))
+                cbeTextString[tmp3 - 1] = 0;
+            uc_mem_write(MTK, tmp1, cbeTextString, tmp3);
+        }
+        vm_set_call_result(0);
     }
     else if (idx == 6)
     {
@@ -6343,23 +7012,22 @@ return 4;
     }
     else if (idx == 7)
     {
-        printf("[call]vMGetPrjVersion\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        if (tmp1)
+            uc_mem_write(MTK, tmp1, "V017", 4);
+        vm_set_call_result(0);
     }
     else if (idx == 8)
     {
-        printf("[call]vMIsCallConnect\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 9)
     {
-        printf("[call]vMIsDCopen\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 10)
     {
-        printf("[call]vMGetStkCardStatus\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 11)
     {
@@ -6521,18 +7189,23 @@ return 4;
     }
     else if (idx == 36)
     {
-        printf("[call]cDownGetModeAndVersion\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_try_write_zero(tmp1, 1);
+        vm_try_write_zero(tmp2, 2);
+        vm_set_call_result(0);
     }
     else if (idx == 37)
     {
-        printf("[call]mmiDynamicSetForceUpdate\n");
-        assert(0);
+        vm_set_call_result(1);
     }
     else if (idx == 38)
     {
-        printf("[call]mmiDunamicGetModeAndVersion\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_try_write_zero(tmp1, 1);
+        vm_try_write_zero(tmp2, 2);
+        vm_set_call_result(0);
     }
     else if (idx == 39)
     {
@@ -6584,13 +7257,13 @@ return 4;
     }
     else if (idx == 47)
     {
-        printf("[call]VmGetRand\n");
-        assert(0);
+        vm_set_call_result((u32)rand());
     }
     else if (idx == 48)
     {
-        printf("[call]srand\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        srand(tmp1);
+        vm_set_call_result(0);
     }
     else if (idx == 49)
     {
@@ -6601,8 +7274,10 @@ return 4;
     }
     else if (idx == 50)
     {
-        printf("[call]VmGetPrjCustom\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        if (tmp1)
+            uc_mem_write(MTK, tmp1, "NIECHE00", 8);
+        vm_set_call_result(0);
     }
     else if (idx == 51)
     {
@@ -6797,8 +7472,25 @@ return 4;
     }
     else if (idx == 89)
     {
-        // 这里只能返回1，要不然就会启动别的没安装的CBE文件
-        vm_set_call_result(1);
+        u32 lr = 0;
+        u32 sp = 0;
+        u32 wrapperLr = 0;
+        uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+        uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+        if ((lr & ~1u) == 0x01000b2eu && sp)
+            uc_mem_read(MTK, sp + 4, &wrapperLr, sizeof(wrapperLr));
+        /*
+         * This slot behaves like an inner-app availability probe.  Older CBE
+         * startup code in this emulator expects a positive answer, but the
+         * Castlevania WPay purchase path calls it from 0x01018a12 before
+         * attempting to execute a dynamic module.  With no WPay CBM installed,
+         * report unavailable for that probe so the client stays on its normal
+         * billing failure path instead of loading a zero-length module.
+         */
+        if ((wrapperLr & ~1u) == 0x01018a12u)
+            vm_set_call_result(vm_host_cbe_sibling_file_exists("Wpay9990Ker42V100.CBM") ? 1 : 0);
+        else
+            vm_set_call_result(1);
     }
     else if (idx == 90)
     {
@@ -7601,38 +8293,80 @@ static bool hook_vm_manager_lcd_func(u32 address)
     }
     else if (idx == 27)
     {
-        printf("[call]vMDrawImage\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        int x = vm_lcd_coord_from_reg(tmp2);
+        int y = vm_lcd_coord_from_reg(tmp2 >> 16);
+        vm_set_call_result(vm_lcd_draw_image_to_screen(tmp1, x, y));
     }
     else if (idx == 28)
     {
-        printf("[call]vMDrawImageEx\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        int x = vm_lcd_coord_from_reg(tmp2);
+        int y = vm_lcd_coord_from_reg(tmp3);
+        vm_set_call_result(vm_lcd_draw_image_to_screen(tmp1, x, y));
     }
     else if (idx == 29)
     {
-        printf("[call]vMDrawImageWithAlpha\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        int x = vm_lcd_coord_from_reg(tmp2);
+        int y = vm_lcd_coord_from_reg(tmp2 >> 16);
+        vm_set_call_result(vm_lcd_draw_image_with_alpha_to_screen(tmp1, x, y));
     }
     else if (idx == 30)
     {
-        printf("[call]vMDrawImageWithClip\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+        vm_set_call_result(vm_lcd_draw_image_with_clip_packed(tmp1, tmp2, tmp3, tmp4, false));
     }
     else if (idx == 31)
     {
-        printf("[call]vMDrawImageWithClip2\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+        uc_reg_read(MTK, UC_ARM_REG_SP, &tmp5);
+        u32 h = vm_get_var(tmp5);
+        u32 dstX = vm_get_var(tmp5 + 4);
+        u32 dstY = vm_get_var(tmp5 + 8);
+        u32 srcPacked = vm_lcd_pack_coord(vm_lcd_coord_from_reg(tmp2), vm_lcd_coord_from_reg(tmp3));
+        u32 dstStart = vm_lcd_pack_coord(vm_lcd_coord_from_reg(dstX), vm_lcd_coord_from_reg(dstY));
+        u32 dstEnd = vm_lcd_pack_coord(
+            (int)(int16_t)(vm_lcd_coord_from_reg(dstX) + vm_lcd_coord_from_reg(tmp4) - 1),
+            (int)(int16_t)(vm_lcd_coord_from_reg(dstY) + vm_lcd_coord_from_reg(h) - 1));
+        vm_lcd_draw_image_with_clip_packed(tmp1, srcPacked, dstStart, dstEnd, false);
+        vm_set_call_result(1);
     }
     else if (idx == 32)
     {
-        printf("[call]vMDrawImageClipAndAlpha\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+        vm_set_call_result(vm_lcd_draw_image_with_clip_packed(tmp1, tmp2, tmp3, tmp4, true));
     }
     else if (idx == 33)
     {
-        printf("[call]vMDrawImageClipAndAlpha2\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+        uc_reg_read(MTK, UC_ARM_REG_SP, &tmp5);
+        u32 h = vm_get_var(tmp5);
+        u32 dstX = vm_get_var(tmp5 + 4);
+        u32 dstY = vm_get_var(tmp5 + 8);
+        u32 srcPacked = vm_lcd_pack_coord(vm_lcd_coord_from_reg(tmp2), vm_lcd_coord_from_reg(tmp3));
+        u32 dstStart = vm_lcd_pack_coord(vm_lcd_coord_from_reg(dstX), vm_lcd_coord_from_reg(dstY));
+        u32 dstEnd = vm_lcd_pack_coord(
+            (int)(int16_t)(vm_lcd_coord_from_reg(dstX) + vm_lcd_coord_from_reg(tmp4) - 1),
+            (int)(int16_t)(vm_lcd_coord_from_reg(dstY) + vm_lcd_coord_from_reg(h) - 1));
+        vm_lcd_draw_image_with_clip_packed(tmp1, srcPacked, dstStart, dstEnd, true);
+        vm_set_call_result(1);
     }
     else if (idx == 34)
     {
@@ -8538,6 +9272,152 @@ static bool hook_vm_manager_timer_func(u32 address)
     return true;
 }
 
+static u16 vm_ctrl_text_color(u32 color)
+{
+    return color ? (u16)color : 0xffff;
+}
+
+static void vm_ctrl_read_text(u32 textPtr, bool ucs2, u8 *out, size_t outSize)
+{
+    if (outSize == 0)
+        return;
+    out[0] = 0;
+    if (textPtr == 0)
+        return;
+
+    if (!ucs2)
+    {
+        vm_readStringByPtrLimited(textPtr, out, outSize);
+        return;
+    }
+
+    u32 ucs2Len = vm_input_wcslen_limit(textPtr, 0x1ff);
+    u32 srcBytes = (ucs2Len + 1) * 2;
+    if (srcBytes > mySizeOf(cbeTextString))
+        srcBytes = mySizeOf(cbeTextString) & ~1u;
+    if (uc_mem_read(MTK, textPtr, cbeTextString, srcBytes) != UC_ERR_OK)
+        return;
+    if (ucs2_to_gbk(cbeTextString, srcBytes, out, outSize) < 0)
+        out[0] = 0;
+}
+
+static int vm_ctrl_image_height(u32 imageInfo, int fallbackHeight)
+{
+    u32 pixels = 0;
+    int width = 0;
+    int height = 0;
+    if (vm_lcd_read_image_info(imageInfo, &pixels, &width, &height))
+        return height;
+    return fallbackHeight;
+}
+
+static void vm_ctrl_draw_text(u8 *text, int x, int y, u32 color)
+{
+    if (text == NULL || text[0] == 0)
+        return;
+    vm_lcd_draw_current_string(text, x, y, vm_ctrl_text_color(color));
+    vm_lcd_sync_string_to_vm(text, x, y);
+}
+
+static u32 vm_ctrl_draw_win_title(u32 imageInfo, u32 textPtr, u32 color, int x, int y, bool explicitPos, bool ucs2)
+{
+    u8 text[256];
+    int titleH = vm_ctrl_image_height(imageInfo, 30);
+
+    if (imageInfo)
+        vm_lcd_draw_image_to_screen(imageInfo, 0, 0);
+    if (textPtr == 0)
+        return imageInfo;
+
+    vm_ctrl_read_text(textPtr, ucs2, text, sizeof(text));
+    if (text[0] == 0)
+        return 0;
+
+    if (!explicitPos)
+    {
+        int textW = vm_lcd_measure_current_string_render_width(text);
+        int textH = getFontHeight();
+        x = textW >= 220 ? 10 : (LCD_WIDTH - textW) / 2;
+        y = (titleH - textH) / 2;
+        if (y < 0)
+            y = 0;
+    }
+    vm_ctrl_draw_text(text, x, y, color);
+    return 1;
+}
+
+static u32 vm_ctrl_draw_softkey_bar(u32 imageInfo, u32 leftPtr, u32 centerPtr, u32 rightPtr, u32 color, bool ucs2)
+{
+    u8 left[128];
+    u8 center[128];
+    u8 right[128];
+    int barH = vm_ctrl_image_height(imageInfo, 27);
+    int y;
+
+    if (imageInfo)
+        vm_lcd_draw_image_to_screen(imageInfo, 0, LCD_HEIGHT - barH);
+
+    y = LCD_HEIGHT - barH + (barH - getFontHeight()) / 2;
+    if (y < 0)
+        y = LCD_HEIGHT - getFontHeight();
+
+    vm_ctrl_read_text(leftPtr, ucs2, left, sizeof(left));
+    vm_ctrl_read_text(centerPtr, ucs2, center, sizeof(center));
+    vm_ctrl_read_text(rightPtr, ucs2, right, sizeof(right));
+
+    if (left[0])
+        vm_ctrl_draw_text(left, 10, y, color);
+    if (center[0])
+    {
+        int w = vm_lcd_measure_current_string_render_width(center);
+        vm_ctrl_draw_text(center, (LCD_WIDTH - w) / 2, y, color);
+    }
+    if (right[0])
+    {
+        int w = vm_lcd_measure_current_string_render_width(right);
+        vm_ctrl_draw_text(right, LCD_WIDTH - 11 - w, y, color);
+    }
+    return 1;
+}
+
+static u32 vm_ctrl_tp_press_softkey_bar(u32 imageInfo, u32 textPtr, u32 xReg, u32 yReg, u32 pos, bool ucs2)
+{
+    u8 text[128];
+    int x = vm_lcd_coord_from_reg(xReg);
+    int y = vm_lcd_coord_from_reg(yReg);
+    int barH = vm_ctrl_image_height(imageInfo, 27);
+    int top = LCD_HEIGHT - barH;
+    int bottom = LCD_HEIGHT - 1;
+    int left = 0;
+    int right = LCD_WIDTH - 1;
+    int textW;
+
+    if (textPtr == 0)
+        return 0;
+    vm_ctrl_read_text(textPtr, ucs2, text, sizeof(text));
+    if (text[0] == 0)
+        return 0;
+    textW = vm_lcd_measure_current_string_render_width(text);
+
+    if (pos == 0)
+    {
+        left = 0;
+        right = textW + 10;
+    }
+    else if (pos == 1)
+    {
+        left = (230 - textW) / 2;
+        right = left + textW + 10;
+    }
+    else if (pos == 2)
+    {
+        left = LCD_WIDTH - 11 - textW;
+        right = LCD_WIDTH - 1;
+    }
+
+    return (x >= left && x <= right && y >= top && y <= bottom) ? 1 : 0;
+}
+
 static bool hook_vm_manager_ctrl_func(u32 address)
 {
     if (!(address >= VM_MANAGER_CTRL_FUNC_LIST_ADDRESS && address < (VM_MANAGER_CTRL_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
@@ -8547,6 +9427,73 @@ static bool hook_vm_manager_ctrl_func(u32 address)
 
     u32 idx = (address - VM_MANAGER_CTRL_FUNC_LIST_ADDRESS) / 4;
 
+    uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+    uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+    uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+    uc_reg_read(MTK, UC_ARM_REG_SP, &tmp5);
+
+    if (idx == 0)
+    {
+        vm_set_call_result(vm_ctrl_draw_softkey_bar(tmp1, tmp2, tmp3, tmp4, 0, false));
+    }
+    else if (idx == 1)
+    {
+        u32 color = vm_get_var(tmp5);
+        vm_set_call_result(vm_ctrl_draw_softkey_bar(tmp1, tmp2, tmp3, tmp4, color, false));
+    }
+    else if (idx == 2)
+    {
+        vm_set_call_result(vm_ctrl_draw_win_title(tmp1, tmp2, 0, 0, 0, false, false));
+    }
+    else if (idx == 3)
+    {
+        u32 y = vm_get_var(tmp5);
+        vm_set_call_result(vm_ctrl_draw_win_title(tmp1, tmp2, tmp3,
+                                                  vm_lcd_coord_from_reg(tmp4),
+                                                  vm_lcd_coord_from_reg(y),
+                                                  true, false));
+    }
+    else if (idx == 4)
+    {
+        u32 pos = vm_get_var(tmp5);
+        vm_set_call_result(vm_ctrl_tp_press_softkey_bar(tmp1, tmp2, tmp3, tmp4, pos, false));
+    }
+    else if (idx == 9)
+    {
+        vm_set_call_result(vm_ctrl_draw_win_title(tmp1, tmp2, tmp3, 0, 0, false, false));
+    }
+    else if (idx == 15)
+    {
+        vm_set_call_result(vm_ctrl_draw_softkey_bar(tmp1, tmp2, tmp3, tmp4, 0, true));
+    }
+    else if (idx == 16)
+    {
+        u32 color = vm_get_var(tmp5);
+        vm_set_call_result(vm_ctrl_draw_softkey_bar(tmp1, tmp2, tmp3, tmp4, color, true));
+    }
+    else if (idx == 17)
+    {
+        u32 pos = vm_get_var(tmp5);
+        vm_set_call_result(vm_ctrl_tp_press_softkey_bar(tmp1, tmp2, tmp3, tmp4, pos, true));
+    }
+    else if (idx == 18)
+    {
+        vm_set_call_result(vm_ctrl_draw_win_title(tmp1, tmp2, 0, 0, 0, false, true));
+    }
+    else if (idx == 19)
+    {
+        vm_set_call_result(vm_ctrl_draw_win_title(tmp1, tmp2, tmp3, 0, 0, false, true));
+    }
+    else if (idx == 20)
+    {
+        u32 y = vm_get_var(tmp5);
+        vm_set_call_result(vm_ctrl_draw_win_title(tmp1, tmp2, tmp3,
+                                                  vm_lcd_coord_from_reg(tmp4),
+                                                  vm_lcd_coord_from_reg(y),
+                                                  true, true));
+    }
+    else
     {
         printf("[impl]vmCtrlManager调用位置:%d\n", idx);
         assert(0);
@@ -8618,7 +9565,10 @@ static bool hook_vm_manager_network_func(u32 address)
     }
     else if (idx == 3)
     {
-        if (tmp2 >= Program_ROM_Address && tmp2 < Program_ROM_Address + Program_ROM_Mapped_Size && tmp3)
+        bool callbackValid =
+            (tmp2 >= Program_ROM_Address && tmp2 < Program_ROM_Address + Program_ROM_Mapped_Size) ||
+            vm_is_pool_entry(tmp2);
+        if (callbackValid && tmp3)
         {
             u32 connectIdOut = vm_is_writable_vm_range(netStackArg0, sizeof(tmp5)) ? netStackArg0 : 0;
             if (connectIdOut == 0 && vm_is_writable_vm_range(tmp3, sizeof(tmp5)))
@@ -8629,7 +9579,7 @@ static bool hook_vm_manager_network_func(u32 address)
             if (connectIdOut)
                 uc_mem_write(MTK, connectIdOut, &tmp5, 4);
             scheduler_register_net_channel(tmp5, tmp2, tmp3);
-            scheduler_queue_net_task(tmp1, 0, tmp2, tmp3);
+            vm_net_queue_http_get_mock_response(tmp1, tmp2, tmp3);
             vm_set_call_result(1);
         }
         else
@@ -8906,12 +9856,23 @@ static bool hook_vm_manager_game_util_func(u32 address)
     else if (idx == 39)
     {
         printf("[call]vMstricmp\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_readStringByPtr(tmp1, cbeTextString);
+        vm_readStringByPtr(tmp2, sprintfBuff);
+        tmp1 = (u32)strcasecmp((char *)cbeTextString, (char *)sprintfBuff);
+        vm_set_call_result(tmp1);
     }
     else if (idx == 40)
     {
         printf("[call]vMstrnicmp\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        vm_readStringByPtr(tmp1, cbeTextString);
+        vm_readStringByPtr(tmp2, sprintfBuff);
+        tmp1 = (u32)strncasecmp((char *)cbeTextString, (char *)sprintfBuff, tmp3);
+        vm_set_call_result(tmp1);
     }
     else
     {
@@ -8975,87 +9936,102 @@ static bool hook_vm_manager_billing_func(u32 address)
     else if (idx == 2)
     {
         printf("[call]BILLING_GetRemainDay\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 3)
     {
         printf("[call]BILLING_Pay\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 4)
     {
         printf("[call]BILLING_PayMoreTimes\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 5)
     {
         printf("[call]BILLING_IsRegisterBillingInfo\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 6)
     {
         printf("[call]BILLING_RegisterBillingInfo\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 7)
     {
         printf("[call]BILLING_SetBillingStatus\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 8)
     {
         printf("[call]BILLING_GetBillingStatus\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 9)
     {
         printf("[call]BILLING_IsNeedPay\n");
-        assert(0);
+        vm_set_call_result(1);
     }
     else if (idx == 10)
     {
         printf("[call]BILLING_IsInTryStatus\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 11)
     {
         printf("[call]BIllING_OpenBillingPromptWin\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 12)
     {
         printf("[call]CDownGetTryDay\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 13)
     {
         printf("[call]BILLING_PayForCBB\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 14)
     {
         printf("[call]BILLING_PayForPwd\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 15)
     {
         printf("[call]CDownGetOption5\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 16)
     {
-        printf("[call]Billing_SendSpecSms\n");
-        assert(0);
+        u32 sp = 0;
+        u32 smsCallback = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+        uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+        if (sp)
+            uc_mem_read(MTK, sp + 8, &smsCallback, sizeof(smsCallback));
+        printf("[call]Billing_SendSpecSms callback=%08x\n", smsCallback);
+        vm_autotest_note("billing_send_spec_sms type=%u text=%08x text_len=%u dest=%08x callback=%08x\n",
+                         tmp1, tmp2, tmp3, tmp4, smsCallback);
+        if (smsCallback)
+        {
+            scheduler_queue_net_event(0, 1, 0, 0, smsCallback, 0);
+        }
+        vm_set_call_result(0);
     }
     else if (idx == 17)
     {
         printf("[call]Billing_CancelSms\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 18)
     {
         printf("[call]CDownIsMonthApp\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 19)
     {
@@ -9063,7 +10039,7 @@ static bool hook_vm_manager_billing_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
         uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
-        if (!vm_host_file_exists("Wpay9990Ker42WqvgaV100.CBM"))
+        if (!vm_host_cbe_sibling_file_exists("Wpay9990Ker42WqvgaV100.CBM"))
         {
             if (tmp2)
                 vm_set_var(tmp2, 0);
@@ -9086,99 +10062,99 @@ static bool hook_vm_manager_billing_func(u32 address)
     else if (idx == 20)
     {
         printf("[call]CDownGetPayTimes\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 21)
     {
         printf("[call]BILLING_NewMonthPay\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 22)
     {
         printf("[call]BILLING_NewMonthCancel\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 23)
     {
         printf("[call]BILLING_CleanAppMonthBillInfo\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 24)
     {
         printf("[call]BILLING_GetValidDayByAppId\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 25)
     {
         printf("[call]CDownGetBillSmsAddr\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 26)
     {
         printf("[call]CDownGetBillSmsSuf\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 27)
     {
         printf("[call]BILLING_Pay2\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 28)
     {
         printf("[call]Billing_GetAppUsedStatus\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 29)
     {
-        assert(0);
         printf("[call]Billing_SetAppUsedStatus\n");
+        vm_set_call_result(0);
     }
     else if (idx == 30)
     {
         printf("[call]CDownGetPayTipContent\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 31)
     {
         printf("[call]BILLING_Pay3\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 32)
     {
         printf("[call]BILLING_SendRegisterSms\n");
-        assert(0);
+        vm_set_call_result(0);
     }
 
     // result 区
     else if (idx == 33)
     {
         printf("[call]CDownGetOption8\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 34)
     {
         printf("[call]CDownGetOption9\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 35)
     {
         printf("[call]CDownGetOption10\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 36)
     {
         printf("[call]BILLING_Register\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 37)
     {
         printf("[call]BILLING_PayForCBB3\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 38)
     {
         printf("[call]CDownIsWPay\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else
     {
@@ -9509,6 +10485,7 @@ static bool hook_vm_manager_screen_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        u32 oldActiveScreen = vmAddedScreen;
         bool wasEmptyScreenStack = g_screenRemovedWithoutNext || vmAddedScreen == 0 || g_screenStackCount == 0;
         if (idx == 4)
         {
@@ -9517,6 +10494,8 @@ static bool hook_vm_manager_screen_func(u32 address)
         }
         if (lastAddress >= VM_Memory_Pool_ADDRESS && lastAddress < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
             uc_reg_read(MTK, UC_ARM_REG_R9, &moduleBase);
+        if (tmp1 != 0 && tmp1 != vmAddedScreen)
+            vm_screen_stack_preserve_active_if_needed();
         vm_screen_stack_push(tmp1, tmp2, tmp3, moduleBase);
         if (tmp1 != 0)
             vmAddedScreen = tmp1;
@@ -9537,8 +10516,8 @@ static bool hook_vm_manager_screen_func(u32 address)
         }
         if (tmp1 != 0)
             g_screenRemovedWithoutNext = 0;
-        vm_autotest_note("screen_mgr idx=%u type=add caller=%08x screen=%08x param=%08x flags=%u depth=%u\n",
-                         idx, lastAddress, tmp1, tmp2, tmp3, g_screenStackCount);
+        vm_autotest_note("screen_mgr idx=%u type=add caller=%08x screen=%08x param=%08x flags=%u old=%08x this=%08x depth=%u\n",
+                         idx, lastAddress, tmp1, tmp2, tmp3, oldActiveScreen, g_currentScreenThis, g_screenStackCount);
         vm_set_call_result(0);
     }
     else if (idx == 6)
@@ -9549,12 +10528,14 @@ static bool hook_vm_manager_screen_func(u32 address)
         bool removingCurrent = removeIndex >= 0 && g_screenStack[(u32)removeIndex] == vmAddedScreen;
         u32 removedThis = removingCurrent ? g_currentScreenThis : 0;
         u32 removedModuleBase = removingCurrent ? g_currentScreenModuleBase : 0;
+        u32 removedDataPackage = removingCurrent ? g_currentScreenDataPackage : vm_screen_stack_lookup_data_package(tmp1);
         tmp3 = 0;
         tmp2 = 0;
         tmp5 = 0;
-        tmp4 = vm_screen_stack_remove(tmp1, &tmp3, &tmp2, &tmp5) ? 1 : 0;
-        printf("[info][screen] screen_mgr remove requested=%08x current=%08x result=%u current_match=%u new_top=%08x module=%08x\n",
-               tmp1, vmAddedScreen, tmp4, removingCurrent ? 1u : 0u, tmp3, tmp5);
+        u32 newTopDataPackage = 0;
+        tmp4 = vm_screen_stack_remove(tmp1, &tmp3, &tmp2, &tmp5, &newTopDataPackage) ? 1 : 0;
+        printf("[info][screen] screen_mgr remove requested=%08x current=%08x result=%u current_match=%u new_top=%08x module=%08x dp=%08x\n",
+               tmp1, vmAddedScreen, tmp4, removingCurrent ? 1u : 0u, tmp3, tmp5, newTopDataPackage);
         if (tmp4 && removingCurrent && tmp3)
         {
             bool requestAppClose = g_screenRootExitArmed &&
@@ -9567,12 +10548,15 @@ static bool hook_vm_manager_screen_func(u32 address)
             g_activeScreenRemovedThisFrame = 1;
             g_activeScreenRemovedThis = removedThis;
             g_activeScreenRemovedModuleBase = removedModuleBase;
+            g_activeScreenRemovedDataPackage = removedDataPackage;
             g_screenResumeExisting = isInQuit ? 0 : 1;
             g_screenEnterExistingNoCallback = isInQuit ? 1 : 0;
             g_screenExitMode = VM_SCREEN_EXIT_SKIP;
             vmAddedScreen = tmp3;
             g_currentScreenThis = tmp3 - 0x18;
             g_currentScreenModuleBase = tmp5;
+            g_currentScreenDataPackage = newTopDataPackage;
+            vm_restore_data_package(newTopDataPackage);
             vm_set_var(VM_SCREEN_nextSubTScreen_ADDRESS, tmp3);
             vm_set_var(VM_SCREEN_isInQuit_ADDRESS, isInQuit);
             screenStructChange = 1;
@@ -9589,6 +10573,7 @@ static bool hook_vm_manager_screen_func(u32 address)
             g_activeScreenRemovedThisFrame = 1;
             g_activeScreenRemovedThis = removedThis;
             g_activeScreenRemovedModuleBase = removedModuleBase;
+            g_activeScreenRemovedDataPackage = removedDataPackage;
             vmAddedScreen = 0;
             g_screenResumeExisting = 0;
             g_screenEnterExistingNoCallback = 0;
@@ -9596,6 +10581,7 @@ static bool hook_vm_manager_screen_func(u32 address)
             g_screenExitMode = VM_SCREEN_EXIT_SKIP;
             g_currentScreenThis = 0;
             g_currentScreenModuleBase = 0;
+            g_currentScreenDataPackage = 0;
             g_screenLoadResourcePendingScreen = 0;
             g_screenLoadResourcePendingParam = 0;
             screenStructNotifyLoadRes = 0;
@@ -9695,6 +10681,8 @@ static bool hook_vm_manager_game_lcd_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
         uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
         vm_GetStreamDataFormRes(tmp1, tmp2, tmp3, tmp4);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp5);
+        vm_note_stream_data_result("game_lcd", lastAddress, tmp1, tmp2, tmp3, tmp4, tmp5);
     }
     else
     {
@@ -10039,6 +11027,8 @@ static bool hook_vm_manager_gameold_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
         uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
         vm_GetStreamDataFormRes(tmp1, tmp2, tmp3, tmp4);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp5);
+        vm_note_stream_data_result("game_old", lastAddress, tmp1, tmp2, tmp3, tmp4, tmp5);
     }
     else if (idx == 51)
     {
@@ -10433,79 +11423,103 @@ static bool hook_vm_manager_gameold_func(u32 address)
     else if (idx == 144)
     {
         printf("[call]atol\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_readStringByPtr(tmp1, cbeTextString);
+        tmp1 = (u32)strtol((char *)cbeTextString, NULL, 10);
+        vm_set_call_result(tmp1);
     }
 
     // result 区 (从 a1+144 开始)
     else if (idx == 145)
     {
         printf("[call]memmove\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        if (tmp1 && tmp2 && tmp3)
+        {
+            u8 *moveBuf = malloc(tmp3);
+            if (moveBuf)
+            {
+                if (uc_mem_read(MTK, tmp2, moveBuf, tmp3) == UC_ERR_OK)
+                    uc_mem_write(MTK, tmp1, moveBuf, tmp3);
+                free(moveBuf);
+            }
+        }
+        vm_set_call_result(tmp1);
     }
     else if (idx == 146)
     {
         printf("[call]atoi\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_readStringByPtr(tmp1, cbeTextString);
+        tmp1 = (u32)atoi((char *)cbeTextString);
+        vm_set_call_result(tmp1);
     }
     else if (idx == 147)
     {
         printf("[call]BILLING_GetPayNumByAppId\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 148)
     {
         printf("[call]BILLING_GetRemainDay\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 149)
     {
         printf("[call]BILLING_Pay\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 150)
     {
         printf("[call]BILLING_PayMoreTimes\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 151)
     {
         printf("[call]BILLING_IsRegisterBillingInfo\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 152)
     {
         printf("[call]BILLING_RegisterBillingInfo\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 153)
     {
         printf("[call]BILLING_SetBillingStatus\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 154)
     {
         printf("[call]BILLING_GetBillingStatus\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 155)
     {
         printf("[call]BILLING_IsNeedPay\n");
-        assert(0);
+        vm_set_call_result(1);
     }
     else if (idx == 156)
     {
         printf("[call]BILLING_IsInTryStatus\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 157)
     {
         printf("[call]Game_OpenBillingPromptWin\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 158)
     {
         printf("[call]vMstricmp\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_readStringByPtr(tmp1, cbeTextString);
+        vm_readStringByPtr(tmp2, sprintfBuff);
+        tmp1 = (u32)strcasecmp((char *)cbeTextString, (char *)sprintfBuff);
+        vm_set_call_result(tmp1);
     }
     else
     {
@@ -10949,13 +11963,30 @@ static bool hook_vm_dl_pay_func(u32 address)
     if (!(address >= VM_DL_PAY_FUNC_LIST_ADDRESS && address < (VM_DL_PAY_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)))
         return false;
 
-    u32 tmp1, tmp2, lr;
+    u32 tmp1, tmp2, tmp3, lr;
     u32 idx = (address - VM_DL_PAY_FUNC_LIST_ADDRESS) / 4;
 
     uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
     uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
     uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
-    vm_set_call_result(0);
+    if (idx == 7)
+    {
+        snprintf((char *)cbeTextString, mySizeOf(cbeTextString), "111111111111111");
+        tmp3 = strlen((char *)cbeTextString) + 1;
+        if (tmp2 && tmp2 < tmp3)
+            tmp3 = tmp2;
+        if (tmp1 && tmp3 > 0)
+        {
+            if (tmp3 <= strlen((char *)cbeTextString))
+                cbeTextString[tmp3 - 1] = 0;
+            uc_mem_write(MTK, tmp1, cbeTextString, tmp3);
+        }
+        vm_set_call_result(0);
+    }
+    else
+    {
+        vm_set_call_result(0);
+    }
 
     uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
     vm_bx(tmp1);
@@ -11490,6 +12521,8 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     vm_note_mmgame_transfer_parser_pc((u32)address & ~1u);
     vm_note_stream_read_i16_pc((u32)address & ~1u);
     vm_note_net_wrapper_pc((u32)address & ~1u);
+    vm_note_sce_load_entry_pc((u32)address & ~1u);
+    vm_note_castlevania_wpay_pc((u32)address & ~1u);
 
     if (vm_is_manager_func_stub_address((u32)address))
         return;

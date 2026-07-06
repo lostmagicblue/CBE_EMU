@@ -116,6 +116,7 @@ u32 vm_set_call_result(u32 r);
 void vm_initManagerTable();
 void vm_configManagerTable(u32 a, u32 b);
 void vm_configManagerTableCount(u32 tableAddr, u32 funcAddr, u32 count);
+void vm_InitDlWPayManager(u32 tmp1);
 void vm_InitDlRsManager(u32 tmp1);
 void vm_InitDlImageManager(u32 tmp1);
 // 真机
@@ -501,6 +502,15 @@ static int vm_file_is_bare_dsh_resource(const char *path)
     return ext != NULL && _stricmp(ext, ".dsh") == 0;
 }
 
+static int vm_file_is_bare_cbe_module(const char *path)
+{
+    const char *ext;
+    if (path == NULL || path[0] == 0 || vm_path_has_separator(path))
+        return 0;
+    ext = strrchr(path, '.');
+    return ext != NULL && (_stricmp(ext, ".cbm") == 0 || _stricmp(ext, ".cbe") == 0);
+}
+
 #define VM_RELEASED_RESOURCE_MAX 1024
 #define VM_RELEASED_RESOURCE_ID_BASE 0x7000u
 
@@ -828,6 +838,22 @@ static int vm_file_try_resolve_jhonline_dsh_path(const char *normalizedName, con
     return 1;
 }
 
+static int vm_file_try_resolve_cbe_module_path(const char *normalizedName, const char *mode, char *resolvedName, size_t resolvedSize)
+{
+    FILE *fp;
+    if (normalizedName == NULL || resolvedName == NULL || resolvedSize == 0)
+        return 0;
+    if (!vm_file_is_read_only_mode(mode) || !vm_file_is_bare_cbe_module(normalizedName))
+        return 0;
+    if (snprintf(resolvedName, resolvedSize, "CBE/%s", normalizedName) >= (int)resolvedSize)
+        return 0;
+    fp = fopen(resolvedName, "rb");
+    if (fp == NULL)
+        return 0;
+    fclose(fp);
+    return 1;
+}
+
 static void vm_file_make_dir(const char *path)
 {
     char normalized[256];
@@ -954,6 +980,12 @@ int vm_get_file_handle(char *nameBuf, const char *mode)
                 return i;
             }
             FILE *f = fopen(normalizedName, openMode);
+            if (f == NULL && vm_file_try_resolve_cbe_module_path(normalizedName, openMode, resolvedName, sizeof(resolvedName)))
+            {
+                f = fopen(resolvedName, openMode);
+                if (f != NULL)
+                    snprintf(normalizedName, sizeof(normalizedName), "%s", resolvedName);
+            }
             if (f == NULL && vm_file_try_resolve_jhonline_dsh_path(normalizedName, openMode, resolvedName, sizeof(resolvedName)))
             {
                 f = fopen(resolvedName, openMode);
@@ -1131,7 +1163,8 @@ int vm_cbfs_vm_file_exists(int disk, int namePtr)
     if (f == NULL)
     {
         char resolvedName[256];
-        if (vm_file_try_resolve_jhonline_dsh_path(normalizedName, "rb", resolvedName, sizeof(resolvedName)))
+        if (vm_file_try_resolve_cbe_module_path(normalizedName, "rb", resolvedName, sizeof(resolvedName)) ||
+            vm_file_try_resolve_jhonline_dsh_path(normalizedName, "rb", resolvedName, sizeof(resolvedName)))
             f = fopen(resolvedName, "rb");
     }
     u32 r = 0;
@@ -2750,6 +2783,8 @@ int vm_DF_DataPackage_GetFileByID(u32 a1, u32 fileId)
     u32 offset = 0;
     int result = 0;
     uc_engine *uc = MTK;
+    if (fileId == (u32)-1)
+        return vm_set_call_result(0);
     uc_mem_read(uc, a1 + 8, &count1, 2);
     uc_mem_read(uc, a1 + 20, &id_base, 4);
     uc_mem_read(uc, a1 + 16, &data_base, 4);
@@ -2801,6 +2836,8 @@ int vm_DF_DataPackage_GetFileByID(u32 a1, u32 fileId)
 int vm_DF_DataPackage_GetFile(int a1, int namePtr)
 {
     int FileID = vm_DF_DataPackage_GetFileID(a1, namePtr);
+    if (FileID < 0)
+        return vm_set_call_result(0);
     int data = vm_DF_DataPackage_GetFileByID(a1, FileID);
     char fileName[128] = {0};
     if (namePtr)
@@ -3460,7 +3497,7 @@ void vm_initManagerTable()
     vm_configManagerTable(VM_MANAGER_VMIM_TABLE_ADDRESS, VM_MANAGER_VMIM_FUNC_LIST_ADDRESS);
     vm_configManagerTable(VM_MANAGER_APPSTORE_TABLE_ADDRESS, VM_APPSTORE_FUNC_LIST_ADDRESS);
     vm_InitDlLoadManager(VM_DL_LOAD_MANAGER_ADDRESS);
-    vm_configManagerTableCount(VM_DL_PAY_MANAGER_ADDRESS, VM_DL_PAY_FUNC_LIST_ADDRESS, 16);
+    vm_InitDlWPayManager(VM_DL_PAY_MANAGER_ADDRESS);
     vm_InitDlRsManager(VM_DL_RS_MANAGER_ADDRESS);
     vm_InitDlImageManager(VM_DL_IMAGE_MANAGER_ADDRESS);
 }
@@ -3987,6 +4024,15 @@ void vm_configManagerTableCount(u32 tableAddr, u32 funcAddr, u32 count)
         vm_set_var(tableAddr + i * 4, tmp);
     }
 }
+
+void vm_InitDlWPayManager(u32 tmp1)
+{
+    if (tmp1 == 0)
+        return;
+    uc_mem_write(MTK, tmp1, emptyBuff, VM_MANAGER_TABLE_SIZE);
+    vm_set_var(tmp1 + 7 * 4, VM_DL_PAY_FUNC_LIST_ADDRESS + 7 * 4);
+}
+
 void vm_InitDlLoadManager(u32 tmp1)
 {
     u32 tmp2 = VM_DL_LOAD_FUNC_LIST_ADDRESS;

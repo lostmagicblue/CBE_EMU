@@ -119,6 +119,9 @@ u32 vm_malloc(u32 size)
     VMBlock *cur = vm_head;
     u32 req_size = size;
 
+    if (size == 0)
+        return 0;
+
     // 8字节对齐（很重要）
     size = (size + 7) & ~7;
 

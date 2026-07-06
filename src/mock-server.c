@@ -2368,33 +2368,27 @@ static bool vm_is_scene_bootstrap_loading_overlay_caller(u32 lr)
 
 static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
 {
+    static u32 s_poolR9SwitchTraceCount = 0;
     (void)size;
     (void)user_data;
 
     u32 pc = (u32)address & ~1u;
-    u32 moduleR9 = g_currentScreenModuleBase;
-    u32 inferredCodeBase = 0;
-    u32 inferredModuleR9 = 0;
-    u32 loaderModuleR9 = vm_screen_stack_lookup_module_base(vmAddedScreen);
-    if (loaderModuleR9 == 0)
-        loaderModuleR9 = g_currentScreenModuleBase;
-
-    if (pc >= 0x05080000 && pc < 0x05094000)
-        moduleR9 = loaderModuleR9;
-    else if (pc >= 0x05094000 && pc < 0x050A8000)
-        moduleR9 = loaderModuleR9;
-    else if (pc >= 0x05181F20 && pc < 0x05195464)
-        moduleR9 = loaderModuleR9;
-    else if (vm_infer_battle_module_from_screen(vmAddedScreen, &inferredCodeBase, &inferredModuleR9) &&
-             pc >= inferredCodeBase && pc < inferredCodeBase + 0x16150u)
-        moduleR9 = loaderModuleR9;
+    u32 moduleR9 = vm_module_r9_for_pool_pc(pc);
 
     if (moduleR9 != 0)
     {
         u32 currentR9 = 0;
         uc_reg_read(uc, UC_ARM_REG_R9, &currentR9);
         if (currentR9 != moduleR9)
+        {
             uc_reg_write(uc, UC_ARM_REG_R9, &moduleR9);
+            if (g_autotestEnabled && s_poolR9SwitchTraceCount < 64)
+            {
+                ++s_poolR9SwitchTraceCount;
+                vm_autotest_note("pool_r9_switch pc=%08x old=%08x new=%08x count=%u\n",
+                                 pc, currentR9, moduleR9, s_poolR9SwitchTraceCount);
+            }
+        }
     }
 }
 
