@@ -71,8 +71,23 @@ from `item.dsh`, updates/persists role HP/MP/EXP, and returns the action packet.
 By default a live enemy counterattack is bundled after the item action; set
 `CBE_BATTLE_ITEM_USE_COUNTER=0` for focused rollback experiments.
 
+Because battle rewards already proved that kind-`7` refresh objects can be
+mixed into the same WT response, a successful battle medicine use now also
+appends the normal backpack sync objects after `4/6`:
+
+```text
+1/7/7  { type=2, iteminfo=<seq,itemId,remaining,extra> }
+1/7/11 { info=<row_count,seq,new_count> }
+```
+
+This keeps the main item manager aligned with the role DB so a stack consumed
+to zero in battle does not reappear later as a stale `0`-count medicine row.
+
 If the selected `seq` cannot be resolved or the item has no usable effect, the
-mock returns a narrow battle no-op action and does not consume DB state.
+mock returns a narrow battle no-op `4/6` object with `actionnum=0` and empty
+`actioninfo`, and does not consume DB state. Do not use action type `4` as this
+fallback: runtime showed that it can leave the normal item-use flow and drop
+back into the scene follow-up path.
 
 ## Item Visual Effect
 
@@ -118,5 +133,5 @@ builtin-battle-item-use
 Trace line:
 
 ```text
-mock_battle_item_use index=... seq=... item=... remaining=... effect=13 response=4/6-actionType2
+mock_battle_item_use index=... seq=... item=... remaining=... effect=13 sync=1 noop=0 response=4/6+7/7+7/11-actionType2
 ```

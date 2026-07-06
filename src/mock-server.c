@@ -15531,6 +15531,7 @@ static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 req
     vm_net_mock_backpack_item_state *item = NULL;
     const vm_net_mock_item_effect_catalog_item *effect = NULL;
     u32 itemId = 0;
+    u16 itemSeq = 0;
     u32 remaining = 0;
     u32 hpEffect = 0;
     u32 mpEffect = 0;
@@ -15560,7 +15561,14 @@ static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 req
     u8 actionInfo[192];
     u32 actionInfoLen = 0;
     u8 actionCount = 0;
+    u8 itemInfo[64];
+    u32 itemInfoLen = 0;
+    u8 countInfo[32];
+    u32 countInfoLen = 0;
+    bool includeBackpackSync = false;
+    bool responseIsNoop = false;
     u32 pos = 5;
+    u32 objectStart = 0;
     u8 objectCount = 0;
 
     if (out == NULL || outCap < pos)
@@ -15585,6 +15593,7 @@ static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 req
     if (item != NULL)
     {
         itemId = item->itemId;
+        itemSeq = item->seq;
         effect = vm_net_mock_find_item_effect_catalog_item(itemId);
         if (vm_net_mock_item_effect_is_usable(effect))
         {
@@ -15656,19 +15665,19 @@ static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 req
                                                        playerSlot);
         u8 itemTargetWireSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_ITEM_TARGET_WIRE_SLOT",
                                                         playerSlot);
-        u32 itemMpValueB = mpApplied != 0 ? mpApplied : vm_net_mock_battle_role_mp_current();
         itemEffectIndex = vm_net_mock_battle_item_effect_index(hpEffect);
         if (!vm_net_mock_append_battle_actioninfo_record(actionInfo, sizeof(actionInfo),
                                                          &actionInfoLen, 2,
                                                          itemActorWireSlot,
                                                          itemTargetWireSlot,
-                                                         0, hpApplied, itemMpValueB,
+                                                         0, hpApplied, mpApplied,
                                                          itemEffectIndex,
                                                          itemTail0, itemTail1, itemTail2))
         {
             return 0;
         }
         actionCount = 1;
+        includeBackpackSync = itemId != 0 && itemSeq != 0;
 
         includeCounterattack = vm_net_mock_env_u32("CBE_BATTLE_ITEM_USE_COUNTER", 1) != 0 &&
                                g_mockBattleEnemyHpCurrent > 0 &&
@@ -15736,14 +15745,14 @@ static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 req
     }
     else
     {
-        if (!vm_net_mock_append_battle_actioninfo_record(actionInfo, sizeof(actionInfo),
-                                                         &actionInfoLen, 4,
-                                                         playerSlot, 0, 0,
-                                                         0, 0, 0, 0, 0, 0))
-        {
-            return 0;
-        }
-        actionCount = 1;
+        /*
+         * Battle.cbm HandleServerBattleCmd(0x7BD0) uses subtype 4/4 for escape
+         * results, and action type 4 is not a neutral item-use acknowledgement.
+         * When the client sends a stale zero-count row, keep the response as an
+         * empty 4/6 action packet so the battle state machine stays in place.
+         */
+        actionCount = 0;
+        responseIsNoop = true;
     }
 
     if (battleEndsThisRound && vm_net_mock_battle_inline_settlement_enabled())
@@ -15766,6 +15775,49 @@ static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 req
                                                  actionCount))
         return 0;
     ++objectCount;
+    if (includeBackpackSync)
+    {
+        /*
+         * Battle item playback updates the current battle row, but the main
+         * item manager also needs the standard backpack refresh objects so a
+         * zero-count medicine does not come back in later battle copies.
+         * Battle rewards already proved that kind-7 refresh objects can be
+         * mixed into the same WT response without a modal popup.
+         */
+        if (!vm_net_mock_build_item_use_iteminfo_blob(itemInfo, sizeof(itemInfo),
+                                                      itemSeq, itemId, remaining,
+                                                      &itemInfoLen))
+        {
+            return 0;
+        }
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 7, &objectStart))
+            return 0;
+        if (!vm_net_mock_put_object_u8(out, outCap, &pos, "type", 2))
+            return 0;
+        if (!vm_net_mock_put_object_raw(out, outCap, &pos, "iteminfo",
+                                        itemInfo, (u16)itemInfoLen))
+        {
+            return 0;
+        }
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        ++objectCount;
+
+        if (!vm_net_mock_build_item_use_count_info_blob(countInfo, sizeof(countInfo),
+                                                        itemSeq, remaining,
+                                                        &countInfoLen))
+        {
+            return 0;
+        }
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 11, &objectStart))
+            return 0;
+        if (!vm_net_mock_put_object_raw(out, outCap, &pos, "info",
+                                        countInfo, (u16)countInfoLen))
+        {
+            return 0;
+        }
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        ++objectCount;
+    }
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
 
     if (consumed && !battleEndsThisRound)
@@ -15788,14 +15840,19 @@ static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 req
         g_mockBattlePendingEnemyTurn = 0;
     }
 
-    printf("[info][network] mock_battle_item_use index=%u seq=%u item=%u remaining=%u hp=%u/%u mp=%u/%u exp=%u effect=%u consumed=%u applied=%u counter=%u resp=%u evidence=mmBattle:0x2B50->4/3,0x7BD0/0x6EB0->4/6,eidolon.dsh:f_renew1\n",
-           parsed.index, parsed.seq, itemId, remaining,
+    printf("[info][network] mock_battle_item_use index=%u seq=%u item=%u itemSeq=%u remaining=%u hp=%u/%u mp=%u/%u exp=%u effect=%u consumed=%u applied=%u counter=%u sync=%u noop=%u resp=%u evidence=mmBattle:0x2B50->4/3,0x7BD0/0x6EB0->4/6,eidolon.dsh:f_renew1\n",
+           parsed.index, parsed.seq, itemId, itemSeq, remaining,
            hpApplied, hpEffect, mpApplied, mpEffect, expApplied,
-           itemEffectIndex, consumed ? 1 : 0, applied ? 1 : 0, counterDamageValue, pos);
-    vm_autotest_note("mock_battle_item_use index=%u seq=%u item=%u remaining=%u hp=%u/%u mp=%u/%u exp=%u effect=%u consumed=%u applied=%u counter=%u response=4/6-actionType2 evidence=mmBattle:0x2B50,0x6EB0,eidolon.dsh:f_renew1\n",
-                     parsed.index, parsed.seq, itemId, remaining,
+           itemEffectIndex, consumed ? 1 : 0, applied ? 1 : 0, counterDamageValue,
+           includeBackpackSync ? 1 : 0, responseIsNoop ? 1 : 0, pos);
+    vm_autotest_note("mock_battle_item_use index=%u seq=%u item=%u itemSeq=%u remaining=%u hp=%u/%u mp=%u/%u exp=%u effect=%u consumed=%u applied=%u counter=%u sync=%u noop=%u response=%s evidence=mmBattle:0x2B50,0x6EB0,eidolon.dsh:f_renew1\n",
+                     parsed.index, parsed.seq, itemId, itemSeq, remaining,
                      hpApplied, hpEffect, mpApplied, mpEffect, expApplied,
-                     itemEffectIndex, consumed ? 1 : 0, applied ? 1 : 0, counterDamageValue);
+                     itemEffectIndex, consumed ? 1 : 0, applied ? 1 : 0, counterDamageValue,
+                     includeBackpackSync ? 1 : 0, responseIsNoop ? 1 : 0,
+                     includeBackpackSync ? "4/6+7/7+7/11-actionType2"
+                                         : (responseIsNoop ? "4/6-actionnum0"
+                                                           : "4/6-actionType2"));
     return pos;
 }
 
