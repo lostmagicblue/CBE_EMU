@@ -5947,9 +5947,8 @@ static bool vm_net_mock_scene_name_has_path_separator(const char *scene)
 
 static bool vm_net_mock_scene_name_is_download_key(const char *scene)
 {
-    return scene != NULL &&
-           scene[0] != 0 &&
-           !vm_net_mock_scene_name_has_path_separator(scene);
+    return false;
+    // return scene != NULL && scene[0] != 0 && !vm_net_mock_scene_name_has_path_separator(scene);
 }
 
 static bool vm_net_mock_open_server_scene_resource(const char *scene,
