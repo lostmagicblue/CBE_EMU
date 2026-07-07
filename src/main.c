@@ -13,6 +13,7 @@
 #include <stdarg.h>
 #include <math.h>
 #include <stdint.h>
+#include <time.h>
 
 #include "main.h"
 #include "lcd.h"
@@ -339,6 +340,14 @@ static u8 g_netLastHandledValid = 0;
 static u32 g_netLastHandledResponseLen = 0;
 static char g_netLastHandledSource[64];
 static char g_netLastHandledSummary[512];
+static u8 g_mockServiceOnly = 0;
+static u8 g_mockServiceWarnedUnavailable = 0;
+static char g_mockServiceHost[64] = "127.0.0.1";
+static char g_mockServiceBindHost[64] = "127.0.0.1";
+static char g_mockServiceAccount[64];
+static u8 g_mockServiceAccountExplicit = 0;
+static u32 g_mockServiceClientId = 0;
+static u16 g_mockServicePort = 19090;
 static u32 g_battleSubtype8InfoDstWatchBase = 0;
 static u32 g_battleSubtype8InfoDstWatchLen = 0;
 static u32 g_battleSubtype8InfoDstWatchTick = 0;
@@ -3019,6 +3028,43 @@ static int vm_autotest_parse_u32(const char *text, u32 *value)
     return 1;
 }
 
+static int vm_mock_service_parse_host_port(const char *text, char *host, size_t hostCap, u16 *port)
+{
+    const char *colon = NULL;
+    u32 parsedPort = 0;
+    size_t hostLen = 0;
+
+    if (text == NULL || *text == 0 || host == NULL || hostCap == 0 || port == NULL)
+        return 0;
+
+    colon = strrchr(text, ':');
+    if (colon != NULL)
+    {
+        if (!vm_autotest_parse_u32(colon + 1, &parsedPort) || parsedPort == 0 || parsedPort > 65535u)
+            return 0;
+        hostLen = (size_t)(colon - text);
+        if (hostLen == 0)
+        {
+            snprintf(host, hostCap, "127.0.0.1");
+        }
+        else
+        {
+            if (hostLen >= hostCap)
+                hostLen = hostCap - 1;
+            memcpy(host, text, hostLen);
+            host[hostLen] = 0;
+        }
+        *port = (u16)parsedPort;
+        return 1;
+    }
+
+    if (!vm_autotest_parse_u32(text, &parsedPort) || parsedPort == 0 || parsedPort > 65535u)
+        return 0;
+    snprintf(host, hostCap, "127.0.0.1");
+    *port = (u16)parsedPort;
+    return 1;
+}
+
 static void vm_autotest_add_tap(u32 atMs, int x, int y)
 {
     if (g_autotestActionCount >= sizeof(g_autotestActions) / sizeof(g_autotestActions[0]))
@@ -3187,6 +3233,145 @@ static void vm_autotest_note(const char *fmt, ...)
     vfprintf(g_autotestStateFile, fmt, args);
     va_end(args);
     fflush(g_autotestStateFile);
+}
+
+static void vm_mock_service_init_config(int argc, char *args[])
+{
+    const char *envOnly = getenv("CBE_MOCK_SERVICE_ONLY");
+    const char *envEndpoint = getenv("CBE_MOCK_SERVICE");
+    const char *envBind = getenv("CBE_MOCK_SERVICE_BIND");
+    const char *envAccount = getenv("CBE_MOCK_SERVICE_ACCOUNT");
+    const char *envLegacyPort = getenv("CBE_MOCK_SERVICE_PORT");
+    const char *envLegacyRemote = getenv("CBE_MOCK_SERVICE_REMOTE");
+    char parsedHost[64];
+    u16 parsedPort = 0;
+
+    if (envOnly && strcmp(envOnly, "0") != 0)
+        g_mockServiceOnly = 1;
+
+    if (envBind && envBind[0] != 0)
+    {
+        snprintf(g_mockServiceBindHost, sizeof(g_mockServiceBindHost), "%s", envBind);
+    }
+
+    if (g_mockServiceClientId == 0)
+    {
+        g_mockServiceClientId = (u32)time(NULL) ^ (u32)(uintptr_t)&g_mockServiceClientId;
+        if (g_mockServiceClientId == 0)
+            g_mockServiceClientId = 1;
+    }
+    if (envAccount && envAccount[0] != 0)
+    {
+        snprintf(g_mockServiceAccount, sizeof(g_mockServiceAccount), "%s", envAccount);
+        g_mockServiceAccountExplicit = 1;
+    }
+
+    if (envEndpoint)
+    {
+        if (vm_mock_service_parse_host_port(envEndpoint, parsedHost, sizeof(parsedHost), &parsedPort))
+        {
+            snprintf(g_mockServiceHost, sizeof(g_mockServiceHost), "%s", parsedHost);
+            g_mockServicePort = parsedPort;
+        }
+        else
+        {
+            printf("[warn][mock-service] invalid CBE_MOCK_SERVICE=%s\n", envEndpoint);
+        }
+    }
+    else if (envLegacyRemote)
+    {
+        if (vm_mock_service_parse_host_port(envLegacyRemote, parsedHost, sizeof(parsedHost), &parsedPort))
+        {
+            snprintf(g_mockServiceHost, sizeof(g_mockServiceHost), "%s", parsedHost);
+            g_mockServicePort = parsedPort;
+        }
+        else
+        {
+            printf("[warn][mock-service] invalid CBE_MOCK_SERVICE_REMOTE=%s\n", envLegacyRemote);
+        }
+    }
+    else if (envLegacyPort)
+    {
+        u32 portValue = 0;
+        if (vm_autotest_parse_u32(envLegacyPort, &portValue) && portValue > 0 && portValue <= 65535u)
+            g_mockServicePort = (u16)portValue;
+        else
+        {
+            printf("[warn][mock-service] invalid CBE_MOCK_SERVICE_PORT=%s\n", envLegacyPort);
+        }
+    }
+
+    for (int i = 1; i < argc; ++i)
+    {
+        if (strcmp(args[i], "--mock-service-only") == 0)
+        {
+            g_mockServiceOnly = 1;
+        }
+        else if (strncmp(args[i], "--mock-service-port=", 20) == 0)
+        {
+            u32 portValue = 0;
+            if (vm_autotest_parse_u32(args[i] + 20, &portValue) && portValue > 0 && portValue <= 65535u)
+                g_mockServicePort = (u16)portValue;
+            else
+                printf("[warn][mock-service] invalid mock-service-port=%s\n", args[i] + 20);
+        }
+        else if (strncmp(args[i], "--mock-service=", 15) == 0)
+        {
+            if (vm_mock_service_parse_host_port(args[i] + 15, parsedHost, sizeof(parsedHost), &parsedPort))
+            {
+                snprintf(g_mockServiceHost, sizeof(g_mockServiceHost), "%s", parsedHost);
+                g_mockServicePort = parsedPort;
+            }
+            else
+            {
+                printf("[warn][mock-service] invalid mock-service=%s\n", args[i] + 15);
+            }
+        }
+        else if (strncmp(args[i], "--mock-service-bind=", 20) == 0)
+        {
+            if (args[i][20] != 0)
+                snprintf(g_mockServiceBindHost, sizeof(g_mockServiceBindHost), "%s", args[i] + 20);
+            else
+                printf("[warn][mock-service] invalid mock-service-bind=<empty>\n");
+        }
+        else if (strncmp(args[i], "--mock-service-account=", 23) == 0)
+        {
+            if (args[i][23] != 0)
+            {
+                snprintf(g_mockServiceAccount, sizeof(g_mockServiceAccount), "%s", args[i] + 23);
+                g_mockServiceAccountExplicit = 1;
+            }
+            else
+                printf("[warn][mock-service] invalid mock-service-account=<empty>\n");
+        }
+        else if (strncmp(args[i], "--mock-service-remote=", 22) == 0)
+        {
+            if (vm_mock_service_parse_host_port(args[i] + 22, parsedHost, sizeof(parsedHost), &parsedPort))
+            {
+                snprintf(g_mockServiceHost, sizeof(g_mockServiceHost), "%s", parsedHost);
+                g_mockServicePort = parsedPort;
+            }
+            else
+            {
+                printf("[warn][mock-service] invalid mock-service-remote=%s\n", args[i] + 22);
+            }
+        }
+    }
+
+    if (g_mockServiceOnly)
+    {
+        printf("[info][mock-service] mode=server-only bind=%s:%u client-default=%s:%u\n",
+               g_mockServiceBindHost,
+               g_mockServicePort,
+               g_mockServiceHost,
+               g_mockServicePort);
+    }
+    else
+    {
+        printf("[info][mock-service] mode=emulator client=%s:%u account=%s required=service\n",
+               g_mockServiceHost, g_mockServicePort,
+               g_mockServiceAccount[0] ? g_mockServiceAccount : "(auto)");
+    }
 }
 
 static void vm_autotest_format_mem_hex(u32 addr, u32 len, char *out, size_t outCap)
@@ -6506,40 +6691,55 @@ int main(int argc, char *args[])
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     vm_autotest_init(argc, args);
-    vm_lcd_init_rotation_config(argc, args);
+    vm_mock_service_init_config(argc, args);
+    if (!g_mockServiceOnly)
+        vm_lcd_init_rotation_config(argc, args);
 
     SetConsoleOutputCP(CP_UTF8);
     // while(1);
 
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) < 0)
+    if (SDL_Init((g_mockServiceOnly ? SDL_INIT_TIMER : (SDL_INIT_VIDEO | SDL_INIT_TIMER))) < 0)
     {
         printf("SDL could not initialize! SDL_Error: %s\n", SDL_GetError());
         return -1;
     }
     /* 勿用 SDL_WINDOW_OPENGL：本工程用 GetWindowSurface 直接写像素，OpenGL 窗口下格式/stride 常异常 → 竖条花屏 */
+    if (!g_mockServiceOnly)
+    {
 #ifdef GDI_LAYER_DEBUGf
-    window = SDL_CreateWindow("moral i9 simulato", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, SCREEN_WIDTH * 5, SCREEN_HEIGHT, 0);
+        window = SDL_CreateWindow("moral i9 simulato", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, SCREEN_WIDTH * 5, SCREEN_HEIGHT, 0);
 #else
-    window = SDL_CreateWindow("Cbe Emulator", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                              LcdGetWindowWidth(), LcdGetWindowHeight(), 0);
+        window = SDL_CreateWindow("Cbe Emulator", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                                  LcdGetWindowWidth(), LcdGetWindowHeight(), 0);
 #endif
-    if (window == NULL)
-    {
-        printf("Window could not be created! SDL_Error: %s\n", SDL_GetError());
-        return -1;
-    }
-    LcdApplyWindowSize();
-    SDL_Surface *startupSurface = SDL_GetWindowSurface(window);
-    if (startupSurface)
-    {
-        SDL_FillRect(startupSurface, NULL, SDL_MapRGB(startupSurface->format, 0, 0, 0));
-        SDL_UpdateWindowSurface(window);
+        if (window == NULL)
+        {
+            printf("Window could not be created! SDL_Error: %s\n", SDL_GetError());
+            return -1;
+        }
+        LcdApplyWindowSize();
+        SDL_Surface *startupSurface = SDL_GetWindowSurface(window);
+        if (startupSurface)
+        {
+            SDL_FillRect(startupSurface, NULL, SDL_MapRGB(startupSurface->format, 0, 0, 0));
+            SDL_UpdateWindowSurface(window);
+        }
     }
 
     InitVmEvent();
 
     char nameBuff[64] = LOAD_CBE_PATH;
     utf8_to_gbk(nameBuff, cbeTextString, mySizeOf(cbeTextString));
+    if (!vm_host_file_exists((char *)cbeTextString))
+    {
+        char altPath[128];
+        snprintf(altPath, sizeof(altPath), "bin/%s", cbeTextString);
+        if (vm_host_file_exists(altPath))
+        {
+            chdir("bin");
+            printf("[info][host] runtime cwd adjusted to ./bin\n");
+        }
+    }
     char *fileBuffer = readFile(cbeTextString, &changeTmp1);
     g_cbeFileBuffer = (u8 *)fileBuffer;
     g_cbeFileSize = changeTmp1;
@@ -6573,9 +6773,12 @@ int main(int argc, char *args[])
     uc_mem_map(MTK, PROGRAM_EXIT_ADDR, 0x1000, UC_PROT_ALL);
 
     InitVmMalloc();
-    InitLcd();
-    vm_lcd_update_with_input_overlay();
-    InitFontEngine();
+    if (!g_mockServiceOnly)
+    {
+        InitLcd();
+        vm_lcd_update_with_input_overlay();
+        InitFontEngine();
+    }
 
     if (err)
     {
@@ -6629,6 +6832,14 @@ int main(int argc, char *args[])
 
         changeTmp2 = STACK_ADDRESS + size_1mb; // 映射栈内存
         uc_reg_write(MTK, UC_ARM_REG_SP, &changeTmp2);
+
+        if (g_mockServiceOnly)
+        {
+            printf("[info][mock-service] loaded cbe=%s entry=%08x data=%08x port=%u\n",
+                   LOAD_CBE_PATH, Program_ROM_Address, Program_Data_Address, g_mockServicePort);
+            vm_net_mock_service_run_forever(g_mockServiceBindHost, g_mockServicePort);
+            return 0;
+        }
 
         // 启动emu线程
         changeTmp1 = Program_ROM_Address;

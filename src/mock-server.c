@@ -8,9 +8,17 @@
  */
 
 #ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <conio.h>
 #include <io.h>
 #include <stdint.h>
 #include <windows.h>
+#else
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #endif
 #include <stdlib.h>
 
@@ -34,6 +42,19 @@ static u32 g_netMockShopWCoinBalance = 0;
 static u8 g_netMockBackpackPreferRoleListAfterShopBuy = 0;
 static bool g_vm_net_mock_update_completed_reenter_pending = false;
 static char g_vm_net_mock_update_completed_name[64];
+static const char *g_vm_mock_service_active_account_id = NULL;
+
+#define VM_MOCK_SERVICE_FRAME_SIZE 20
+#define VM_MOCK_SERVICE_REQUEST_FLAG_PING 0x1u
+#define VM_MOCK_SERVICE_RESPONSE_FLAG_CLOSE_AFTER_DATA 0x1u
+
+#ifdef _WIN32
+typedef SOCKET vm_mock_service_socket;
+#define VM_MOCK_SERVICE_INVALID_SOCKET INVALID_SOCKET
+#else
+typedef int vm_mock_service_socket;
+#define VM_MOCK_SERVICE_INVALID_SOCKET (-1)
+#endif
 
 static bool vm_net_mock_request_contains(const u8 *request, u32 requestLen, const char *needle)
 {
@@ -3018,6 +3039,40 @@ typedef struct
     u32 roleCount;
     vm_net_mock_role_state roles[VM_NET_MOCK_ROLE_DB_MAX_ROLES];
 } vm_net_mock_role_db_file;
+
+#define VM_MOCK_SERVICE_ACCOUNT_DB_VERSION 1
+#define VM_MOCK_SERVICE_ACCOUNT_DB_MAX_ACCOUNTS 64
+
+typedef struct
+{
+    char username[64];
+    char password[64];
+} vm_mock_service_account_record;
+
+typedef struct
+{
+    char magic[4];
+    u32 version;
+    u32 accountCount;
+    vm_mock_service_account_record accounts[VM_MOCK_SERVICE_ACCOUNT_DB_MAX_ACCOUNTS];
+} vm_mock_service_account_db_file;
+
+typedef struct
+{
+    u8 requestSubtype;
+    bool haveUserName;
+    bool havePassword;
+    char userName[64];
+    char password[64];
+} vm_mock_service_login_request;
+
+static vm_mock_service_account_db_file g_vm_mock_service_account_db;
+static bool g_vm_mock_service_account_db_loaded = false;
+static bool g_vm_mock_service_account_db_valid = false;
+
+static bool vm_mock_service_login_is_no_account(const vm_mock_service_login_request *login);
+static bool vm_mock_service_authenticate_login_request(const vm_mock_service_login_request *login,
+                                                       const char **errorOut);
 
 typedef struct
 {
@@ -6307,7 +6362,184 @@ static void vm_net_mock_adjust_safe_player_pos_for_scene(const char *scene, u16 
 
 static void vm_net_mock_role_db_path(char *path, size_t pathSize)
 {
-    snprintf(path, pathSize, "nvram/jhol_mock_roles.bin");
+    char safeAccount[64];
+    const char *accountId = g_vm_mock_service_active_account_id;
+    size_t outPos = 0;
+
+    if (path == NULL || pathSize == 0)
+        return;
+    if (accountId == NULL || accountId[0] == 0 || strcmp(accountId, "default") == 0)
+    {
+        snprintf(path, pathSize, "nvram/jhol_mock_roles.bin");
+        return;
+    }
+
+    memset(safeAccount, 0, sizeof(safeAccount));
+    for (size_t i = 0; accountId[i] != 0 && outPos + 1 < sizeof(safeAccount); ++i)
+    {
+        unsigned char ch = (unsigned char)accountId[i];
+        if ((ch >= '0' && ch <= '9') ||
+            (ch >= 'A' && ch <= 'Z') ||
+            (ch >= 'a' && ch <= 'z') ||
+            ch == '_' || ch == '-')
+        {
+            safeAccount[outPos++] = (char)ch;
+        }
+        else
+        {
+            safeAccount[outPos++] = '_';
+        }
+    }
+    if (outPos == 0)
+        snprintf(safeAccount, sizeof(safeAccount), "default");
+    snprintf(path, pathSize, "nvram/accounts/%s/jhol_mock_roles.bin", safeAccount);
+}
+
+static void vm_mock_service_account_db_path(char *path, size_t pathSize)
+{
+    if (path == NULL || pathSize == 0)
+        return;
+    snprintf(path, pathSize, "nvram/mock_service_accounts.bin");
+}
+
+static void vm_mock_service_account_db_save(const char *reason)
+{
+    char path[128];
+    if (!g_vm_mock_service_account_db_valid)
+        return;
+    memcpy(g_vm_mock_service_account_db.magic, "JHA1", 4);
+    g_vm_mock_service_account_db.version = VM_MOCK_SERVICE_ACCOUNT_DB_VERSION;
+    if (g_vm_mock_service_account_db.accountCount > VM_MOCK_SERVICE_ACCOUNT_DB_MAX_ACCOUNTS)
+        g_vm_mock_service_account_db.accountCount = VM_MOCK_SERVICE_ACCOUNT_DB_MAX_ACCOUNTS;
+#ifdef _WIN32
+    _mkdir("nvram");
+#else
+    mkdir("nvram", 0777);
+#endif
+    vm_mock_service_account_db_path(path, sizeof(path));
+    FILE *fp = fopen(path, "wb");
+    if (fp)
+    {
+        fwrite(&g_vm_mock_service_account_db, 1, sizeof(g_vm_mock_service_account_db), fp);
+        fclose(fp);
+        vm_autotest_note("mock_account_db_save reason=%s count=%u\n",
+                         reason ? reason : "state",
+                         g_vm_mock_service_account_db.accountCount);
+    }
+}
+
+static void vm_mock_service_account_db_load(void)
+{
+    char path[128];
+    vm_mock_service_account_db_file loaded;
+
+    if (g_vm_mock_service_account_db_loaded)
+        return;
+    g_vm_mock_service_account_db_loaded = true;
+    memset(&g_vm_mock_service_account_db, 0, sizeof(g_vm_mock_service_account_db));
+    memcpy(g_vm_mock_service_account_db.magic, "JHA1", 4);
+    g_vm_mock_service_account_db.version = VM_MOCK_SERVICE_ACCOUNT_DB_VERSION;
+    g_vm_mock_service_account_db_valid = true;
+
+    vm_mock_service_account_db_path(path, sizeof(path));
+    FILE *fp = fopen(path, "rb");
+    if (!fp)
+        return;
+
+    memset(&loaded, 0, sizeof(loaded));
+    if (fread(&loaded, 1, sizeof(loaded), fp) == sizeof(loaded) &&
+        memcmp(loaded.magic, "JHA1", 4) == 0 &&
+        loaded.version == VM_MOCK_SERVICE_ACCOUNT_DB_VERSION &&
+        loaded.accountCount <= VM_MOCK_SERVICE_ACCOUNT_DB_MAX_ACCOUNTS)
+    {
+        g_vm_mock_service_account_db = loaded;
+    }
+    fclose(fp);
+}
+
+static vm_mock_service_account_record *vm_mock_service_account_find_record(const char *username)
+{
+    vm_mock_service_account_db_load();
+    if (!g_vm_mock_service_account_db_valid || username == NULL || username[0] == 0)
+        return NULL;
+    for (u32 i = 0; i < g_vm_mock_service_account_db.accountCount; ++i)
+    {
+        if (strcmp(g_vm_mock_service_account_db.accounts[i].username, username) == 0)
+            return &g_vm_mock_service_account_db.accounts[i];
+    }
+    return NULL;
+}
+
+static bool vm_mock_service_account_verify_credentials(const char *username, const char *password)
+{
+    vm_mock_service_account_record *record = vm_mock_service_account_find_record(username);
+    if (record == NULL || password == NULL)
+        return false;
+    return strcmp(record->password, password) == 0;
+}
+
+static bool vm_mock_service_account_create_record(const char *username,
+                                                  const char *password,
+                                                  const char **messageOut)
+{
+    vm_mock_service_account_db_load();
+    if (messageOut)
+        *messageOut = "ok";
+    if (!g_vm_mock_service_account_db_valid)
+    {
+        if (messageOut)
+            *messageOut = "account db unavailable";
+        return false;
+    }
+    if (username == NULL || username[0] == 0 || password == NULL || password[0] == 0)
+    {
+        if (messageOut)
+            *messageOut = "username/password cannot be empty";
+        return false;
+    }
+    if (vm_mock_service_account_find_record(username) != NULL)
+    {
+        if (messageOut)
+            *messageOut = "account already exists";
+        return false;
+    }
+    if (g_vm_mock_service_account_db.accountCount >= VM_MOCK_SERVICE_ACCOUNT_DB_MAX_ACCOUNTS)
+    {
+        if (messageOut)
+            *messageOut = "account db full";
+        return false;
+    }
+    vm_mock_service_account_record *record =
+        &g_vm_mock_service_account_db.accounts[g_vm_mock_service_account_db.accountCount++];
+    memset(record, 0, sizeof(*record));
+    snprintf(record->username, sizeof(record->username), "%s", username);
+    snprintf(record->password, sizeof(record->password), "%s", password);
+    vm_mock_service_account_db_save("create");
+    return true;
+}
+
+static bool vm_mock_service_account_set_password(const char *username,
+                                                 const char *password,
+                                                 const char **messageOut)
+{
+    vm_mock_service_account_record *record = vm_mock_service_account_find_record(username);
+    if (messageOut)
+        *messageOut = "ok";
+    if (record == NULL)
+    {
+        if (messageOut)
+            *messageOut = "account not found";
+        return false;
+    }
+    if (password == NULL || password[0] == 0)
+    {
+        if (messageOut)
+            *messageOut = "password cannot be empty";
+        return false;
+    }
+    snprintf(record->password, sizeof(record->password), "%s", password);
+    vm_mock_service_account_db_save("passwd");
+    return true;
 }
 
 static u32 vm_net_mock_role_level_start_exp(u32 level)
@@ -7385,6 +7617,7 @@ static u32 vm_net_mock_role_db_repair_duplicate_default_names(void)
 static void vm_net_mock_role_db_save(const char *reason)
 {
     char path[128];
+    char accountDir[128];
     if (!g_vm_net_mock_role_db_valid)
         return;
     memcpy(g_vm_net_mock_role_db.magic, "JHR1", 4);
@@ -7395,16 +7628,36 @@ static void vm_net_mock_role_db_save(const char *reason)
         g_vm_net_mock_role_db.activeRoleId = 0;
 #ifdef _WIN32
     _mkdir("nvram");
+    _mkdir("nvram\\accounts");
 #else
     mkdir("nvram", 0777);
+    mkdir("nvram/accounts", 0777);
 #endif
     vm_net_mock_role_db_path(path, sizeof(path));
+    if (strncmp(path, "nvram/accounts/", 15) == 0)
+    {
+        const char *slash = strrchr(path, '/');
+        if (slash != NULL)
+        {
+            size_t dirLen = (size_t)(slash - path);
+            if (dirLen >= sizeof(accountDir))
+                dirLen = sizeof(accountDir) - 1;
+            memcpy(accountDir, path, dirLen);
+            accountDir[dirLen] = 0;
+#ifdef _WIN32
+            _mkdir(accountDir);
+#else
+            mkdir(accountDir, 0777);
+#endif
+        }
+    }
     FILE *fp = fopen(path, "wb");
     if (fp)
     {
         fwrite(&g_vm_net_mock_role_db, 1, sizeof(g_vm_net_mock_role_db), fp);
         fclose(fp);
-        vm_autotest_note("mock_role_db_save reason=%s roles=%u active=%u\n",
+        vm_autotest_note("mock_role_db_save account=%s reason=%s roles=%u active=%u\n",
+                         g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "default",
                          reason ? reason : "state",
                          g_vm_net_mock_role_db.roleCount,
                          g_vm_net_mock_role_db.activeRoleId);
@@ -8906,6 +9159,509 @@ static u16 g_vm_net_mock_last_moveinfo_source_x = 0;
 static u16 g_vm_net_mock_last_moveinfo_source_y = 0;
 static u32 g_vm_net_mock_last_moveinfo_source_tick = 0;
 static bool g_vm_net_mock_last_moveinfo_source_valid = false;
+
+typedef struct vm_mock_service_account_state
+{
+    char accountId[64];
+    struct vm_mock_service_account_state *next;
+
+    bool netMockSplitProbe;
+    u8 netMockUpdateDelivered;
+    u32 netMockEnterGameOffset;
+    u32 netMockEnterGameChecksum;
+
+    bool pendingSceneSaveValid;
+    char pendingSceneSaveScene[64];
+    char pendingSceneSaveReason[64];
+    u16 pendingSceneSaveX;
+    u16 pendingSceneSaveY;
+
+    u32 mockBattleOperateSessionSerial;
+    u32 mockBattleOperateTurnCounter;
+    u8 mockBattleOperateSessionArmed;
+    u8 mockBattleOperateSessionFinished;
+    u8 mockBattlePendingEnemyTurn;
+    u8 mockBattleAwaitingSettlement;
+    u8 mockBattleSceneMonsterStartActive;
+    u32 mockBattleRoleHpCurrent;
+    u32 mockBattleRoleHpMax;
+    u32 mockBattleRoleMpCurrent;
+    u32 mockBattleRoleMpMax;
+    u8 mockBattleEnemyCountCurrent;
+    u32 mockBattleEnemyHpSlots[3];
+    u32 mockBattleEnemyHpMaxSlots[3];
+    u32 mockBattleEnemyHpCurrent;
+    u32 mockBattleEnemyHpMax;
+
+    u8 netMockTitleServerListPending;
+    u8 netMockTitleServerSelectConfirmed;
+    u32 netMockBackpackGridSeededRoleId;
+    u8 netMockShop17ListPending;
+    u32 netMockTitleServerListTick;
+    u32 netMockTitleServerSelectTick;
+    u32 netMockTitleSelectedServerId;
+    u32 netMockShopWCoinBalance;
+    u8 netMockBackpackPreferRoleListAfterShopBuy;
+    bool updateCompletedReenterPending;
+    char updateCompletedName[64];
+
+    vm_net_mock_role_db_file roleDb;
+    bool roleDbLoaded;
+    bool roleDbValid;
+
+    u32 battleRewardedSerial;
+    u32 battleRewardedExp;
+    u32 battleRewardedDropItem;
+    u16 battleRewardedDropSeq;
+    u32 battleRewardedDropCount;
+    u32 battleEnemyIdCurrent;
+    u32 battleRoleIdCurrent;
+    u32 battleRewardRng;
+    u32 battleSettlementSentSerial;
+    u32 battleDropRefreshSentSerial;
+    u32 battleRecoveredSerial;
+
+    char sceneMoveinfoNpcPendingScene[64];
+    bool sceneMoveinfoNpcPending;
+    char sceneMoveinfoNpcSeededScene[64];
+    bool sceneMoveinfoNpcSeeded;
+
+    vm_net_mock_scene_change_target lastSceneChangeTarget;
+    bool lastSceneChangeTargetValid;
+    u32 lastSceneChangeTargetSerial;
+    bool teleportStoneSubtype3AckSent;
+    bool teleportStoneDirectEnterPending;
+    bool teleportStoneMapEnterPending;
+    u32 lastTeleportStoneListTick;
+    vm_net_mock_scene_change_target teleportStoneConfirmTarget;
+    bool teleportStoneConfirmTargetValid;
+    bool lastSceneChangeFromActorOtherPortal;
+    u8 lastSceneChangeFb4Type;
+
+    vm_net_mock_scene_change_target lastCompletedSceneChangeTarget;
+    bool lastCompletedSceneChangeTargetValid;
+    u32 lastCompletedSceneChangeTick;
+
+    char lastCurrentSceneReloadScene[64];
+    bool lastCurrentSceneReloadValid;
+    u32 lastCurrentSceneReloadTick;
+
+    char lastMoveinfoSourceScene[64];
+    u16 lastMoveinfoSourceX;
+    u16 lastMoveinfoSourceY;
+    u32 lastMoveinfoSourceTick;
+    bool lastMoveinfoSourceValid;
+} vm_mock_service_account_state;
+
+static vm_mock_service_account_state *g_vm_mock_service_accounts = NULL;
+static vm_mock_service_account_state *g_vm_mock_service_active_account = NULL;
+
+typedef struct vm_mock_service_client_session
+{
+    u32 clientId;
+    char accountId[64];
+    struct vm_mock_service_client_session *next;
+} vm_mock_service_client_session;
+
+static vm_mock_service_client_session *g_vm_mock_service_client_sessions = NULL;
+
+static void vm_mock_service_account_state_init(vm_mock_service_account_state *state, const char *accountId)
+{
+    if (state == NULL)
+        return;
+    memset(state, 0, sizeof(*state));
+    snprintf(state->accountId, sizeof(state->accountId), "%s",
+             (accountId && accountId[0]) ? accountId : "default");
+    state->mockBattleEnemyCountCurrent = 1;
+    state->lastSceneChangeFb4Type = 1;
+}
+
+static void vm_mock_service_account_capture(vm_mock_service_account_state *state)
+{
+    if (state == NULL)
+        return;
+
+    state->netMockSplitProbe = g_netMockSplitProbe;
+    state->netMockUpdateDelivered = g_netMockUpdateDelivered;
+    state->netMockEnterGameOffset = g_netMockEnterGameOffset;
+    state->netMockEnterGameChecksum = g_netMockEnterGameChecksum;
+
+    state->pendingSceneSaveValid = g_vm_net_mock_pending_scene_save_valid;
+    memcpy(state->pendingSceneSaveScene, g_vm_net_mock_pending_scene_save_scene,
+           sizeof(state->pendingSceneSaveScene));
+    memcpy(state->pendingSceneSaveReason, g_vm_net_mock_pending_scene_save_reason,
+           sizeof(state->pendingSceneSaveReason));
+    state->pendingSceneSaveX = g_vm_net_mock_pending_scene_save_x;
+    state->pendingSceneSaveY = g_vm_net_mock_pending_scene_save_y;
+
+    state->mockBattleOperateSessionSerial = g_mockBattleOperateSessionSerial;
+    state->mockBattleOperateTurnCounter = g_mockBattleOperateTurnCounter;
+    state->mockBattleOperateSessionArmed = g_mockBattleOperateSessionArmed;
+    state->mockBattleOperateSessionFinished = g_mockBattleOperateSessionFinished;
+    state->mockBattlePendingEnemyTurn = g_mockBattlePendingEnemyTurn;
+    state->mockBattleAwaitingSettlement = g_mockBattleAwaitingSettlement;
+    state->mockBattleSceneMonsterStartActive = g_mockBattleSceneMonsterStartActive;
+    state->mockBattleRoleHpCurrent = g_mockBattleRoleHpCurrent;
+    state->mockBattleRoleHpMax = g_mockBattleRoleHpMax;
+    state->mockBattleRoleMpCurrent = g_mockBattleRoleMpCurrent;
+    state->mockBattleRoleMpMax = g_mockBattleRoleMpMax;
+    state->mockBattleEnemyCountCurrent = g_mockBattleEnemyCountCurrent;
+    memcpy(state->mockBattleEnemyHpSlots, g_mockBattleEnemyHpSlots, sizeof(state->mockBattleEnemyHpSlots));
+    memcpy(state->mockBattleEnemyHpMaxSlots, g_mockBattleEnemyHpMaxSlots, sizeof(state->mockBattleEnemyHpMaxSlots));
+    state->mockBattleEnemyHpCurrent = g_mockBattleEnemyHpCurrent;
+    state->mockBattleEnemyHpMax = g_mockBattleEnemyHpMax;
+
+    state->netMockTitleServerListPending = g_netMockTitleServerListPending;
+    state->netMockTitleServerSelectConfirmed = g_netMockTitleServerSelectConfirmed;
+    state->netMockBackpackGridSeededRoleId = g_netMockBackpackGridSeededRoleId;
+    state->netMockShop17ListPending = g_netMockShop17ListPending;
+    state->netMockTitleServerListTick = g_netMockTitleServerListTick;
+    state->netMockTitleServerSelectTick = g_netMockTitleServerSelectTick;
+    state->netMockTitleSelectedServerId = g_netMockTitleSelectedServerId;
+    state->netMockShopWCoinBalance = g_netMockShopWCoinBalance;
+    state->netMockBackpackPreferRoleListAfterShopBuy = g_netMockBackpackPreferRoleListAfterShopBuy;
+    state->updateCompletedReenterPending = g_vm_net_mock_update_completed_reenter_pending;
+    memcpy(state->updateCompletedName, g_vm_net_mock_update_completed_name, sizeof(state->updateCompletedName));
+
+    state->roleDb = g_vm_net_mock_role_db;
+    state->roleDbLoaded = g_vm_net_mock_role_db_loaded;
+    state->roleDbValid = g_vm_net_mock_role_db_valid;
+
+    state->battleRewardedSerial = g_vm_net_mock_battle_rewarded_serial;
+    state->battleRewardedExp = g_vm_net_mock_battle_rewarded_exp;
+    state->battleRewardedDropItem = g_vm_net_mock_battle_rewarded_drop_item;
+    state->battleRewardedDropSeq = g_vm_net_mock_battle_rewarded_drop_seq;
+    state->battleRewardedDropCount = g_vm_net_mock_battle_rewarded_drop_count;
+    state->battleEnemyIdCurrent = g_vm_net_mock_battle_enemy_id_current;
+    state->battleRoleIdCurrent = g_vm_net_mock_battle_role_id_current;
+    state->battleRewardRng = g_vm_net_mock_battle_reward_rng;
+    state->battleSettlementSentSerial = g_vm_net_mock_battle_settlement_sent_serial;
+    state->battleDropRefreshSentSerial = g_vm_net_mock_battle_drop_refresh_sent_serial;
+    state->battleRecoveredSerial = g_vm_net_mock_battle_recovered_serial;
+
+    memcpy(state->sceneMoveinfoNpcPendingScene, g_vm_net_mock_scene_moveinfo_npc_pending_scene,
+           sizeof(state->sceneMoveinfoNpcPendingScene));
+    state->sceneMoveinfoNpcPending = g_vm_net_mock_scene_moveinfo_npc_pending;
+    memcpy(state->sceneMoveinfoNpcSeededScene, g_vm_net_mock_scene_moveinfo_npc_seeded_scene,
+           sizeof(state->sceneMoveinfoNpcSeededScene));
+    state->sceneMoveinfoNpcSeeded = g_vm_net_mock_scene_moveinfo_npc_seeded;
+
+    state->lastSceneChangeTarget = g_vm_net_mock_last_scene_change_target;
+    state->lastSceneChangeTargetValid = g_vm_net_mock_last_scene_change_target_valid;
+    state->lastSceneChangeTargetSerial = g_vm_net_mock_last_scene_change_target_serial;
+    state->teleportStoneSubtype3AckSent = g_vm_net_mock_teleport_stone_subtype3_ack_sent;
+    state->teleportStoneDirectEnterPending = g_vm_net_mock_teleport_stone_direct_enter_pending;
+    state->teleportStoneMapEnterPending = g_vm_net_mock_teleport_stone_map_enter_pending;
+    state->lastTeleportStoneListTick = g_vm_net_mock_last_teleport_stone_list_tick;
+    state->teleportStoneConfirmTarget = g_vm_net_mock_teleport_stone_confirm_target;
+    state->teleportStoneConfirmTargetValid = g_vm_net_mock_teleport_stone_confirm_target_valid;
+    state->lastSceneChangeFromActorOtherPortal = g_vm_net_mock_last_scene_change_from_actor_other_portal;
+    state->lastSceneChangeFb4Type = g_vm_net_mock_last_scene_change_fb4_type;
+
+    state->lastCompletedSceneChangeTarget = g_vm_net_mock_last_completed_scene_change_target;
+    state->lastCompletedSceneChangeTargetValid = g_vm_net_mock_last_completed_scene_change_target_valid;
+    state->lastCompletedSceneChangeTick = g_vm_net_mock_last_completed_scene_change_tick;
+    memcpy(state->lastCurrentSceneReloadScene, g_vm_net_mock_last_current_scene_reload_scene,
+           sizeof(state->lastCurrentSceneReloadScene));
+    state->lastCurrentSceneReloadValid = g_vm_net_mock_last_current_scene_reload_valid;
+    state->lastCurrentSceneReloadTick = g_vm_net_mock_last_current_scene_reload_tick;
+    memcpy(state->lastMoveinfoSourceScene, g_vm_net_mock_last_moveinfo_source_scene,
+           sizeof(state->lastMoveinfoSourceScene));
+    state->lastMoveinfoSourceX = g_vm_net_mock_last_moveinfo_source_x;
+    state->lastMoveinfoSourceY = g_vm_net_mock_last_moveinfo_source_y;
+    state->lastMoveinfoSourceTick = g_vm_net_mock_last_moveinfo_source_tick;
+    state->lastMoveinfoSourceValid = g_vm_net_mock_last_moveinfo_source_valid;
+}
+
+static void vm_mock_service_account_restore(vm_mock_service_account_state *state)
+{
+    g_vm_mock_service_active_account = state;
+    g_vm_mock_service_active_account_id = state ? state->accountId : NULL;
+
+    if (state == NULL)
+        return;
+
+    g_netMockSplitProbe = state->netMockSplitProbe;
+    g_netMockUpdateDelivered = state->netMockUpdateDelivered;
+    g_netMockEnterGameOffset = state->netMockEnterGameOffset;
+    g_netMockEnterGameChecksum = state->netMockEnterGameChecksum;
+
+    g_vm_net_mock_pending_scene_save_valid = state->pendingSceneSaveValid;
+    memcpy(g_vm_net_mock_pending_scene_save_scene, state->pendingSceneSaveScene,
+           sizeof(g_vm_net_mock_pending_scene_save_scene));
+    memcpy(g_vm_net_mock_pending_scene_save_reason, state->pendingSceneSaveReason,
+           sizeof(g_vm_net_mock_pending_scene_save_reason));
+    g_vm_net_mock_pending_scene_save_x = state->pendingSceneSaveX;
+    g_vm_net_mock_pending_scene_save_y = state->pendingSceneSaveY;
+
+    g_mockBattleOperateSessionSerial = state->mockBattleOperateSessionSerial;
+    g_mockBattleOperateTurnCounter = state->mockBattleOperateTurnCounter;
+    g_mockBattleOperateSessionArmed = state->mockBattleOperateSessionArmed;
+    g_mockBattleOperateSessionFinished = state->mockBattleOperateSessionFinished;
+    g_mockBattlePendingEnemyTurn = state->mockBattlePendingEnemyTurn;
+    g_mockBattleAwaitingSettlement = state->mockBattleAwaitingSettlement;
+    g_mockBattleSceneMonsterStartActive = state->mockBattleSceneMonsterStartActive;
+    g_mockBattleRoleHpCurrent = state->mockBattleRoleHpCurrent;
+    g_mockBattleRoleHpMax = state->mockBattleRoleHpMax;
+    g_mockBattleRoleMpCurrent = state->mockBattleRoleMpCurrent;
+    g_mockBattleRoleMpMax = state->mockBattleRoleMpMax;
+    g_mockBattleEnemyCountCurrent = state->mockBattleEnemyCountCurrent;
+    memcpy(g_mockBattleEnemyHpSlots, state->mockBattleEnemyHpSlots, sizeof(g_mockBattleEnemyHpSlots));
+    memcpy(g_mockBattleEnemyHpMaxSlots, state->mockBattleEnemyHpMaxSlots, sizeof(g_mockBattleEnemyHpMaxSlots));
+    g_mockBattleEnemyHpCurrent = state->mockBattleEnemyHpCurrent;
+    g_mockBattleEnemyHpMax = state->mockBattleEnemyHpMax;
+
+    g_netMockTitleServerListPending = state->netMockTitleServerListPending;
+    g_netMockTitleServerSelectConfirmed = state->netMockTitleServerSelectConfirmed;
+    g_netMockBackpackGridSeededRoleId = state->netMockBackpackGridSeededRoleId;
+    g_netMockShop17ListPending = state->netMockShop17ListPending;
+    g_netMockTitleServerListTick = state->netMockTitleServerListTick;
+    g_netMockTitleServerSelectTick = state->netMockTitleServerSelectTick;
+    g_netMockTitleSelectedServerId = state->netMockTitleSelectedServerId;
+    g_netMockShopWCoinBalance = state->netMockShopWCoinBalance;
+    g_netMockBackpackPreferRoleListAfterShopBuy = state->netMockBackpackPreferRoleListAfterShopBuy;
+    g_vm_net_mock_update_completed_reenter_pending = state->updateCompletedReenterPending;
+    memcpy(g_vm_net_mock_update_completed_name, state->updateCompletedName,
+           sizeof(g_vm_net_mock_update_completed_name));
+
+    g_vm_net_mock_role_db = state->roleDb;
+    g_vm_net_mock_role_db_loaded = state->roleDbLoaded;
+    g_vm_net_mock_role_db_valid = state->roleDbValid;
+
+    g_vm_net_mock_battle_rewarded_serial = state->battleRewardedSerial;
+    g_vm_net_mock_battle_rewarded_exp = state->battleRewardedExp;
+    g_vm_net_mock_battle_rewarded_drop_item = state->battleRewardedDropItem;
+    g_vm_net_mock_battle_rewarded_drop_seq = state->battleRewardedDropSeq;
+    g_vm_net_mock_battle_rewarded_drop_count = state->battleRewardedDropCount;
+    g_vm_net_mock_battle_enemy_id_current = state->battleEnemyIdCurrent;
+    g_vm_net_mock_battle_role_id_current = state->battleRoleIdCurrent;
+    g_vm_net_mock_battle_reward_rng = state->battleRewardRng;
+    g_vm_net_mock_battle_settlement_sent_serial = state->battleSettlementSentSerial;
+    g_vm_net_mock_battle_drop_refresh_sent_serial = state->battleDropRefreshSentSerial;
+    g_vm_net_mock_battle_recovered_serial = state->battleRecoveredSerial;
+
+    memcpy(g_vm_net_mock_scene_moveinfo_npc_pending_scene, state->sceneMoveinfoNpcPendingScene,
+           sizeof(g_vm_net_mock_scene_moveinfo_npc_pending_scene));
+    g_vm_net_mock_scene_moveinfo_npc_pending = state->sceneMoveinfoNpcPending;
+    memcpy(g_vm_net_mock_scene_moveinfo_npc_seeded_scene, state->sceneMoveinfoNpcSeededScene,
+           sizeof(g_vm_net_mock_scene_moveinfo_npc_seeded_scene));
+    g_vm_net_mock_scene_moveinfo_npc_seeded = state->sceneMoveinfoNpcSeeded;
+
+    g_vm_net_mock_last_scene_change_target = state->lastSceneChangeTarget;
+    g_vm_net_mock_last_scene_change_target_valid = state->lastSceneChangeTargetValid;
+    g_vm_net_mock_last_scene_change_target_serial = state->lastSceneChangeTargetSerial;
+    g_vm_net_mock_teleport_stone_subtype3_ack_sent = state->teleportStoneSubtype3AckSent;
+    g_vm_net_mock_teleport_stone_direct_enter_pending = state->teleportStoneDirectEnterPending;
+    g_vm_net_mock_teleport_stone_map_enter_pending = state->teleportStoneMapEnterPending;
+    g_vm_net_mock_last_teleport_stone_list_tick = state->lastTeleportStoneListTick;
+    g_vm_net_mock_teleport_stone_confirm_target = state->teleportStoneConfirmTarget;
+    g_vm_net_mock_teleport_stone_confirm_target_valid = state->teleportStoneConfirmTargetValid;
+    g_vm_net_mock_last_scene_change_from_actor_other_portal = state->lastSceneChangeFromActorOtherPortal;
+    g_vm_net_mock_last_scene_change_fb4_type = state->lastSceneChangeFb4Type;
+
+    g_vm_net_mock_last_completed_scene_change_target = state->lastCompletedSceneChangeTarget;
+    g_vm_net_mock_last_completed_scene_change_target_valid = state->lastCompletedSceneChangeTargetValid;
+    g_vm_net_mock_last_completed_scene_change_tick = state->lastCompletedSceneChangeTick;
+    memcpy(g_vm_net_mock_last_current_scene_reload_scene, state->lastCurrentSceneReloadScene,
+           sizeof(g_vm_net_mock_last_current_scene_reload_scene));
+    g_vm_net_mock_last_current_scene_reload_valid = state->lastCurrentSceneReloadValid;
+    g_vm_net_mock_last_current_scene_reload_tick = state->lastCurrentSceneReloadTick;
+    memcpy(g_vm_net_mock_last_moveinfo_source_scene, state->lastMoveinfoSourceScene,
+           sizeof(g_vm_net_mock_last_moveinfo_source_scene));
+    g_vm_net_mock_last_moveinfo_source_x = state->lastMoveinfoSourceX;
+    g_vm_net_mock_last_moveinfo_source_y = state->lastMoveinfoSourceY;
+    g_vm_net_mock_last_moveinfo_source_tick = state->lastMoveinfoSourceTick;
+    g_vm_net_mock_last_moveinfo_source_valid = state->lastMoveinfoSourceValid;
+}
+
+static vm_mock_service_account_state *vm_mock_service_account_find_or_create(const char *accountId)
+{
+    const char *resolvedId = (accountId && accountId[0]) ? accountId : "default";
+    vm_mock_service_account_state *state = g_vm_mock_service_accounts;
+
+    while (state)
+    {
+        if (strcmp(state->accountId, resolvedId) == 0)
+            return state;
+        state = state->next;
+    }
+
+    state = (vm_mock_service_account_state *)calloc(1, sizeof(*state));
+    if (state == NULL)
+        return NULL;
+    vm_mock_service_account_state_init(state, resolvedId);
+    state->next = g_vm_mock_service_accounts;
+    g_vm_mock_service_accounts = state;
+    printf("[info][mock-service] account_init id=%s\n", state->accountId);
+    return state;
+}
+
+static const char *vm_mock_service_find_session_account(u32 clientId)
+{
+    vm_mock_service_client_session *session = g_vm_mock_service_client_sessions;
+    if (clientId == 0)
+        return NULL;
+    while (session)
+    {
+        if (session->clientId == clientId)
+            return session->accountId;
+        session = session->next;
+    }
+    return NULL;
+}
+
+static void vm_mock_service_bind_session_account(u32 clientId, const char *accountId)
+{
+    vm_mock_service_client_session *session = NULL;
+    if (clientId == 0 || accountId == NULL || accountId[0] == 0)
+        return;
+    session = g_vm_mock_service_client_sessions;
+    while (session)
+    {
+        if (session->clientId == clientId)
+        {
+            snprintf(session->accountId, sizeof(session->accountId), "%s", accountId);
+            return;
+        }
+        session = session->next;
+    }
+    session = (vm_mock_service_client_session *)calloc(1, sizeof(*session));
+    if (session == NULL)
+        return;
+    session->clientId = clientId;
+    snprintf(session->accountId, sizeof(session->accountId), "%s", accountId);
+    session->next = g_vm_mock_service_client_sessions;
+    g_vm_mock_service_client_sessions = session;
+    printf("[info][mock-service] session_bind client=%08x account=%s\n", clientId, accountId);
+}
+
+static void vm_mock_service_print_command_help(void)
+{
+    printf("[info][mock-service] commands:\n");
+    printf("  help\n");
+    printf("  account list\n");
+    printf("  account create <username> <password>\n");
+    printf("  account passwd <username> <newpassword>\n");
+}
+
+static void vm_mock_service_handle_console_command(const char *line)
+{
+    char cmd0[32];
+    char cmd1[32];
+    char arg1[64];
+    char arg2[64];
+    const char *message = NULL;
+
+    if (line == NULL)
+        return;
+    while (*line == ' ' || *line == '\t')
+        ++line;
+    if (*line == 0)
+        return;
+
+    memset(cmd0, 0, sizeof(cmd0));
+    memset(cmd1, 0, sizeof(cmd1));
+    memset(arg1, 0, sizeof(arg1));
+    memset(arg2, 0, sizeof(arg2));
+
+    if (strcmp(line, "help") == 0)
+    {
+        vm_mock_service_print_command_help();
+        return;
+    }
+
+    if (sscanf(line, "%31s %31s %63s %63s", cmd0, cmd1, arg1, arg2) < 2)
+    {
+        printf("[warn][mock-service] unknown command: %s\n", line);
+        return;
+    }
+
+    if (strcmp(cmd0, "account") != 0)
+    {
+        printf("[warn][mock-service] unknown command: %s\n", line);
+        return;
+    }
+
+    if (strcmp(cmd1, "list") == 0)
+    {
+        vm_mock_service_account_db_load();
+        printf("[info][mock-service] account_count=%u\n", g_vm_mock_service_account_db.accountCount);
+        for (u32 i = 0; i < g_vm_mock_service_account_db.accountCount; ++i)
+            printf("  %u: %s\n", i + 1, g_vm_mock_service_account_db.accounts[i].username);
+        return;
+    }
+    if (strcmp(cmd1, "create") == 0)
+    {
+        if (arg1[0] == 0 || arg2[0] == 0)
+        {
+            printf("[warn][mock-service] usage: account create <username> <password>\n");
+            return;
+        }
+        if (vm_mock_service_account_create_record(arg1, arg2, &message))
+            printf("[info][mock-service] account_create ok user=%s\n", arg1);
+        else
+            printf("[warn][mock-service] account_create failed user=%s reason=%s\n",
+                   arg1, message ? message : "-");
+        return;
+    }
+    if (strcmp(cmd1, "passwd") == 0)
+    {
+        if (arg1[0] == 0 || arg2[0] == 0)
+        {
+            printf("[warn][mock-service] usage: account passwd <username> <newpassword>\n");
+            return;
+        }
+        if (vm_mock_service_account_set_password(arg1, arg2, &message))
+            printf("[info][mock-service] account_passwd ok user=%s\n", arg1);
+        else
+            printf("[warn][mock-service] account_passwd failed user=%s reason=%s\n",
+                   arg1, message ? message : "-");
+        return;
+    }
+
+    printf("[warn][mock-service] unknown command: %s\n", line);
+}
+
+static void vm_mock_service_poll_console_commands(void)
+{
+#ifdef _WIN32
+    static char lineBuf[256];
+    static u32 lineLen = 0;
+
+    while (_kbhit())
+    {
+        int ch = _getch();
+        if (ch == '\r' || ch == '\n')
+        {
+            if (lineLen > 0)
+            {
+                lineBuf[lineLen] = 0;
+                printf("\n");
+                vm_mock_service_handle_console_command(lineBuf);
+                lineLen = 0;
+                lineBuf[0] = 0;
+            }
+            continue;
+        }
+        if (ch == 8)
+        {
+            if (lineLen > 0)
+            {
+                --lineLen;
+                lineBuf[lineLen] = 0;
+                printf("\b \b");
+            }
+            continue;
+        }
+        if (ch >= 32 && ch < 127 && lineLen + 1 < sizeof(lineBuf))
+        {
+            lineBuf[lineLen++] = (char)ch;
+            lineBuf[lineLen] = 0;
+            putchar(ch);
+        }
+    }
+#endif
+}
 
 enum
 {
@@ -20450,25 +21206,28 @@ static u32 vm_net_mock_build_login_actor_role_list_response(u8 requestSubtype, u
 static u32 vm_net_mock_build_login_response(const u8 *request, u32 requestLen, u8 requestSubtype, u8 *out, u32 outCap)
 {
     const char *mode = vm_net_mock_env_str("CBE_LOGIN_RESPONSE", "");
-    char userName[64];
-    char password[64];
-    bool haveUserName = false;
-    bool havePassword = false;
+    vm_mock_service_login_request loginRequest;
     bool noAccountAlt12Login = false;
-    memset(userName, 0, sizeof(userName));
-    memset(password, 0, sizeof(password));
-    haveUserName = vm_net_mock_get_object_string_field(request, requestLen, "userName", userName, sizeof(userName));
-    if (!haveUserName)
-        haveUserName = vm_net_mock_get_object_string_field(request, requestLen, "username", userName, sizeof(userName));
-    havePassword = vm_net_mock_get_object_string_field(request, requestLen, "password", password, sizeof(password));
-    noAccountAlt12Login = requestSubtype == 12 &&
-                           haveUserName && userName[0] == 0 &&
-                           havePassword && password[0] == 0;
+    const char *authError = NULL;
 
-    if (haveUserName && strcmp(userName, "1234") == 0)
-    {
-        return vm_net_mock_build_login_failure_response(requestSubtype, "password error", out, outCap);
-    }
+    memset(&loginRequest, 0, sizeof(loginRequest));
+    loginRequest.requestSubtype = requestSubtype;
+    loginRequest.haveUserName = vm_net_mock_get_object_string_field(request, requestLen, "userName",
+                                                                    loginRequest.userName,
+                                                                    sizeof(loginRequest.userName));
+    if (!loginRequest.haveUserName)
+        loginRequest.haveUserName = vm_net_mock_get_object_string_field(request, requestLen, "username",
+                                                                        loginRequest.userName,
+                                                                        sizeof(loginRequest.userName));
+    loginRequest.havePassword = vm_net_mock_get_object_string_field(request, requestLen, "password",
+                                                                    loginRequest.password,
+                                                                    sizeof(loginRequest.password));
+    noAccountAlt12Login = vm_mock_service_login_is_no_account(&loginRequest);
+
+    if (!vm_mock_service_authenticate_login_request(&loginRequest, &authError))
+        return vm_net_mock_build_login_failure_response(requestSubtype,
+                                                        authError ? authError : "account or password error",
+                                                        out, outCap);
 
 
     if (requestSubtype == 1 &&
@@ -21464,72 +22223,738 @@ static u32 vm_net_mock_sync_buffer_to_vm(const u8 *buffer, u32 bufferLen)
     return responsePtr;
 }
 
-static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
+static void vm_mock_service_write_le32(u8 *dst, u32 value)
 {
-    if (dataPtr == 0 || dataLen == 0)
+    dst[0] = (u8)(value & 0xff);
+    dst[1] = (u8)((value >> 8) & 0xff);
+    dst[2] = (u8)((value >> 16) & 0xff);
+    dst[3] = (u8)((value >> 24) & 0xff);
+}
+
+static u32 vm_mock_service_read_le32(const u8 *src)
+{
+    return (u32)src[0] |
+           ((u32)src[1] << 8) |
+           ((u32)src[2] << 16) |
+           ((u32)src[3] << 24);
+}
+
+static void vm_mock_service_encode_header(u8 *header, const char magic[4], u32 flags, u32 bodyLen, u32 aux)
+{
+    memcpy(header, magic, 4);
+    vm_mock_service_write_le32(header + 4, 1);
+    vm_mock_service_write_le32(header + 8, flags);
+    vm_mock_service_write_le32(header + 12, bodyLen);
+    vm_mock_service_write_le32(header + 16, aux);
+}
+
+static int vm_mock_service_socket_init(void)
+{
+#ifdef _WIN32
+    static int s_ready = -1;
+    if (s_ready >= 0)
+        return s_ready;
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
+    {
+        s_ready = 0;
+        return 0;
+    }
+    s_ready = 1;
+#endif
+    return 1;
+}
+
+static void vm_mock_service_socket_close(vm_mock_service_socket sock)
+{
+    if (sock == VM_MOCK_SERVICE_INVALID_SOCKET)
         return;
+#ifdef _WIN32
+    closesocket(sock);
+#else
+    close(sock);
+#endif
+}
+
+static int vm_mock_service_send_all(vm_mock_service_socket sock, const u8 *data, u32 len)
+{
+    u32 sent = 0;
+    while (sent < len)
+    {
+        int rc = send(sock, (const char *)(data + sent), (int)(len - sent), 0);
+        if (rc <= 0)
+            return 0;
+        sent += (u32)rc;
+    }
+    return 1;
+}
+
+static int vm_mock_service_recv_all(vm_mock_service_socket sock, u8 *data, u32 len)
+{
+    u32 got = 0;
+    while (got < len)
+    {
+        int rc = recv(sock, (char *)(data + got), (int)(len - got), 0);
+        if (rc <= 0)
+            return 0;
+        got += (u32)rc;
+    }
+    return 1;
+}
+
+static void vm_mock_service_copy_account_id(char *dst, size_t dstCap, const char *src)
+{
+    if (dst == NULL || dstCap == 0)
+        return;
+    dst[0] = 0;
+    if (src == NULL || src[0] == 0)
+        return;
+    snprintf(dst, dstCap, "%s", src);
+}
+
+static bool vm_mock_service_parse_login_request(const u8 *request,
+                                                u32 requestLen,
+                                                vm_mock_service_login_request *login)
+{
+    if (login == NULL)
+        return false;
+    memset(login, 0, sizeof(*login));
+    if (!vm_net_mock_is_login_validation_request(request, requestLen, &login->requestSubtype))
+        return false;
+    login->haveUserName = vm_net_mock_get_object_string_field(request, requestLen, "userName",
+                                                              login->userName, sizeof(login->userName));
+    if (!login->haveUserName)
+        login->haveUserName = vm_net_mock_get_object_string_field(request, requestLen, "username",
+                                                                  login->userName, sizeof(login->userName));
+    login->havePassword = vm_net_mock_get_object_string_field(request, requestLen, "password",
+                                                              login->password, sizeof(login->password));
+    return true;
+}
+
+static bool vm_mock_service_login_is_no_account(const vm_mock_service_login_request *login)
+{
+    return login != NULL &&
+           login->requestSubtype == 12 &&
+           login->haveUserName && login->havePassword &&
+           login->userName[0] == 0 && login->password[0] == 0;
+}
+
+static bool vm_mock_service_login_requires_auth(const vm_mock_service_login_request *login)
+{
+    if (login == NULL)
+        return false;
+    if (vm_mock_service_login_is_no_account(login))
+        return false;
+    return login->haveUserName || login->havePassword ||
+           login->userName[0] != 0 || login->password[0] != 0;
+}
+
+static bool vm_mock_service_authenticate_login_request(const vm_mock_service_login_request *login,
+                                                       const char **errorOut)
+{
+    if (errorOut)
+        *errorOut = "account or password error";
+    if (login == NULL || !vm_mock_service_login_requires_auth(login))
+        return true;
+    if (!login->haveUserName || !login->havePassword ||
+        login->userName[0] == 0 || login->password[0] == 0)
+    {
+        return false;
+    }
+    if (!vm_mock_service_account_verify_credentials(login->userName, login->password))
+        return false;
+    return true;
+}
+
+static void vm_mock_service_resolve_request_account_id(const u8 *request,
+                                                       u32 requestLen,
+                                                       char *accountOut,
+                                                       size_t accountOutCap)
+{
+    (void)request;
+    (void)requestLen;
+
+    if (accountOut == NULL || accountOutCap == 0)
+        return;
+    accountOut[0] = 0;
+
+    if (g_mockServiceAccountExplicit && g_mockServiceAccount[0] != 0)
+        vm_mock_service_copy_account_id(accountOut, accountOutCap, g_mockServiceAccount);
+}
+
+static void vm_mock_service_parse_account_metadata(const u8 *meta,
+                                                   u32 metaLen,
+                                                   u32 *clientIdOut,
+                                                   char *accountOut,
+                                                   size_t accountOutCap)
+{
+    u32 copyLen = 0;
+    u32 textOff = 0;
+
+    if (clientIdOut)
+        *clientIdOut = 0;
+    if (accountOut == NULL || accountOutCap == 0)
+        return;
+    accountOut[0] = 0;
+    if (meta == NULL || metaLen == 0)
+        return;
+
+    if (metaLen >= 4)
+    {
+        if (clientIdOut)
+            *clientIdOut = vm_mock_service_read_le32(meta);
+        textOff = 4;
+    }
+
+    while (textOff + copyLen < metaLen &&
+           copyLen + 1 < accountOutCap &&
+           meta[textOff + copyLen] != 0)
+    {
+        accountOut[copyLen] = (char)meta[textOff + copyLen];
+        ++copyLen;
+    }
+    accountOut[copyLen] = 0;
+}
+
+static int vm_mock_service_resolve_ipv4_host(const char *host,
+                                             int allowAny,
+                                             struct in_addr *addrOut)
+{
+    const char *resolvedHost = host && host[0] ? host : "127.0.0.1";
+    unsigned long ip = INADDR_NONE;
+
+    if (addrOut == NULL)
+        return 0;
+    if (allowAny &&
+        (strcmp(resolvedHost, "*") == 0 || strcmp(resolvedHost, "0.0.0.0") == 0))
+    {
+        addrOut->s_addr = htonl(INADDR_ANY);
+        return 1;
+    }
+    if (strcmp(resolvedHost, "localhost") == 0)
+        resolvedHost = "127.0.0.1";
+
+    ip = inet_addr(resolvedHost);
+    if (ip == INADDR_NONE && strcmp(resolvedHost, "255.255.255.255") != 0)
+    {
+        struct hostent *hostEntry = gethostbyname(resolvedHost);
+        if (hostEntry == NULL || hostEntry->h_addr_list == NULL || hostEntry->h_addr_list[0] == NULL)
+            return 0;
+        memcpy(addrOut, hostEntry->h_addr_list[0], sizeof(*addrOut));
+        return 1;
+    }
+
+    addrOut->s_addr = ip;
+    return 1;
+}
+
+static int vm_mock_service_connect(const char *host, u16 port, vm_mock_service_socket *sockOut)
+{
+    vm_mock_service_socket sock = VM_MOCK_SERVICE_INVALID_SOCKET;
+    struct sockaddr_in addr;
+    int timeoutMs = 1500;
+
+    if (sockOut)
+        *sockOut = VM_MOCK_SERVICE_INVALID_SOCKET;
+    if (!vm_mock_service_socket_init())
+        return 0;
+
+    sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock == VM_MOCK_SERVICE_INVALID_SOCKET)
+        return 0;
+
+#ifdef _WIN32
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeoutMs, sizeof(timeoutMs));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeoutMs, sizeof(timeoutMs));
+#else
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeoutMs, sizeof(timeoutMs));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeoutMs, sizeof(timeoutMs));
+#endif
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    if (!vm_mock_service_resolve_ipv4_host(host, 0, &addr.sin_addr))
+    {
+        vm_mock_service_socket_close(sock);
+        return 0;
+    }
+
+    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) != 0)
+    {
+        vm_mock_service_socket_close(sock);
+        return 0;
+    }
+
+    if (sockOut)
+        *sockOut = sock;
+    return 1;
+}
+
+static int vm_net_mock_service_run_forever(const char *bindHost, u16 port);
+
+static int vm_net_mock_service_probe_endpoint(void)
+{
+    vm_mock_service_socket sock = VM_MOCK_SERVICE_INVALID_SOCKET;
+    u8 header[VM_MOCK_SERVICE_FRAME_SIZE];
+    u8 responseHeader[VM_MOCK_SERVICE_FRAME_SIZE];
+
+    if (!vm_mock_service_connect(g_mockServiceHost, g_mockServicePort, &sock))
+        return 0;
+
+    vm_mock_service_encode_header(header, "CBMS", VM_MOCK_SERVICE_REQUEST_FLAG_PING, 0, 0);
+    if (!vm_mock_service_send_all(sock, header, sizeof(header)) ||
+        !vm_mock_service_recv_all(sock, responseHeader, sizeof(responseHeader)))
+    {
+        vm_mock_service_socket_close(sock);
+        return 0;
+    }
+    vm_mock_service_socket_close(sock);
+    return memcmp(responseHeader, "CBMR", 4) == 0 &&
+           vm_mock_service_read_le32(responseHeader + 4) == 1;
+}
+
+static u32 vm_net_mock_process_request_bytes(u32 connectId,
+                                             const u8 *request,
+                                             u32 requestLen,
+                                             u8 *response,
+                                             u32 responseCap,
+                                             u32 *responseEventTypeOut,
+                                             bool *closeAfterDataOut)
+{
+    u8 requestWtKind = 0;
+    u8 requestWtSubtype = 0;
+    bool haveWtHeader = false;
+    bool closeAfterData = false;
+    u32 responseLen = 0;
+    const char *source = "-";
 
     g_netLastHandledValid = 0;
     g_netLastHandledResponseLen = 0;
     g_netLastHandledSource[0] = 0;
     g_netLastHandledSummary[0] = 0;
 
-    u8 request[512];
-    u32 readLen = dataLen < sizeof(request) ? dataLen : sizeof(request);
-    uc_mem_read(MTK, dataPtr, request, readLen);
-    bool closeAfterData = vm_net_mock_request_contains(request, readLen, "version") &&
-                          !vm_net_mock_request_contains(request, readLen, "start") &&
+    if (request == NULL || requestLen == 0 || response == NULL || responseCap == 0)
+    {
+        if (responseEventTypeOut)
+            *responseEventTypeOut = 7;
+        if (closeAfterDataOut)
+            *closeAfterDataOut = false;
+        return 0;
+    }
+
+    closeAfterData = vm_net_mock_request_contains(request, requestLen, "version") &&
+                     !vm_net_mock_request_contains(request, requestLen, "start") &&
                           vm_net_mock_has_installed_update();
-    u8 requestWtKind = 0;
-    u8 requestWtSubtype = 0;
-    bool haveWtHeader = vm_net_mock_get_wt_header_kind_subtype(request, readLen,
-                                                              &requestWtKind,
-                                                              &requestWtSubtype);
+    haveWtHeader = vm_net_mock_get_wt_header_kind_subtype(request, requestLen,
+                                                          &requestWtKind,
+                                                          &requestWtSubtype);
     /*
      * Empty 25/5 scene-default sends are emitted from inside the client's wait
      * callback. Dispatching the response reentrantly lets the callback clear
      * R9+0x5531 before the send wrapper writes it back to 1, leaving later WT
      * requests blocked. Queue it like a normal async network response instead.
      */
-    bool immediateFlushAfterData = false;
-    u32 responseEventType = 7;
-
-    g_netMockResponseLen = vm_net_mock_build_response(request, readLen, g_netMockResponse, sizeof(g_netMockResponse));
+    responseLen = vm_net_mock_build_response(request, requestLen, response, responseCap);
     /*
      * Teleport-stone 16/3 now returns a main-business 30/1 scene-enter object.
      * Keep it on the normal async queue; flushing it from inside the 16/3 send
      * stack re-enters the scene screen before the caller has unwound, and the
      * new screen then stalls before emitting its post-enter follow-up request.
      */
+    source = g_netLastHandledValid ? g_netLastHandledSource : "-";
+    if (haveWtHeader)
     {
-        const char *source = g_netLastHandledValid ? g_netLastHandledSource : "-";
-        if (haveWtHeader)
+        vm_autotest_note("net_send connect=%u wt=%u/%u len=%u source=%s resp=%u\n",
+                         connectId, requestWtKind, requestWtSubtype, requestLen,
+                         source,
+                         responseLen);
+        if (responseLen ||
+            strstr(source, "settings") != NULL ||
+            strstr(source, "teleport") != NULL ||
+            strstr(source, "scene") != NULL ||
+            strstr(source, "mmgame") != NULL)
         {
-            vm_autotest_note("net_send connect=%u wt=%u/%u len=%u source=%s resp=%u\n",
-                             connectId, requestWtKind, requestWtSubtype, readLen,
-                             source,
-                             g_netMockResponseLen);
-            if (g_netMockResponseLen ||
-                strstr(source, "settings") != NULL ||
-                strstr(source, "teleport") != NULL ||
-                strstr(source, "scene") != NULL ||
-                strstr(source, "mmgame") != NULL)
-            {
-                printf("[info][network] net_send connect=%u wt=%u/%u len=%u source=%s resp=%u\n",
-                       connectId, requestWtKind, requestWtSubtype, readLen, source, g_netMockResponseLen);
-            }
-        }
-        else
-        {
-            vm_autotest_note("net_send connect=%u malformed len=%u source=%s resp=%u\n",
-                             connectId, readLen,
-                             source,
-                             g_netMockResponseLen);
-            if (g_netMockResponseLen)
-                printf("[info][network] net_send connect=%u malformed len=%u source=%s resp=%u\n",
-                       connectId, readLen, source, g_netMockResponseLen);
+            printf("[info][network] net_send connect=%u wt=%u/%u len=%u source=%s resp=%u\n",
+                   connectId, requestWtKind, requestWtSubtype, requestLen, source, responseLen);
         }
     }
+    else
+    {
+        vm_autotest_note("net_send connect=%u malformed len=%u source=%s resp=%u\n",
+                         connectId, requestLen,
+                         source,
+                         responseLen);
+        if (responseLen)
+            printf("[info][network] net_send connect=%u malformed len=%u source=%s resp=%u\n",
+                   connectId, requestLen, source, responseLen);
+    }
+
+    if (responseEventTypeOut)
+        *responseEventTypeOut = 7;
+    if (closeAfterDataOut)
+        *closeAfterDataOut = closeAfterData;
+    return responseLen;
+}
+
+static int vm_net_mock_remote_request(const u8 *request,
+                                      u32 requestLen,
+                                      u8 *response,
+                                      u32 responseCap,
+                                      u32 *responseLenOut,
+                                      u32 *responseEventTypeOut,
+                                      bool *closeAfterDataOut)
+{
+    vm_mock_service_socket sock = VM_MOCK_SERVICE_INVALID_SOCKET;
+    u8 header[VM_MOCK_SERVICE_FRAME_SIZE];
+    u8 responseHeader[VM_MOCK_SERVICE_FRAME_SIZE];
+    u8 meta[128];
+    char accountId[64];
+    u32 flags = 0;
+    u32 metaLen = 0;
+    u32 responseLen = 0;
+    u32 responseEventType = 7;
+
+    if (responseLenOut)
+        *responseLenOut = 0;
+    if (responseEventTypeOut)
+        *responseEventTypeOut = 7;
+    if (closeAfterDataOut)
+        *closeAfterDataOut = false;
+    if (request == NULL || requestLen == 0 || response == NULL || responseCap == 0)
+        return 0;
+    if (!vm_mock_service_connect(g_mockServiceHost, g_mockServicePort, &sock))
+        return 0;
+
+    memset(meta, 0, sizeof(meta));
+    memset(accountId, 0, sizeof(accountId));
+    vm_mock_service_resolve_request_account_id(request, requestLen, accountId, sizeof(accountId));
+    vm_mock_service_write_le32(meta, g_mockServiceClientId);
+    metaLen = 4;
+    if (accountId[0] != 0)
+    {
+        size_t accountLen = strlen(accountId) + 1;
+        if (metaLen + accountLen > sizeof(meta))
+            accountLen = sizeof(meta) - metaLen;
+        memcpy(meta + metaLen, accountId, accountLen);
+        metaLen += (u32)accountLen;
+    }
+
+    vm_mock_service_encode_header(header, "CBMS", 0, requestLen + metaLen, metaLen);
+    if (!vm_mock_service_send_all(sock, header, sizeof(header)) ||
+        (metaLen > 0 && !vm_mock_service_send_all(sock, meta, metaLen)) ||
+        !vm_mock_service_send_all(sock, request, requestLen) ||
+        !vm_mock_service_recv_all(sock, responseHeader, sizeof(responseHeader)))
+    {
+        vm_mock_service_socket_close(sock);
+        return 0;
+    }
+
+    if (memcmp(responseHeader, "CBMR", 4) != 0 ||
+        vm_mock_service_read_le32(responseHeader + 4) != 1)
+    {
+        vm_mock_service_socket_close(sock);
+        return 0;
+    }
+
+    flags = vm_mock_service_read_le32(responseHeader + 8);
+    responseLen = vm_mock_service_read_le32(responseHeader + 12);
+    responseEventType = vm_mock_service_read_le32(responseHeader + 16);
+    if (responseEventType == 0)
+        responseEventType = 7;
+    if (responseLen > responseCap)
+    {
+        vm_mock_service_socket_close(sock);
+        return 0;
+    }
+    if (responseLen > 0 && !vm_mock_service_recv_all(sock, response, responseLen))
+    {
+        vm_mock_service_socket_close(sock);
+        return 0;
+    }
+
+    vm_mock_service_socket_close(sock);
+    g_netLastHandledValid = 1;
+    g_netLastHandledResponseLen = responseLen;
+    snprintf(g_netLastHandledSource, sizeof(g_netLastHandledSource),
+             "remote:%s:%u", g_mockServiceHost, g_mockServicePort);
+    g_netLastHandledSummary[0] = 0;
+
+    if (responseLenOut)
+        *responseLenOut = responseLen;
+    if (responseEventTypeOut)
+        *responseEventTypeOut = responseEventType;
+    if (closeAfterDataOut)
+        *closeAfterDataOut = (flags & VM_MOCK_SERVICE_RESPONSE_FLAG_CLOSE_AFTER_DATA) != 0;
+    return 1;
+}
+
+static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
+                                             u8 *requestBuffer,
+                                             u32 requestCap,
+                                             u8 *responseBuffer,
+                                             u32 responseCap)
+{
+    u8 header[VM_MOCK_SERVICE_FRAME_SIZE];
+    char accountId[64];
+    char explicitAccount[64];
+    u32 clientId = 0;
+    u32 requestFlags = 0;
+    u32 requestLen = 0;
+    u32 requestMetaLen = 0;
+    u32 payloadLen = 0;
+    u32 responseLen = 0;
+    u32 responseEventType = 7;
+    u32 responseFlags = 0;
+    bool closeAfterData = false;
+    bool haveLoginRequest = false;
+    vm_mock_service_login_request loginRequest;
+    vm_mock_service_account_state *accountState = NULL;
+    const char *authError = NULL;
+    const char *sessionAccount = NULL;
+
+    if (!vm_mock_service_recv_all(client, header, sizeof(header)))
+        return 0;
+    if (memcmp(header, "CBMS", 4) != 0 || vm_mock_service_read_le32(header + 4) != 1)
+        return 0;
+
+    requestFlags = vm_mock_service_read_le32(header + 8);
+    requestLen = vm_mock_service_read_le32(header + 12);
+    requestMetaLen = vm_mock_service_read_le32(header + 16);
+    if (requestFlags & VM_MOCK_SERVICE_REQUEST_FLAG_PING)
+    {
+        vm_mock_service_encode_header(header, "CBMR", 0, 0, 0);
+        return vm_mock_service_send_all(client, header, sizeof(header));
+    }
+    if (requestLen == 0 || requestLen > requestCap || requestMetaLen > requestLen)
+        return 0;
+    if (!vm_mock_service_recv_all(client, requestBuffer, requestLen))
+        return 0;
+
+    memset(accountId, 0, sizeof(accountId));
+    memset(explicitAccount, 0, sizeof(explicitAccount));
+    memset(&loginRequest, 0, sizeof(loginRequest));
+    vm_mock_service_parse_account_metadata(requestBuffer, requestMetaLen, &clientId,
+                                           explicitAccount, sizeof(explicitAccount));
+    payloadLen = requestLen - requestMetaLen;
+    if (payloadLen == 0)
+        return 0;
+
+    haveLoginRequest = vm_mock_service_parse_login_request(requestBuffer + requestMetaLen,
+                                                           payloadLen,
+                                                           &loginRequest);
+    if (haveLoginRequest && !vm_mock_service_authenticate_login_request(&loginRequest, &authError))
+    {
+        responseLen = vm_net_mock_build_login_failure_response(loginRequest.requestSubtype,
+                                                               authError ? authError : "account or password error",
+                                                               responseBuffer,
+                                                               responseCap);
+        vm_mock_service_encode_header(header, "CBMR", 0, responseLen, 7);
+        if (!vm_mock_service_send_all(client, header, sizeof(header)))
+            return 0;
+        if (responseLen > 0 && !vm_mock_service_send_all(client, responseBuffer, responseLen))
+            return 0;
+        printf("[info][mock-service] login_reject client=%08x user=%s reason=%s\n",
+               clientId,
+               loginRequest.userName[0] ? loginRequest.userName : "-",
+               authError ? authError : "account or password error");
+        return 1;
+    }
+
+    if (haveLoginRequest && vm_mock_service_login_requires_auth(&loginRequest))
+    {
+        vm_mock_service_copy_account_id(accountId, sizeof(accountId), loginRequest.userName);
+        vm_mock_service_bind_session_account(clientId, accountId);
+    }
+    else if (explicitAccount[0] != 0)
+    {
+        vm_mock_service_copy_account_id(accountId, sizeof(accountId), explicitAccount);
+    }
+    else
+    {
+        sessionAccount = vm_mock_service_find_session_account(clientId);
+        if (sessionAccount && sessionAccount[0] != 0)
+            vm_mock_service_copy_account_id(accountId, sizeof(accountId), sessionAccount);
+    }
+    if (accountId[0] == 0)
+        vm_mock_service_copy_account_id(accountId, sizeof(accountId), "default");
+
+    accountState = vm_mock_service_account_find_or_create(accountId);
+    vm_mock_service_account_restore(accountState);
+
+    g_schedulerTick = scheduler_get_tick_ms() / VM_SCHED_FRAME_MS;
+    responseLen = vm_net_mock_process_request_bytes(0,
+                                                    requestBuffer + requestMetaLen,
+                                                    payloadLen,
+                                                    responseBuffer,
+                                                    responseCap,
+                                                    &responseEventType,
+                                                    &closeAfterData);
+    vm_mock_service_account_capture(accountState);
+    g_vm_mock_service_active_account = NULL;
+    g_vm_mock_service_active_account_id = NULL;
+    if (closeAfterData)
+        responseFlags |= VM_MOCK_SERVICE_RESPONSE_FLAG_CLOSE_AFTER_DATA;
+
+    vm_mock_service_encode_header(header, "CBMR", responseFlags, responseLen, responseEventType);
+    if (!vm_mock_service_send_all(client, header, sizeof(header)))
+        return 0;
+    if (responseLen > 0 && !vm_mock_service_send_all(client, responseBuffer, responseLen))
+        return 0;
+
+    printf("[info][mock-service] account=%s request=%u response=%u event=%u flags=%u source=%s\n",
+           (accountState && accountState->accountId[0]) ? accountState->accountId : "default",
+           payloadLen, responseLen, responseEventType, responseFlags,
+           g_netLastHandledValid ? g_netLastHandledSource : "-");
+    return 1;
+}
+
+static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
+{
+    vm_mock_service_socket serverSocket = VM_MOCK_SERVICE_INVALID_SOCKET;
+    u8 *requestBuffer = NULL;
+    u8 *responseBuffer = NULL;
+    int ok = 0;
+    struct sockaddr_in addr;
+    const char *resolvedBindHost = bindHost && bindHost[0] ? bindHost : "127.0.0.1";
+
+    if (!vm_mock_service_socket_init())
+    {
+        printf("[error][mock-service] WSAStartup/init failed\n");
+        return -1;
+    }
+
+    requestBuffer = (u8 *)malloc(sizeof(g_netMockResponse));
+    responseBuffer = (u8 *)malloc(sizeof(g_netMockResponse));
+    if (requestBuffer == NULL || responseBuffer == NULL)
+    {
+        printf("[error][mock-service] buffer alloc failed\n");
+        free(requestBuffer);
+        free(responseBuffer);
+        return -1;
+    }
+
+    serverSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (serverSocket == VM_MOCK_SERVICE_INVALID_SOCKET)
+    {
+        printf("[error][mock-service] socket create failed\n");
+        free(requestBuffer);
+        free(responseBuffer);
+        return -1;
+    }
+
+    {
+        int reuse = 1;
+#ifdef _WIN32
+        setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, (const char *)&reuse, sizeof(reuse));
+#else
+        setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+#endif
+    }
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    if (!vm_mock_service_resolve_ipv4_host(resolvedBindHost, 1, &addr.sin_addr))
+    {
+        printf("[error][mock-service] invalid bind host %s\n", resolvedBindHost);
+        vm_mock_service_socket_close(serverSocket);
+        free(requestBuffer);
+        free(responseBuffer);
+        return -1;
+    }
+    if (bind(serverSocket, (struct sockaddr *)&addr, sizeof(addr)) != 0)
+    {
+        printf("[error][mock-service] bind %s:%u failed\n", resolvedBindHost, port);
+        vm_mock_service_socket_close(serverSocket);
+        free(requestBuffer);
+        free(responseBuffer);
+        return -1;
+    }
+    if (listen(serverSocket, 4) != 0)
+    {
+        printf("[error][mock-service] listen %s:%u failed\n", resolvedBindHost, port);
+        vm_mock_service_socket_close(serverSocket);
+        free(requestBuffer);
+        free(responseBuffer);
+        return -1;
+    }
+
+    printf("[info][mock-service] listening=%s:%u\n", resolvedBindHost, port);
+    vm_mock_service_print_command_help();
+    for (;;)
+    {
+        vm_mock_service_socket client = VM_MOCK_SERVICE_INVALID_SOCKET;
+        struct sockaddr_in clientAddr;
+        int selectRc = 0;
+#ifdef _WIN32
+        int clientAddrLen = sizeof(clientAddr);
+#else
+        socklen_t clientAddrLen = sizeof(clientAddr);
+#endif
+        fd_set readSet;
+        struct timeval timeout;
+
+        vm_mock_service_poll_console_commands();
+        FD_ZERO(&readSet);
+        FD_SET(serverSocket, &readSet);
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 200000;
+#ifdef _WIN32
+        selectRc = select(0, &readSet, NULL, NULL, &timeout);
+#else
+        selectRc = select(serverSocket + 1, &readSet, NULL, NULL, &timeout);
+#endif
+        if (selectRc <= 0 || !FD_ISSET(serverSocket, &readSet))
+            continue;
+
+        client = accept(serverSocket, (struct sockaddr *)&clientAddr, &clientAddrLen);
+        if (client == VM_MOCK_SERVICE_INVALID_SOCKET)
+            continue;
+        ok = vm_net_mock_service_handle_client(client,
+                                               requestBuffer,
+                                               sizeof(g_netMockResponse),
+                                               responseBuffer,
+                                               sizeof(g_netMockResponse));
+        if (!ok)
+            printf("[warn][mock-service] dropped malformed request\n");
+        vm_mock_service_socket_close(client);
+    }
+}
+
+static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
+{
+    u8 request[512];
+    u32 readLen = 0;
+    bool closeAfterData = false;
+    u32 responseEventType = 7;
+    static u32 s_mockServiceFailLogCount = 0;
+
+    if (dataPtr == 0 || dataLen == 0)
+        return;
+
+    readLen = dataLen < sizeof(request) ? dataLen : sizeof(request);
+    uc_mem_read(MTK, dataPtr, request, readLen);
+    if (!vm_net_mock_remote_request(request,
+                                    readLen,
+                                    g_netMockResponse,
+                                    sizeof(g_netMockResponse),
+                                    &g_netMockResponseLen,
+                                    &responseEventType,
+                                    &closeAfterData))
+    {
+        g_netMockResponseLen = 0;
+        g_netMockResponseOffset = 0;
+        if (!g_mockServiceWarnedUnavailable || s_mockServiceFailLogCount < 8)
+        {
+            ++s_mockServiceFailLogCount;
+            g_mockServiceWarnedUnavailable = 1;
+            printf("[warn][mock-service] request failed target=%s:%u len=%u pending=game-timeout\n",
+                   g_mockServiceHost, g_mockServicePort, readLen);
+        }
+        return;
+    }
+    g_mockServiceWarnedUnavailable = 0;
     g_netMockResponseOffset = 0;
     g_netUpLinkData += dataLen;
     if (g_netMockResponseLen == 0)
@@ -21546,20 +22971,6 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
         printf("[info][network] net_queue_data connect=%u event=%u resp=%u cb=%08x ctx=%08x depth=%u\n",
                connectId, responseEventType, g_netMockResponseLen,
                channel->callback, channel->context, g_netTaskDispatchDepth);
-        if (immediateFlushAfterData && g_netTaskDispatchDepth == 0)
-        {
-            g_netDebugReadWindow = 8;
-            uc_err flushErr = scheduler_dispatch_net_tasks();
-            printf("[info][network] net_flush_data connect=%u wt=%u/%u resp=%u err=%u\n",
-                   connectId, requestWtKind, requestWtSubtype, g_netMockResponseLen, flushErr);
-            (void)flushErr;
-        }
-        else if (immediateFlushAfterData)
-        {
-            printf("[info][network] net_flush_deferred connect=%u wt=%u/%u resp=%u depth=%u\n",
-                   connectId, requestWtKind, requestWtSubtype,
-                   g_netMockResponseLen, g_netTaskDispatchDepth);
-        }
         if (closeAfterData)
         {
             scheduler_queue_net_event(9, 0, 0, 0, channel->callback, channel->context);
