@@ -195,8 +195,11 @@ static int g_vmInputOpen = 0;
 static int g_vmInputPassword = 0;
 static u32 g_vmInputCallback = 0;
 static u32 g_vmInputBuffer = 0;
+static u32 g_vmInputTargetBuffer = 0;
 static u32 g_vmInputMaxLen = 0;
 static u32 g_vmInputInputType = 0;
+static u32 g_vmInputScratchBuffer = 0;
+static u32 g_vmInputScratchBytes = 0;
 static int g_vmInputOverlayX = 12;
 static int g_vmInputOverlayY = 348;
 static int g_vmInputOverlayW = 216;
@@ -204,6 +207,11 @@ static int g_vmInputOverlayH = 22;
 static char g_vmInputComposition[64];
 static int g_vmInputSdlTextInputWanted = 0;
 static int g_vmInputSdlTextInputActive = 0;
+u32 g_vmInputWatchUserBuf = 0;
+u32 g_vmInputWatchUserBufLen = 0;
+u32 g_vmInputWatchCallback = 0;
+u32 g_vmInputWatchCallR9 = 0;
+u32 g_vmInputWatchWriteCount = 0;
 u32 screenStructChange = 0;
 u32 screenStructNotifyLoadRes = 0;
 u32 vmAddedScreen = 0;
@@ -344,8 +352,6 @@ static u8 g_mockServiceOnly = 0;
 static u8 g_mockServiceWarnedUnavailable = 0;
 static char g_mockServiceHost[64] = "127.0.0.1";
 static char g_mockServiceBindHost[64] = "127.0.0.1";
-static char g_mockServiceAccount[64];
-static u8 g_mockServiceAccountExplicit = 0;
 static u32 g_mockServiceClientId = 0;
 static u16 g_mockServicePort = 19090;
 static u32 g_battleSubtype8InfoDstWatchBase = 0;
@@ -1436,6 +1442,28 @@ static bool vm_pool_battle_chat_context_valid(u32 moduleR9)
             (widthFunc >= Program_ROM_Address && widthFunc < Program_ROM_Address + Program_ROM_Mapped_Size));
 }
 
+static u32 vm_pool_module_r9_guess_from_pc_slot64k(u32 pc)
+{
+    const u32 moduleR9Delta = 0x14000u;
+    u32 codeBase = 0;
+    u32 moduleR9 = 0;
+
+    pc &= ~1u;
+    if (!vm_is_pool_entry(pc))
+        return 0;
+
+    /*
+     * The current Jianghu OL dynamic-CBM loader places modules on 64 KiB slots
+     * inside the VM pool. Using the caller/callback page preserves the concrete
+     * loaded module identity better than the older 0x80000 coarse window.
+     */
+    codeBase = pc & 0xffff0000u;
+    moduleR9 = codeBase + moduleR9Delta;
+    if (vm_pool_module_r9_matches_pc(pc, moduleR9))
+        return moduleR9;
+    return 0;
+}
+
 static u32 vm_module_r9_for_pool_pc(u32 pc)
 {
     const u32 moduleR9Delta = 0x14000u;
@@ -1488,6 +1516,10 @@ static u32 vm_module_r9_for_pool_pc(u32 pc)
                 return moduleR9;
         }
     }
+
+    moduleR9 = vm_pool_module_r9_guess_from_pc_slot64k(pc);
+    if (moduleR9)
+        return moduleR9;
 
     codeBase = pc & ~(moduleAlign - 1u);
     moduleR9 = codeBase + moduleR9Delta;
@@ -2758,6 +2790,106 @@ static void vm_lcd_update_with_input_overlay(void)
     UpdateLcd();
 }
 
+static void vm_debug_read_guest_cstr(u32 addr, char *out, size_t outCap)
+{
+    u8 ch = 0;
+    size_t i = 0;
+
+    if (out == NULL || outCap == 0)
+        return;
+    out[0] = 0;
+    if (addr == 0)
+        return;
+
+    for (; i + 1 < outCap; ++i)
+    {
+        uc_mem_read(MTK, addr + (u32)i, &ch, 1);
+        out[i] = (char)ch;
+        if (ch == 0)
+            return;
+    }
+    out[outCap - 1] = 0;
+}
+
+static void vm_debug_read_guest_ucs2_as_gbk(u32 addr, char *out, size_t outCap, u32 maxChars)
+{
+    u32 chars = 0;
+    u32 bytes = 0;
+
+    if (out == NULL || outCap == 0)
+        return;
+    out[0] = 0;
+    if (addr == 0 || maxChars == 0)
+        return;
+
+    chars = vm_input_wcslen_limit(addr, maxChars);
+    bytes = (chars + 1) * 2;
+    if (bytes > mySizeOf(cbeTextString))
+        bytes = mySizeOf(cbeTextString) & ~1u;
+    if (bytes < 2)
+        bytes = 2;
+    if (uc_mem_read(MTK, addr, cbeTextString, bytes) != UC_ERR_OK)
+        return;
+    if (ucs2_to_gbk(cbeTextString, bytes, (u8 *)out, (u32)outCap) < 0)
+        out[0] = 0;
+}
+
+static void vm_debug_log_login_input_state(const char *phase, u32 callback, u32 inputBuffer)
+{
+    u32 r9 = 0;
+    u32 loginRecord = 0;
+    u32 displayPassword = 0;
+    u32 displayUser = 0;
+    u32 editPassword = 0;
+    u32 editUser = 0;
+    u8 selected = 0;
+    u8 loginFlag = 0;
+    char displayPasswordText[64];
+    char displayUserText[64];
+    char recordUserText[64];
+    char recordPasswordText[64];
+
+    memset(displayPasswordText, 0, sizeof(displayPasswordText));
+    memset(displayUserText, 0, sizeof(displayUserText));
+    memset(recordUserText, 0, sizeof(recordUserText));
+    memset(recordPasswordText, 0, sizeof(recordPasswordText));
+
+    uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+    if (r9 == 0)
+        return;
+    uc_mem_read(MTK, r9 + 10772, &loginRecord, 4);
+    uc_mem_read(MTK, r9 + 10812, &displayPassword, 4);
+    uc_mem_read(MTK, r9 + 10816, &displayUser, 4);
+    uc_mem_read(MTK, r9 + 10824, &editPassword, 4);
+    uc_mem_read(MTK, r9 + 10828, &editUser, 4);
+    uc_mem_read(MTK, r9 + 10731, &selected, 1);
+    if (loginRecord != 0)
+    {
+        uc_mem_read(MTK, loginRecord, &loginFlag, 1);
+        vm_debug_read_guest_cstr(loginRecord + 16, recordUserText, sizeof(recordUserText));
+        vm_debug_read_guest_cstr(loginRecord + 48, recordPasswordText, sizeof(recordPasswordText));
+    }
+    vm_debug_read_guest_cstr(displayUser, displayUserText, sizeof(displayUserText));
+    vm_debug_read_guest_cstr(displayPassword, displayPasswordText, sizeof(displayPasswordText));
+
+    printf("[debug][vmInput] %s cb=%08x input=%08x target=%08x r9=%08x sel=%u flag=%u dispU=%08x dispP=%08x editU=%08x editP=%08x user='%s' pass='%s' recUser='%s' recPass='%s'\n",
+           phase ? phase : "-",
+           callback,
+           inputBuffer,
+           g_vmInputTargetBuffer,
+           r9,
+           selected,
+           loginFlag,
+           displayUser,
+           displayPassword,
+           editUser,
+           editPassword,
+           displayUserText,
+           displayPasswordText,
+           recordUserText,
+           recordPasswordText);
+}
+
 static void vm_lcd_init_screen_image_struct(void)
 {
     uc_mem_write(MTK, VM_screenImageStruct_ADDRESS, emptyBuff, 24);
@@ -2777,6 +2909,48 @@ static u32 vm_input_wcslen_limit(u32 addr, u32 maxLen)
             return i;
     }
     return maxLen;
+}
+
+static u32 vm_input_buffer_bytes(u32 maxLen)
+{
+    if (maxLen == 0 || maxLen > 0xffff)
+        return 0;
+    return maxLen * 2;
+}
+
+static int vm_input_ensure_scratch_buffer(u32 bytes)
+{
+    if (bytes == 0)
+        return 0;
+
+    if (g_vmInputScratchBuffer && g_vmInputScratchBytes >= bytes)
+        return 1;
+
+    if (g_vmInputScratchBuffer)
+    {
+        vm_free(g_vmInputScratchBuffer);
+        g_vmInputScratchBuffer = 0;
+        g_vmInputScratchBytes = 0;
+    }
+
+    g_vmInputScratchBuffer = vm_malloc(bytes);
+    g_vmInputScratchBytes = bytes;
+    return g_vmInputScratchBuffer != 0;
+}
+
+static void vm_input_copy_guest_bytes(u32 dst, u32 src, u32 bytes)
+{
+    u32 copied = 0;
+
+    while (copied < bytes)
+    {
+        u32 chunk = SDL_min(bytes - copied, (u32)mySizeOf(cbeTextString));
+        if (uc_mem_read(MTK, src + copied, cbeTextString, chunk) != UC_ERR_OK)
+            break;
+        if (uc_mem_write(MTK, dst + copied, cbeTextString, chunk) != UC_ERR_OK)
+            break;
+        copied += chunk;
+    }
 }
 
 static void vm_input_append_char(u32 ch)
@@ -2814,19 +2988,50 @@ static uc_err vm_input_finish(u32 result)
 
     u32 callback = g_vmInputCallback;
     u32 buffer = g_vmInputBuffer;
+    u32 currentR9 = 0;
+    u32 callbackR9 = 0;
+    u32 displayUser = 0;
+    vm_debug_log_login_input_state(result ? "finish-cancel-before" : "finish-ok-before", callback, buffer);
     vm_input_request_sdl_text_input(0);
     g_vmInputOpen = 0;
-    g_vmInputCallback = 0;
-    g_vmInputBuffer = 0;
-    g_vmInputMaxLen = 0;
-    g_vmInputInputType = 0;
-    g_vmInputPassword = 0;
     g_vmInputComposition[0] = 0;
 
     if (!callback)
         return UC_ERR_OK;
 
-    return vm_call4_preserve_regs(callback, result ? 1 : 0, buffer, callback, 0);
+    uc_reg_read(MTK, UC_ARM_REG_R9, &currentR9);
+    if (currentR9 != 0)
+        uc_mem_read(MTK, currentR9 + 10816, &displayUser, 4);
+    callbackR9 = vm_module_r9_for_pool_pc(callback);
+    if (callbackR9 == 0)
+        callbackR9 = vm_is_pool_entry(callback) && g_currentScreenModuleBase ? g_currentScreenModuleBase : Global_R9;
+    g_vmInputWatchUserBuf = displayUser;
+    g_vmInputWatchUserBufLen = displayUser ? 64 : 0;
+    g_vmInputWatchCallback = callback;
+    g_vmInputWatchCallR9 = callbackR9;
+    g_vmInputWatchWriteCount = 0;
+    printf("[debug][vmInput] callback-call cb=%08x pool=%u callR9=%08x curR9=%08x dispU=%08x target=%08x input=%08x\n",
+           callback,
+           vm_is_pool_entry(callback) ? 1u : 0u,
+           callbackR9,
+           currentR9,
+           displayUser,
+           g_vmInputTargetBuffer,
+           buffer);
+    uc_err err = vm_call4_preserve_regs_clear_stack_args(callback, result ? 1 : 0, buffer, callback, 0);
+    g_vmInputWatchUserBuf = 0;
+    g_vmInputWatchUserBufLen = 0;
+    g_vmInputWatchCallback = 0;
+    g_vmInputWatchCallR9 = 0;
+    g_vmInputWatchWriteCount = 0;
+    g_vmInputCallback = 0;
+    g_vmInputBuffer = 0;
+    g_vmInputTargetBuffer = 0;
+    g_vmInputMaxLen = 0;
+    g_vmInputInputType = 0;
+    g_vmInputPassword = 0;
+    vm_debug_log_login_input_state(result ? "finish-cancel-after" : "finish-ok-after", callback, buffer);
+    return err;
 }
 
 static uc_err scheduler_dispatch_input_event(vm_event *evt)
@@ -2859,6 +3064,8 @@ static void vm_input_open(u32 callback, u32 param, int password)
     u32 maxLen = 0;
     u32 prompt = 0;
     u32 inputType = 0;
+    u32 scratchBytes = 0;
+    u32 copyUnits = 0;
     uc_mem_read(MTK, param, &buffer, 4);
     uc_mem_read(MTK, param + 4, &maxLen, 4);
     uc_mem_read(MTK, param + 8, &prompt, 4);
@@ -2873,16 +3080,28 @@ static void vm_input_open(u32 callback, u32 param, int password)
     g_vmInputOpen = 1;
     g_vmInputPassword = password ? 1 : 0;
     g_vmInputCallback = callback;
-    g_vmInputBuffer = buffer;
     g_vmInputMaxLen = maxLen & 0xffff;
     if (g_vmInputMaxLen == 0)
         g_vmInputMaxLen = maxLen;
+    scratchBytes = vm_input_buffer_bytes(g_vmInputMaxLen);
+    if (!vm_input_ensure_scratch_buffer(scratchBytes))
+    {
+        printf("[vmInput] failed to reserve scratch buffer maxLen=%u bytes=%u\n", g_vmInputMaxLen, scratchBytes);
+        assert(0);
+    }
+    vm_try_write_zero(g_vmInputScratchBuffer, scratchBytes);
+    copyUnits = vm_input_wcslen_limit(buffer, g_vmInputMaxLen > 0 ? g_vmInputMaxLen - 1 : 0);
+    if (copyUnits > 0)
+        vm_input_copy_guest_bytes(g_vmInputScratchBuffer, buffer, copyUnits * 2);
+    g_vmInputTargetBuffer = buffer;
+    g_vmInputBuffer = g_vmInputScratchBuffer;
     g_vmInputInputType = inputType & 0xff;
     g_vmInputOverlayX = 12;
     g_vmInputOverlayY = password ? 372 : 344;
     g_vmInputOverlayW = 216;
     g_vmInputOverlayH = 22;
     g_vmInputComposition[0] = 0;
+    vm_debug_log_login_input_state(password ? "open-pass" : "open-text", callback, buffer);
     vm_input_request_sdl_text_input(1);
     vm_set_call_result(1);
 }
@@ -3240,7 +3459,6 @@ static void vm_mock_service_init_config(int argc, char *args[])
     const char *envOnly = getenv("CBE_MOCK_SERVICE_ONLY");
     const char *envEndpoint = getenv("CBE_MOCK_SERVICE");
     const char *envBind = getenv("CBE_MOCK_SERVICE_BIND");
-    const char *envAccount = getenv("CBE_MOCK_SERVICE_ACCOUNT");
     const char *envLegacyPort = getenv("CBE_MOCK_SERVICE_PORT");
     const char *envLegacyRemote = getenv("CBE_MOCK_SERVICE_REMOTE");
     char parsedHost[64];
@@ -3259,11 +3477,6 @@ static void vm_mock_service_init_config(int argc, char *args[])
         g_mockServiceClientId = (u32)time(NULL) ^ (u32)(uintptr_t)&g_mockServiceClientId;
         if (g_mockServiceClientId == 0)
             g_mockServiceClientId = 1;
-    }
-    if (envAccount && envAccount[0] != 0)
-    {
-        snprintf(g_mockServiceAccount, sizeof(g_mockServiceAccount), "%s", envAccount);
-        g_mockServiceAccountExplicit = 1;
     }
 
     if (envEndpoint)
@@ -3334,16 +3547,6 @@ static void vm_mock_service_init_config(int argc, char *args[])
             else
                 printf("[warn][mock-service] invalid mock-service-bind=<empty>\n");
         }
-        else if (strncmp(args[i], "--mock-service-account=", 23) == 0)
-        {
-            if (args[i][23] != 0)
-            {
-                snprintf(g_mockServiceAccount, sizeof(g_mockServiceAccount), "%s", args[i] + 23);
-                g_mockServiceAccountExplicit = 1;
-            }
-            else
-                printf("[warn][mock-service] invalid mock-service-account=<empty>\n");
-        }
         else if (strncmp(args[i], "--mock-service-remote=", 22) == 0)
         {
             if (vm_mock_service_parse_host_port(args[i] + 22, parsedHost, sizeof(parsedHost), &parsedPort))
@@ -3368,9 +3571,8 @@ static void vm_mock_service_init_config(int argc, char *args[])
     }
     else
     {
-        printf("[info][mock-service] mode=emulator client=%s:%u account=%s required=service\n",
-               g_mockServiceHost, g_mockServicePort,
-               g_mockServiceAccount[0] ? g_mockServiceAccount : "(auto)");
+        printf("[info][mock-service] mode=emulator client=%s:%u auth=packet-driven required=service\n",
+               g_mockServiceHost, g_mockServicePort);
     }
 }
 
@@ -5148,6 +5350,8 @@ void loop()
                 }
                 break;
             case SDL_MOUSEMOTION:
+                if (g_vmInputOpen)
+                    break;
                 if (isMouseDown)
                 {
                     windowMouseEvent(MR_MOUSE_MOVE, ev.motion.x, ev.motion.y);
@@ -5167,6 +5371,11 @@ void loop()
                                LcdGetWindowWidth(), LcdGetWindowHeight());
                     }
                     vm_lcd_update_with_input_overlay();
+                    break;
+                }
+                if (g_vmInputOpen)
+                {
+                    isMouseDown = false;
                     break;
                 }
                 isMouseDown = true;
@@ -5408,9 +5617,14 @@ static void vm_reset_runtime_state_for_restart(void)
     g_curKeyDownState = 0;
     g_curKeyState = 0;
     g_vmInputOpen = 0;
+    g_vmInputPassword = 0;
     g_vmInputCallback = 0;
     g_vmInputBuffer = 0;
+    g_vmInputTargetBuffer = 0;
     g_vmInputMaxLen = 0;
+    g_vmInputInputType = 0;
+    g_vmInputScratchBuffer = 0;
+    g_vmInputScratchBytes = 0;
     g_vmInputComposition[0] = 0;
     g_vmInputSdlTextInputWanted = 0;
     g_vmInputSdlTextInputActive = 0;
@@ -7666,6 +7880,7 @@ return 4;
         g_vmInputOpen = 0;
         g_vmInputCallback = 0;
         g_vmInputBuffer = 0;
+        g_vmInputTargetBuffer = 0;
         g_vmInputMaxLen = 0;
         g_vmInputInputType = 0;
         g_vmInputPassword = 0;
@@ -8846,6 +9061,17 @@ static bool hook_vm_manager_lcd_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1); // src UCS2
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2); // dst GBK
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3); // dst max bytes
+        if (g_vmInputWatchCallback)
+        {
+            char srcText[64];
+            char dstText[64];
+            memset(srcText, 0, sizeof(srcText));
+            memset(dstText, 0, sizeof(dstText));
+            vm_debug_read_guest_ucs2_as_gbk(tmp1, srcText, sizeof(srcText), 64);
+            vm_debug_read_guest_cstr(tmp2, dstText, sizeof(dstText));
+            printf("[debug][vmInput] lcd40 pc=%08x src=%08x dst=%08x max=%u srcText='%s' dstBefore='%s'\n",
+                   lastAddress, tmp1, tmp2, tmp3, srcText, dstText);
+        }
         if (tmp1 == 0 || tmp2 == 0 || tmp3 == 0 || tmp3 > 0xfff0)
         {
             vm_set_call_result(0);
@@ -8861,13 +9087,24 @@ static bool hook_vm_manager_lcd_func(u32 address)
             u32 outLen = tmp3;
             if (outLen > mySizeOf(sprintfBuff))
                 outLen = mySizeOf(sprintfBuff);
+            memset(sprintfBuff, 0, outLen);
             int conv = ucs2_to_gbk(cbeTextString, srcBytes, sprintfBuff, outLen);
             if (conv < 0)
             {
                 sprintfBuff[0] = 0;
-                outLen = 1;
             }
-            uc_mem_write(MTK, tmp2, sprintfBuff, outLen);
+            u32 writeLen = (u32)strlen((char *)sprintfBuff) + 1;
+            if (writeLen > outLen)
+                writeLen = outLen;
+            uc_mem_write(MTK, tmp2, sprintfBuff, writeLen);
+            if (g_vmInputWatchCallback)
+            {
+                char dstAfter[64];
+                memset(dstAfter, 0, sizeof(dstAfter));
+                vm_debug_read_guest_cstr(tmp2, dstAfter, sizeof(dstAfter));
+                printf("[debug][vmInput] lcd40-write dst=%08x wrote=%u conv=%d dstAfter='%s'\n",
+                       tmp2, writeLen, conv, dstAfter);
+            }
             vm_set_call_result(strlen((char *)sprintfBuff));
         }
     }
@@ -10883,7 +11120,11 @@ static bool hook_vm_manager_screen_func(u32 address)
         if (tmp1 != 0 && acceptChange)
         {
             if (lastAddress >= VM_Memory_Pool_ADDRESS && lastAddress < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
-                uc_reg_read(MTK, UC_ARM_REG_R9, &moduleBase);
+            {
+                moduleBase = vm_pool_module_r9_guess_from_pc_slot64k(lastAddress);
+                if (!moduleBase)
+                    uc_reg_read(MTK, UC_ARM_REG_R9, &moduleBase);
+            }
             if (!moduleBase)
                 moduleBase = vm_screen_stack_lookup_module_base(tmp1);
             if (moduleBase)
@@ -10916,7 +11157,11 @@ static bool hook_vm_manager_screen_func(u32 address)
             tmp3 = 1;
         }
         if (lastAddress >= VM_Memory_Pool_ADDRESS && lastAddress < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
-            uc_reg_read(MTK, UC_ARM_REG_R9, &moduleBase);
+        {
+            moduleBase = vm_pool_module_r9_guess_from_pc_slot64k(lastAddress);
+            if (!moduleBase)
+                uc_reg_read(MTK, UC_ARM_REG_R9, &moduleBase);
+        }
         if (tmp1 != 0 && tmp1 != vmAddedScreen)
             vm_screen_stack_preserve_active_if_needed();
         if (moduleBase)

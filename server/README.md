@@ -54,18 +54,23 @@ To connect to a remote public server:
 bin/main.exe --mock-service=203.0.113.10:19090
 ```
 
-To isolate one no-account client into its own server-side account bucket:
-
-```powershell
-bin/main.exe --mock-service=203.0.113.10:19090 --mock-service-account=alice
-```
-
 For no-account title flows such as Jianghu OL `1/1/12` empty-credential login,
-pass `--mock-service-account=...` explicitly if you want multiple isolated
-accounts on the same remote service. For credential login flows, the server does
-not auto-create accounts from the packet anymore: the login `username` /
-`userName` plus `password` must already exist in the server-side account DB or
-the mock returns an account/password error.
+the first visible request is only the server-list preflight. When the request
+does not carry saved credentials yet, the service now issues a guest
+`username/password` pair in the login response so the client can persist it into
+its own `mmorpg_LoginRecord` / `defaultLogin.dat` flow. Later no-account
+requests reuse those saved credentials through the normal packet fields instead
+of a host-side injected account override.
+
+Startup pre-login version/update handshake packets (`WT 18/*`) and the short
+login-bridge control ack (`WT 99/1`) still happen before any account exists.
+Those requests are handled statelessly, so the game can leave the
+"与服务器通讯 / 获取版本信息" phase and reach the login/title flow.
+
+For credential login flows, the server does not auto-create accounts from the
+packet anymore: the login `username` / `userName` plus `password` must already
+exist in the server-side account DB or the mock returns an account/password
+error.
 
 After the service starts, you can manage login accounts directly in the server
 console:
@@ -79,8 +84,7 @@ account passwd <username> <newpassword>
 
 Server-side role data now stores per account:
 
-- default / unspecified account: `nvram/jhol_mock_roles.bin`
-- named accounts: `nvram/accounts/<account>/jhol_mock_roles.bin`
+- guest / named account: `nvram/accounts/<account>/jhol_mock_roles.bin`
 
 Besides the emulator arguments, the server side still needs its firewall, cloud
 security-group, or NAT port-forwarding rules to allow inbound TCP traffic on
@@ -111,7 +115,6 @@ Request header, 20 bytes, little-endian:
 Then optional request metadata follows:
 
 1. `u32 clientId`
-2. optional NUL-terminated explicit account ID
 
 Then the raw WT request bytes follow.
 

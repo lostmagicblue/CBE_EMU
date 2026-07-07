@@ -69,12 +69,12 @@ bad response shapes were observed:
 
 Fix:
 
-- for subtype `1/1/12` with empty username and password, the default/staged mode
-  returns subtype-12 `result=1` together with `serverinfo`, `color`, `servernum`,
-  and `newVer`;
-- subtype-12 result `3`/`4` remains available for explicit regression through
-  `CBE_ALT12_SERVERLIST_RESULT`, but is not the default no-account button
-  response.
+- generic subtype `1/1/12` server-list fallback stays on subtype-12 `result=1`
+  with `serverinfo`, `color`, `servernum`, and `newVer`;
+- for the true first-run no-account case where the request carries empty saved
+  credentials, the mock-service may override that with subtype-12 `result=3`
+  plus `information/username/password`, so the client can persist the issued
+  guest account and reuse it on later `1/12` requests.
 
 IDA evidence:
 
