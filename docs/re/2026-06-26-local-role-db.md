@@ -162,13 +162,13 @@ money = 1000
 backpackCapacity = 40
 scene = c00蓬莱仙岛_01.sce (Penglai TongQueTai)
 position = 216,216
-backpack = item 800 seq 1 count 5
-nextBackpackSeq = 2
+backpack = empty
+nextBackpackSeq = 1
 equippedItemIds[0] = 1001
 ```
 
 Version 1 role DB files are upgraded in-place to version 3 by copying existing
-role fields, seeding each role with the default backpack, and assigning starter
+role fields, keeping an empty backpack for each role, and assigning starter
 equipment. Version 2 files migrate to version 3 by keeping the existing
 backpack and adding equipment slots. The old `nvram/jhol_mock_player_pos.bin`
 mirror is no longer read or written.
@@ -226,8 +226,8 @@ Title role list:
   `scene/x/y` from that active role row.
 - title role create handles request `1/1/7`, appends a persisted role when
   capacity allows it, starts the new role at Penglai TongQueTai
-  `c00蓬莱仙岛_01.sce @ (216,216)` with the default teleport-stone stack, and
-  returns `actorid/result` to the title parser.
+  `c00蓬莱仙岛_01.sce @ (216,216)` with an empty backpack, and returns
+  `actorid/result` to the title parser.
 - role DB load repairs duplicate legacy rows that were previously persisted
   with the default name after a create-payload decode miss. The first default
   role keeps the GBK default name; later duplicate default rows become stable

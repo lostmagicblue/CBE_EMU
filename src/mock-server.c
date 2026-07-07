@@ -7478,11 +7478,8 @@ static void vm_net_mock_role_init_default_backpack(vm_net_mock_role_state *role)
         return;
     memset(role->backpackItems, 0, sizeof(role->backpackItems));
     role->backpackCapacity = VM_NET_MOCK_BACKPACK_CAPACITY;
-    role->backpackItemCount = 1;
-    role->nextBackpackSeq = VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_SEQ + 1;
-    role->backpackItems[0].itemId = VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_ID;
-    role->backpackItems[0].seq = VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_SEQ;
-    role->backpackItems[0].count = VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_COUNT;
+    role->backpackItemCount = 0;
+    role->nextBackpackSeq = 1;
 }
 
 static bool vm_net_mock_role_has_default_name(const vm_net_mock_role_state *role)
@@ -21157,6 +21154,8 @@ static u32 vm_net_mock_build_login_alt12_server_list_response(const u8 *request,
     u32 colorBlobLen = 0;
     char userName[64];
     char password[64];
+    char informationUtf8[160];
+    char informationBuf[160];
     bool haveUserName = false;
     bool havePassword = false;
     u8 resultCode = vm_net_mock_env_u8("CBE_ALT12_SERVERLIST_RESULT", 1);
@@ -21171,6 +21170,8 @@ static u32 vm_net_mock_build_login_alt12_server_list_response(const u8 *request,
     memset(colorBlob, 0, sizeof(colorBlob));
     memset(userName, 0, sizeof(userName));
     memset(password, 0, sizeof(password));
+    memset(informationUtf8, 0, sizeof(informationUtf8));
+    memset(informationBuf, 0, sizeof(informationBuf));
     serverInfoLen = vm_net_mock_build_login_serverinfo_blob(serverInfo, sizeof(serverInfo));
     if (serverInfoLen == 0)
         return 0;
@@ -21191,7 +21192,12 @@ static u32 vm_net_mock_build_login_alt12_server_list_response(const u8 *request,
         havePassword = true;
         issuedGuestCredentials = true;
         resultCode = g_vm_mock_service_login_issue_result ? g_vm_mock_service_login_issue_result : 3;
-        information = "guest account assigned";
+        snprintf(informationUtf8, sizeof(informationUtf8),
+                 "注册账号成功 账号:%s 密码:%s",
+                 userName,
+                 password);
+        utf8_to_gbk((u8 *)informationUtf8, (u8 *)informationBuf, sizeof(informationBuf));
+        information = informationBuf;
     }
 
     if (resultCode != 1 && resultCode != 3 && resultCode != 4)

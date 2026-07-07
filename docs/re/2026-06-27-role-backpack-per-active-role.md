@@ -27,9 +27,9 @@ the role-row-only state model.
   - `backpackItemCount`
   - `nextBackpackSeq`
   - `backpackItems[40]` as `itemId/seq/count`
-- New roles start with item `800` (`传送石`) seq `1`, count `5`.
+- New roles start with an empty backpack.
 - Version-1 role DB files are migrated into version 2 by copying role data and
-  seeding the default backpack for each existing role.
+  keeping an empty backpack for each existing role.
 - `17/1` full backpack list and `30/21` grid bootstrap both serialize the active
   role's backpack rows.
 - Shop buy `17/2` now adds or stacks `shopId` into the active role backpack
