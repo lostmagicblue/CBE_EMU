@@ -28,8 +28,8 @@ which calls `HandleBattleActionMsg(0x6EB0)`.
 
 `HandleBattleActionMsg(0x6EB0)` parses `actioninfo` records. Action type `2`
 uses the action effect fields and then decrements the currently selected battle
-item row (`+242`) when the target side is the player side. This identifies
-action type `2` as the battle item-use action.
+item row (`+242`) when the action actor resolves to the player side. This
+identifies action type `2` as the native battle item-use action.
 
 Negative evidence: `4/4` is the escape result branch. The strings at
 `0x8044/0x8050` decode as escape success/failure, so `4/4` must not be used as
@@ -72,16 +72,33 @@ By default a live enemy counterattack is bundled after the item action; set
 `CBE_BATTLE_ITEM_USE_COUNTER=0` for focused rollback experiments.
 
 Because battle rewards already proved that kind-`7` refresh objects can be
-mixed into the same WT response, a successful battle medicine use now also
-appends the normal backpack sync objects after `4/6`:
+mixed into the same WT response, a successful battle medicine use appends the
+count-sync object after `4/6`:
 
 ```text
-1/7/7  { type=2, iteminfo=<seq,itemId,remaining,extra> }
 1/7/11 { info=<row_count,seq,new_count> }
 ```
 
-This keeps the main item manager aligned with the role DB so a stack consumed
-to zero in battle does not reappear later as a stale `0`-count medicine row.
+Runtime correction: reusing the scene item-use `7/7 type=2` path inside battle
+was too aggressive. Battle action type `2` already decrements the selected
+battle row in `HandleBattleActionMsg(0x6EB0)`. Appending `7/7 type=2` on top of
+that made a visible `x2` medicine jump straight to `x0`. `7/11` is the narrow
+main-dispatcher sync that updates the item row count without triggering the
+second consume path.
+
+2026-07-07 inference-based correction: IDA shows the decrement guard is keyed by
+the action actor's side, not the child target side. For HP medicines, the mock
+now defaults to a type-`1` self-heal playback plus `7/11` count sync instead of
+type `2`. This keeps the heal visual/effect path but avoids the battle module's
+hard-coded local item-row decrement branch. Runtime still needs confirmation for
+the final visible count behavior across all battle UIs.
+
+Multi-monster correction: battle item use must still follow the same round
+script expectations as normal battle operate. When `CBE_BATTLE_BUNDLE_ROUND=1`,
+the server snapshots all currently alive enemy wires and appends one
+counterattack record per living monster after the item-use record. A three-
+monster round therefore returns one item-use record plus three monster actions
+unless the player's HP reaches zero earlier in the script.
 
 If the selected `seq` cannot be resolved or the item has no usable effect, the
 mock returns a narrow battle no-op `4/6` object with `actionnum=0` and empty
@@ -133,5 +150,5 @@ builtin-battle-item-use
 Trace line:
 
 ```text
-mock_battle_item_use index=... seq=... item=... remaining=... effect=13 sync=1 noop=0 response=4/6+7/7+7/11-actionType2
+mock_battle_item_use index=... seq=... item=... remaining=... effect=13 action=1 counters=3 armed=1 bundle=1 enemies=3 slots=20/20/20 sync=1 noop=0 response=4/6+7/11-actionType1
 ```
