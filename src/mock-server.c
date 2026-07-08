@@ -3890,6 +3890,7 @@ static u32 vm_net_mock_load_shop_catalog_dsh(const char *path, bool equip)
         u32 rowEnd = rowPos + rowLen;
         u32 itemId = 0;
         u32 price = 0;
+        u32 kubaoPrice = 0;
         u32 stock = equip ? 1 : VM_NET_MOCK_SHOP_DEFAULT_ITEM_STOCK;
         u32 visual = 1;
         u32 category = 0xff;
@@ -3919,11 +3920,22 @@ static u32 vm_net_mock_load_shop_catalog_dsh(const char *path, bool equip)
                 category = vm_net_mock_parse_dsh_u32(value, valueLen, 0xff);
             else if ((!equip && col == 8) || (equip && col == 5))
                 price = vm_net_mock_parse_dsh_u32(value, valueLen, VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE);
+            else if (!equip && col == 29)
+                kubaoPrice = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
             else if (!equip && col == 10)
                 stock = vm_net_mock_parse_dsh_u32(value, valueLen, VM_NET_MOCK_SHOP_DEFAULT_ITEM_STOCK);
 
             rowPos += valueLen;
         }
+
+        /*
+         * item.dsh "价值" matches ordinary item/equipment values, but the mall
+         * secret-item page (`类别=14`) uses the dedicated "酷宝" column as the
+         * W-coin price. Example rows such as 800/801/806 otherwise appear as
+         * 0 or 150000000 in the premium shop.
+         */
+        if (!equip && category == 14 && kubaoPrice != 0)
+            price = kubaoPrice;
 
         if (vm_net_mock_add_shop_catalog_item(itemId,
                                              name,
@@ -4396,6 +4408,33 @@ static u32 vm_net_mock_shop_page_item_limit(u8 subtype)
     return VM_NET_MOCK_SHOP_MAX_CATALOG_ITEMS;
 }
 
+static u32 vm_net_mock_shop_client_backpack_expand_price(void)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 capacity = vm_net_mock_env_u8("CBE_ACTOR_BACKPACK_CAPACITY",
+                                      role ? role->backpackCapacity :
+                                      VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY);
+
+    /*
+     * mmShopMstarWqvga.cbm:sub_74E overrides item 806's visible row price by
+     * local backpack-capacity tier instead of trusting the raw server value.
+     */
+    if (capacity == 12)
+        return 20;
+    if (capacity == 16)
+        return 40;
+    return 60;
+}
+
+static u32 vm_net_mock_shop_effective_unit_price(u32 itemId, u32 catalogPrice)
+{
+    if (itemId == VM_NET_MOCK_BACKPACK_EXPAND_ITEM_ID)
+        return vm_net_mock_shop_client_backpack_expand_price();
+    if (catalogPrice == 0)
+        return VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE;
+    return catalogPrice;
+}
+
 static u8 vm_net_mock_shop_page_equipment_slot(const vm_net_mock_shop_catalog_item *item)
 {
     if (item == NULL || !item->isEquip)
@@ -4773,8 +4812,10 @@ static bool vm_net_mock_build_shop_iteminfo_page_blob(u8 *out, u32 outCap, u32 *
     {
         const vm_net_mock_shop_catalog_item *item =
             vm_net_mock_shop_page_item_at(subtype, start + i);
+        u32 unitPrice = 0;
         if (item == NULL)
             return false;
+        unitPrice = vm_net_mock_shop_effective_unit_price(item->itemId, item->price);
         if (!vm_net_mock_seq_put_u32(out, outCap, &pos, item->itemId))
             return false;
         if (!vm_net_mock_seq_put_string(out, outCap, &pos, item->name))
@@ -4783,7 +4824,7 @@ static bool vm_net_mock_build_shop_iteminfo_page_blob(u8 *out, u32 outCap, u32 *
             return false;
         if (!vm_net_mock_seq_put_u8(out, outCap, &pos, item->stack))
             return false;
-        if (!vm_net_mock_seq_put_u32(out, outCap, &pos, item->price))
+        if (!vm_net_mock_seq_put_u32(out, outCap, &pos, unitPrice))
             return false;
         if (!vm_net_mock_seq_put_u32(out, outCap, &pos, item->stock))
             return false;
@@ -21120,11 +21161,11 @@ static bool vm_net_mock_shop_calculate_cost(u32 itemId, u32 count,
                                             u32 *unitPriceOut, u32 *costOut)
 {
     const vm_net_mock_shop_catalog_item *item = vm_net_mock_find_shop_catalog_item(itemId);
-    u32 unitPrice = item ? item->price : VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE;
+    u32 unitPrice = vm_net_mock_shop_effective_unit_price(
+        itemId,
+        item ? item->price : VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE);
     u32 cost = 0;
 
-    if (unitPrice == 0)
-        unitPrice = VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE;
     if (count == 0)
         count = 1;
     if (unitPrice != 0 && count > 0xffffffffu / unitPrice)
