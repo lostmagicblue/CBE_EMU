@@ -238,6 +238,19 @@ static u32 g_currentScreenDataPackage = 0;
 static u32 g_dlSpBf = 0;
 static u32 g_poolModuleR9s[16];
 static u32 g_poolModuleR9Count = 0;
+typedef struct
+{
+    u16 appId;
+    u16 reserved;
+    u32 buffer;
+    u32 context;
+    u32 spBf;
+} vm_dl_loaded_app;
+static vm_dl_loaded_app g_vmDlLoadedApps[16];
+static u32 g_vmDlLoadedCount = 0;
+static u16 g_vmDlCurrAppId = 0;
+static u16 g_vmDlPreAppId = 0;
+static u8 g_vmDlCurrType = 0;
 static u32 g_screenRootExitArmed = 0;
 static u32 g_screenRootExitPending = 0;
 static u32 g_screenRootExitPendingRoot = 0;
@@ -392,6 +405,8 @@ static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t
 static uc_err scheduler_dispatch_net_tasks(void);
 static bool vm_net_mock_should_rearm_send_ready(void);
 static uc_err scheduler_flush_post_vm_business_send_ready(const char *reason);
+static u32 vm_dl_current_sp_bf(void);
+static void vm_dl_note_sp_bf(u32 moduleR9, const char *reason);
 
 static bool vm_address_in_range(u32 address, u32 begin, u32 size)
 {
@@ -1306,6 +1321,183 @@ static bool vm_is_pool_entry(u32 entry)
     return pc >= VM_Memory_Pool_ADDRESS && pc < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE;
 }
 
+static void vm_dl_reset_state(void)
+{
+    memset(g_vmDlLoadedApps, 0, sizeof(g_vmDlLoadedApps));
+    g_vmDlLoadedCount = 0;
+    g_vmDlCurrAppId = 0;
+    g_vmDlPreAppId = 0;
+    g_vmDlCurrType = 0;
+    g_dlSpBf = 0;
+}
+
+static int vm_dl_find_loaded_index_by_app_id(u16 appId)
+{
+    for (u32 i = 0; i < g_vmDlLoadedCount; ++i)
+    {
+        if (g_vmDlLoadedApps[i].appId == appId)
+            return (int)i;
+    }
+    return -1;
+}
+
+static int vm_dl_find_loaded_index_by_sp_bf(u32 spBf)
+{
+    if (spBf == 0)
+        return -1;
+    for (u32 i = 0; i < g_vmDlLoadedCount; ++i)
+    {
+        if (g_vmDlLoadedApps[i].spBf == spBf)
+            return (int)i;
+    }
+    return -1;
+}
+
+static int vm_dl_find_loaded_index_by_pc(u32 pc)
+{
+    pc &= ~1u;
+    if (!vm_is_pool_entry(pc))
+        return -1;
+    for (u32 i = 0; i < g_vmDlLoadedCount; ++i)
+    {
+        u32 buffer = g_vmDlLoadedApps[i].buffer;
+        u32 spBf = g_vmDlLoadedApps[i].spBf;
+        if (buffer != 0 && spBf > buffer && pc >= buffer && pc < spBf)
+            return (int)i;
+    }
+    return -1;
+}
+
+static int vm_dl_ensure_loaded_app(u16 appId)
+{
+    int idx = vm_dl_find_loaded_index_by_app_id(appId);
+    if (idx >= 0)
+        return idx;
+    if (g_vmDlLoadedCount >= sizeof(g_vmDlLoadedApps) / sizeof(g_vmDlLoadedApps[0]))
+        return -1;
+    idx = (int)g_vmDlLoadedCount++;
+    memset(&g_vmDlLoadedApps[idx], 0, sizeof(g_vmDlLoadedApps[idx]));
+    g_vmDlLoadedApps[idx].appId = appId;
+    return idx;
+}
+
+static u32 vm_dl_current_sp_bf(void)
+{
+    int idx;
+    if (g_vmDlCurrAppId == 0)
+        return 0;
+    idx = vm_dl_find_loaded_index_by_app_id(g_vmDlCurrAppId);
+    if (idx < 0)
+        return 0;
+    return g_vmDlLoadedApps[idx].spBf;
+}
+
+static void vm_dl_note_sp_bf(u32 moduleR9, const char *reason)
+{
+    static u32 s_traceCount = 0;
+    if (moduleR9 < VM_Memory_Pool_ADDRESS ||
+        moduleR9 >= VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
+    {
+        return;
+    }
+    if (g_dlSpBf == moduleR9)
+        return;
+    g_dlSpBf = moduleR9;
+    if (g_autotestEnabled && s_traceCount < 32)
+    {
+        ++s_traceCount;
+        vm_autotest_note("dl_sp_bf reason=%s r9=%08x count=%u\n",
+                         reason ? reason : "-", moduleR9, s_traceCount);
+    }
+}
+
+static void vm_dl_set_current_app(u16 appId, u8 dlType, const char *reason)
+{
+    if (g_vmDlCurrAppId != appId)
+        g_vmDlPreAppId = g_vmDlCurrAppId;
+    g_vmDlCurrAppId = appId;
+    g_vmDlCurrType = dlType;
+    if (g_vmDlCurrAppId != 0)
+    {
+        u32 spBf = vm_dl_current_sp_bf();
+        if (spBf)
+            vm_dl_note_sp_bf(spBf, reason);
+    }
+}
+
+static void vm_dl_set_loaded_buffer(u16 appId, u32 buffer)
+{
+    int idx = vm_dl_ensure_loaded_app(appId);
+    if (idx < 0)
+        return;
+    g_vmDlLoadedApps[idx].buffer = buffer;
+}
+
+static void vm_dl_set_loaded_sp_bf(u16 appId, u32 spBf)
+{
+    int idx = vm_dl_ensure_loaded_app(appId);
+    if (idx < 0)
+        return;
+    g_vmDlLoadedApps[idx].spBf = spBf;
+    if (g_vmDlCurrAppId == appId && spBf != 0)
+        vm_dl_note_sp_bf(spBf, "dl-set-spbf");
+}
+
+static void vm_dl_set_loaded_context(u16 appId, u32 context)
+{
+    int idx = vm_dl_ensure_loaded_app(appId);
+    if (idx < 0)
+        return;
+    g_vmDlLoadedApps[idx].context = context;
+}
+
+static u32 vm_dl_get_loaded_context(u16 appId)
+{
+    int idx = vm_dl_find_loaded_index_by_app_id(appId);
+    if (idx < 0)
+        return 0;
+    return g_vmDlLoadedApps[idx].context;
+}
+
+static void vm_dl_remove_loaded_index(int idx)
+{
+    u16 removedAppId;
+    if (idx < 0 || (u32)idx >= g_vmDlLoadedCount)
+        return;
+    removedAppId = g_vmDlLoadedApps[idx].appId;
+    if ((u32)idx + 1 < g_vmDlLoadedCount)
+    {
+        memmove(&g_vmDlLoadedApps[idx], &g_vmDlLoadedApps[idx + 1],
+                (g_vmDlLoadedCount - (u32)idx - 1) * sizeof(g_vmDlLoadedApps[0]));
+    }
+    memset(&g_vmDlLoadedApps[g_vmDlLoadedCount - 1], 0, sizeof(g_vmDlLoadedApps[0]));
+    g_vmDlLoadedCount--;
+    if (g_vmDlCurrAppId == removedAppId)
+    {
+        g_vmDlCurrAppId = 0;
+        g_vmDlCurrType = 0;
+        g_dlSpBf = 0;
+    }
+    if (g_vmDlPreAppId == removedAppId)
+        g_vmDlPreAppId = 0;
+}
+
+static void vm_dl_unload_loaded_app(u16 appId)
+{
+    int idx = vm_dl_find_loaded_index_by_app_id(appId);
+    if (idx >= 0)
+        vm_dl_remove_loaded_index(idx);
+}
+
+static u32 vm_read_current_pool_r9(void)
+{
+    u32 r9 = 0;
+    uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+    if (r9 >= VM_Memory_Pool_ADDRESS && r9 < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
+        return r9;
+    return 0;
+}
+
 static bool vm_pool_module_base_has_code(u32 codeBase)
 {
     u8 probe[16];
@@ -1358,50 +1550,22 @@ static bool vm_cbe_api_ptr_looks_callable(u32 target)
 
 static bool vm_pool_module_r9_matches_pc(u32 pc, u32 moduleR9)
 {
-    const u32 moduleR9Delta = 0x14000u;
-    const u32 moduleWindowSize = 0x28000u;
-    u32 codeBase;
-
     pc &= ~1u;
-    if (moduleR9 < VM_Memory_Pool_ADDRESS + moduleR9Delta ||
+    if (moduleR9 < VM_Memory_Pool_ADDRESS ||
         moduleR9 >= VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
     {
         return false;
     }
-
-    codeBase = moduleR9 - moduleR9Delta;
-    if (codeBase < VM_Memory_Pool_ADDRESS ||
-        codeBase + moduleWindowSize > VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
     {
-        return false;
+        int idx = vm_dl_find_loaded_index_by_sp_bf(moduleR9);
+        if (idx >= 0)
+        {
+            u32 buffer = g_vmDlLoadedApps[idx].buffer;
+            u32 spBf = g_vmDlLoadedApps[idx].spBf;
+            return buffer != 0 && spBf > buffer && pc >= buffer && pc < spBf;
+        }
     }
-    if (pc < codeBase || pc >= codeBase + moduleWindowSize)
-        return false;
-    return vm_pool_module_base_has_code(codeBase);
-}
-
-/*
- * Firmware dynamic-module callbacks restore R9 through KEEP_SP by loading the
- * global sp_bf value into R9. We do not execute that loader glue directly, so
- * mirror the active sp_bf on the host and prefer it before structural fallback.
- */
-static void vm_dl_note_sp_bf(u32 moduleR9, const char *reason)
-{
-    static u32 s_traceCount = 0;
-    if (!moduleR9)
-        return;
-    if (!vm_pool_module_r9_matches_pc(moduleR9 - 0x14000u, moduleR9))
-        return;
-    if (g_dlSpBf == moduleR9)
-        return;
-    g_dlSpBf = moduleR9;
-    vm_pool_module_remember_r9(moduleR9);
-    if (g_autotestEnabled && s_traceCount < 32)
-    {
-        ++s_traceCount;
-        vm_autotest_note("dl_sp_bf reason=%s r9=%08x count=%u\n",
-                         reason ? reason : "-", moduleR9, s_traceCount);
-    }
+    return false;
 }
 
 static void vm_pool_module_remember_r9(u32 moduleR9)
@@ -1442,36 +1606,10 @@ static bool vm_pool_battle_chat_context_valid(u32 moduleR9)
             (widthFunc >= Program_ROM_Address && widthFunc < Program_ROM_Address + Program_ROM_Mapped_Size));
 }
 
-static u32 vm_pool_module_r9_guess_from_pc_slot64k(u32 pc)
-{
-    const u32 moduleR9Delta = 0x14000u;
-    u32 codeBase = 0;
-    u32 moduleR9 = 0;
-
-    pc &= ~1u;
-    if (!vm_is_pool_entry(pc))
-        return 0;
-
-    /*
-     * The current Jianghu OL dynamic-CBM loader places modules on 64 KiB slots
-     * inside the VM pool. Using the caller/callback page preserves the concrete
-     * loaded module identity better than the older 0x80000 coarse window.
-     */
-    codeBase = pc & 0xffff0000u;
-    moduleR9 = codeBase + moduleR9Delta;
-    if (vm_pool_module_r9_matches_pc(pc, moduleR9))
-        return moduleR9;
-    return 0;
-}
-
 static u32 vm_module_r9_for_pool_pc(u32 pc)
 {
-    const u32 moduleR9Delta = 0x14000u;
-    const u32 moduleAlign = 0x80000u;
-    u32 moduleR9 = 0;
     u32 currentR9 = 0;
-    u32 codeBase = 0;
-    bool allowRememberedFallback = false;
+    int idx = -1;
 
     pc &= ~1u;
     if (!vm_is_pool_entry(pc))
@@ -1481,53 +1619,30 @@ static u32 vm_module_r9_for_pool_pc(u32 pc)
     if (currentR9 && vm_pool_module_r9_matches_pc(pc, currentR9))
         return currentR9;
 
+    if (g_currentScreenModuleBase && vm_pool_module_r9_matches_pc(pc, g_currentScreenModuleBase))
+        return g_currentScreenModuleBase;
     if (g_dlSpBf && vm_pool_module_r9_matches_pc(pc, g_dlSpBf))
         return g_dlSpBf;
 
-    if (g_currentScreenModuleBase && vm_pool_module_r9_matches_pc(pc, g_currentScreenModuleBase))
+    idx = vm_dl_find_loaded_index_by_pc(pc);
+    if (idx >= 0)
+    {
+        if (g_vmDlCurrAppId != 0 && g_vmDlLoadedApps[idx].appId == g_vmDlCurrAppId)
+            return g_vmDlLoadedApps[idx].spBf;
+        return g_vmDlLoadedApps[idx].spBf;
+    }
+    if (g_currentScreenModuleBase &&
+        g_currentScreenModuleBase >= VM_Memory_Pool_ADDRESS &&
+        g_currentScreenModuleBase < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
+    {
         return g_currentScreenModuleBase;
-
-    moduleR9 = vm_screen_stack_lookup_module_base(vmAddedScreen);
-    if (moduleR9 && vm_pool_module_r9_matches_pc(pc, moduleR9))
-        return moduleR9;
-
-    for (u32 i = g_screenStackCount; i > 0; --i)
-    {
-        moduleR9 = g_screenStackModuleBase[i - 1];
-        if (moduleR9 && vm_pool_module_r9_matches_pc(pc, moduleR9))
-            return moduleR9;
     }
-
-    /* The screen callback layout used by some pool modules overlaps with non-battle
-       loading/transition screens. A blind battle-style R9 guess here can hijack
-       ordinary mmGame flows, so runtime switching stays with tracked context only. */
-
-    allowRememberedFallback =
-        (currentR9 >= VM_Memory_Pool_ADDRESS && currentR9 < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE) ||
-        (g_currentScreenModuleBase >= VM_Memory_Pool_ADDRESS && g_currentScreenModuleBase < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE) ||
-        (vm_screen_stack_lookup_module_base(vmAddedScreen) >= VM_Memory_Pool_ADDRESS &&
-         vm_screen_stack_lookup_module_base(vmAddedScreen) < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE);
-    if (allowRememberedFallback)
+    if (g_dlSpBf &&
+        g_dlSpBf >= VM_Memory_Pool_ADDRESS &&
+        g_dlSpBf < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
     {
-        for (u32 i = g_poolModuleR9Count; i > 0; --i)
-        {
-            moduleR9 = g_poolModuleR9s[i - 1];
-            if (moduleR9 && vm_pool_module_r9_matches_pc(pc, moduleR9))
-                return moduleR9;
-        }
+        return g_dlSpBf;
     }
-
-    moduleR9 = vm_pool_module_r9_guess_from_pc_slot64k(pc);
-    if (moduleR9)
-        return moduleR9;
-
-    codeBase = pc & ~(moduleAlign - 1u);
-    moduleR9 = codeBase + moduleR9Delta;
-    if (pc >= codeBase + 0xA818u && pc < codeBase + 0xAB1Cu &&
-        vm_pool_module_r9_matches_pc(pc, moduleR9) &&
-        vm_pool_battle_chat_context_valid(moduleR9))
-        return moduleR9;
-
     return 0;
 }
 
@@ -1744,7 +1859,7 @@ static void vm_clear_screen_state_after_quit(void)
     g_currentScreenThis = 0;
     g_currentScreenModuleBase = 0;
     g_currentScreenDataPackage = 0;
-    g_dlSpBf = 0;
+    vm_dl_reset_state();
     memset(g_poolModuleR9s, 0, sizeof(g_poolModuleR9s));
     g_poolModuleR9Count = 0;
     g_screenRootExitArmed = 0;
@@ -1853,24 +1968,27 @@ static uc_err vm_run_host_quit_cleanup(u32 exitAddr, u32 thumbExitAddr)
 
 static void scheduler_prepare_screen_call(u32 screenThisPtr)
 {
+    u32 screenFuncPtr = screenThisPtr ? screenThisPtr + 0x18 : 0;
     if (screenThisPtr != g_currentScreenThis)
     {
         g_currentScreenThis = screenThisPtr;
-        g_currentScreenModuleBase = vm_screen_stack_lookup_module_base(screenThisPtr + 0x18);
+        g_currentScreenModuleBase = vm_screen_stack_lookup_module_base(screenFuncPtr);
     }
     else if (g_currentScreenModuleBase == 0)
     {
-        g_currentScreenModuleBase = vm_screen_stack_lookup_module_base(screenThisPtr + 0x18);
+        g_currentScreenModuleBase = vm_screen_stack_lookup_module_base(screenFuncPtr);
     }
+    if (g_currentScreenModuleBase == 0)
+        g_currentScreenModuleBase = vm_dl_current_sp_bf();
     if (g_currentScreenModuleBase)
         vm_dl_note_sp_bf(g_currentScreenModuleBase, "screen-prepare");
-    u32 dataPackage = vm_screen_stack_lookup_data_package(screenThisPtr + 0x18);
+    u32 dataPackage = vm_screen_stack_lookup_data_package(screenFuncPtr);
     if (dataPackage)
     {
         u32 oldDataPackage = g_currentScreenDataPackage;
         vm_restore_data_package(dataPackage);
         g_currentScreenDataPackage = dataPackage;
-        vm_trace_screen_data_package_change("prepare-stack", screenThisPtr + 0x18,
+        vm_trace_screen_data_package_change("prepare-stack", screenFuncPtr,
                                             oldDataPackage, dataPackage, vm_current_data_package());
     }
     else
@@ -5594,7 +5712,7 @@ static void vm_reset_runtime_state_for_restart(void)
     g_currentScreenThis = 0;
     g_currentScreenModuleBase = 0;
     g_currentScreenDataPackage = 0;
-    g_dlSpBf = 0;
+    vm_dl_reset_state();
     g_screenRootExitArmed = 0;
     g_screenRootExitPending = 0;
     g_screenRootExitPendingRoot = 0;
@@ -6182,15 +6300,37 @@ static void vm_storage_date_build_path(char *path, size_t pathSize, u32 namePtr)
     snprintf(path, pathSize, "nvram/%s_storage_%s.bin", appName, storeName);
 }
 
+static bool vm_storage_date_is_login_record(const char *name)
+{
+    return name != NULL && strcmp(name, "mmorpg_LoginRecord") == 0;
+}
+
 static u32 vm_storage_date(u32 namePtr, u32 buffer, u32 len, u32 isRead)
 {
     if (buffer == 0 || len == 0 || len > 0x100000)
         return vm_set_call_result(0);
 
+    char rawName[96];
     char path[224];
+    vm_storage_read_name(namePtr, rawName, sizeof(rawName));
     vm_storage_date_build_path(path, sizeof(path), namePtr);
+    bool isLoginRecord = vm_storage_date_is_login_record(rawName);
+    u32 effectiveBuffer = buffer;
+    u32 effectiveLen = len;
 
-    u8 *tmp = SDL_malloc(len);
+    if (!isRead && isLoginRecord && len == sizeof(u32))
+    {
+        u32 recordPtr = vm_get_var(buffer);
+        if (vm_is_writable_vm_range(recordPtr, 180))
+        {
+            effectiveBuffer = recordPtr;
+            effectiveLen = 180;
+            printf("[info][storage] compat save %s slot=%08x ptr=%08x len=%u->%u\n",
+                   rawName, buffer, recordPtr, len, effectiveLen);
+        }
+    }
+
+    u8 *tmp = SDL_malloc(effectiveLen);
     if (tmp == NULL)
         return vm_set_call_result(0);
 
@@ -6205,20 +6345,25 @@ static u32 vm_storage_date(u32 namePtr, u32 buffer, u32 len, u32 isRead)
         }
 
         u32 readLen = vm_persist_read_file(path, tmp, len);
+        if (isLoginRecord && len >= 180 && readLen > 0 && readLen < 180)
+        {
+            printf("[warn][storage] ignore truncated %s len=%u path=%s\n", rawName, readLen, path);
+            readLen = 0;
+        }
         if (readLen)
             uc_mem_write(MTK, buffer, tmp, readLen);
         SDL_free(tmp);
         return vm_set_call_result(readLen ? 1 : 0);
     }
 
-    if (uc_mem_read(MTK, buffer, tmp, len) != UC_ERR_OK)
+    if (uc_mem_read(MTK, effectiveBuffer, tmp, effectiveLen) != UC_ERR_OK)
     {
         SDL_free(tmp);
         return vm_set_call_result(0);
     }
-    u32 savedLen = vm_persist_write_file(path, tmp, len);
+    u32 savedLen = vm_persist_write_file(path, tmp, effectiveLen);
     SDL_free(tmp);
-    return vm_set_call_result(savedLen == len ? 1 : 0);
+    return vm_set_call_result(savedLen == effectiveLen ? 1 : 0);
 }
 
 
@@ -8037,7 +8182,7 @@ return 4;
     else if (idx == 75)
     {
         printf("[call]vmDlGetPreAppId\n");
-        assert(0);
+        vm_set_call_result((u32)g_vmDlPreAppId);
     }
     else if (idx == 76)
     {
@@ -8056,7 +8201,9 @@ return 4;
     }
     else if (idx == 79)
     {
-        tmp1 = Global_R9;
+        tmp1 = g_dlSpBf ? g_dlSpBf : vm_dl_current_sp_bf();
+        if (tmp1 == 0)
+            tmp1 = Global_R9;
         vm_set_call_result(tmp1);
     }
     else if (idx == 80)
@@ -11119,12 +11266,9 @@ static bool hook_vm_manager_screen_func(u32 address)
         }
         if (tmp1 != 0 && acceptChange)
         {
-            if (lastAddress >= VM_Memory_Pool_ADDRESS && lastAddress < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
-            {
-                moduleBase = vm_pool_module_r9_guess_from_pc_slot64k(lastAddress);
-                if (!moduleBase)
-                    uc_reg_read(MTK, UC_ARM_REG_R9, &moduleBase);
-            }
+            moduleBase = vm_read_current_pool_r9();
+            if (!moduleBase)
+                moduleBase = vm_dl_current_sp_bf();
             if (!moduleBase)
                 moduleBase = vm_screen_stack_lookup_module_base(tmp1);
             if (moduleBase)
@@ -11156,12 +11300,9 @@ static bool hook_vm_manager_screen_func(u32 address)
             tmp2 = 0;
             tmp3 = 1;
         }
-        if (lastAddress >= VM_Memory_Pool_ADDRESS && lastAddress < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
-        {
-            moduleBase = vm_pool_module_r9_guess_from_pc_slot64k(lastAddress);
-            if (!moduleBase)
-                uc_reg_read(MTK, UC_ARM_REG_R9, &moduleBase);
-        }
+        moduleBase = vm_read_current_pool_r9();
+        if (!moduleBase)
+            moduleBase = vm_dl_current_sp_bf();
         if (tmp1 != 0 && tmp1 != vmAddedScreen)
             vm_screen_stack_preserve_active_if_needed();
         if (moduleBase)
@@ -12567,57 +12708,74 @@ static bool hook_vm_dl_load_func(u32 address)
     if (idx == 0)
     {
         printf("[call]vlDlSetCurrContextAddress\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        if (tmp2)
+            vm_dl_set_loaded_context(g_vmDlCurrAppId, tmp1 ? vm_get_var(tmp1) : 0);
+        else if (tmp1)
+            vm_set_var(tmp1, vm_dl_get_loaded_context(g_vmDlCurrAppId));
+        vm_set_call_result(0);
     }
     else if (idx == 1)
     {
         printf("[call]vlDlSetContextAddress\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        if (tmp3)
+            vm_dl_set_loaded_context((u16)tmp1, tmp2 ? vm_get_var(tmp2) : 0);
+        else if (tmp2)
+            vm_set_var(tmp2, vm_dl_get_loaded_context((u16)tmp1));
+        vm_set_call_result(0);
     }
     else if (idx == 2)
     {
         printf("[call]vlDlUnLoadCurrApp\n");
-        assert(0);
+        vm_dl_unload_loaded_app(g_vmDlCurrAppId);
+        vm_set_call_result(0);
     }
     else if (idx == 3)
     {
         printf("[call]vlDlUnLoadApp\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_dl_unload_loaded_app((u16)tmp1);
+        vm_set_call_result(0);
     }
     else if (idx == 4)
     {
         printf("[call]vmDlParseAndCopy\n");
-        assert(0);
+        vm_set_call_result(0xffffffffu);
     }
     else if (idx == 5)
     {
         printf("[call]vlDlLoadApp\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 6)
     {
         printf("[call]vlDlLoadAppEx\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 7)
     {
         printf("[call]vlDlAppIsInDl\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_set_call_result(vm_dl_find_loaded_index_by_app_id((u16)tmp1) >= 0 ? 1 : 0);
     }
     else if (idx == 8)
     {
         printf("[call]vmGetcurrInnerAppId\n");
-        assert(0);
+        vm_set_call_result((u32)g_vmDlCurrAppId);
     }
     else if (idx == 9)
     {
         printf("[call]CBInnerInit_qqIn\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 10)
     {
         printf("[call]VmGetCBEInfoByFileName\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else
     {

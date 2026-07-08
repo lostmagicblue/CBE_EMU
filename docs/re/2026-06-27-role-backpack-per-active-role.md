@@ -22,18 +22,24 @@ the role-row-only state model.
 
 ## Implementation
 
-- Role DB version is now `2`.
+- Role DB version later advanced to `4`.
 - Each role row stores:
   - `backpackItemCount`
   - `nextBackpackSeq`
-  - `backpackItems[40]` as `itemId/seq/count`
-- New roles start with an empty backpack.
-- Version-1 role DB files are migrated into version 2 by copying role data and
-  keeping an empty backpack for each existing role.
+  - `backpackItems[...]` as `itemId/seq/count`
+- New roles start with an empty backpack and initial capacity `20`.
+- Version-1 role DB files are migrated forward by copying role data and keeping
+  an empty backpack for each existing role.
+- Version-2/3 role DB files that still used the historical default `40`-slot
+  capacity are migrated to the new `20`-slot baseline, or to the nearest `5`
+  slots that still fit already-occupied rows.
 - `17/1` full backpack list and `30/21` grid bootstrap both serialize the active
   role's backpack rows.
 - Shop buy `17/2` now adds or stacks `shopId` into the active role backpack
   before returning `14/3 { seq, result }`.
+- Item `806` (`背包扩容`) expands the persisted backpack capacity by `5` per use,
+  up to `200`, and the client receives a follow-up `17/1` refresh after the
+  normal item-use success response.
 - The old `jhol_mock_player_pos.bin` path, process position cache, and legacy
   mirror writes were removed. Scene position reads/writes now use the active
   role row only.

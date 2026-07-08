@@ -43,6 +43,9 @@ static u8 g_netMockBackpackPreferRoleListAfterShopBuy = 0;
 static bool g_vm_net_mock_update_completed_reenter_pending = false;
 static char g_vm_net_mock_update_completed_name[64];
 static const char *g_vm_mock_service_active_account_id = NULL;
+static u8 g_vmNetMockFollowupResponse[65536];
+static u32 g_vmNetMockFollowupResponseLen = 0;
+static u32 g_vmNetMockFollowupResponseEventType = 7;
 
 #define VM_MOCK_SERVICE_FRAME_SIZE 20
 #define VM_MOCK_SERVICE_REQUEST_FLAG_PING 0x1u
@@ -2389,33 +2392,16 @@ static bool vm_is_scene_bootstrap_loading_overlay_caller(u32 lr)
 
 static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
 {
-    static u32 s_poolR9SwitchTraceCount = 0;
+    u32 currentR9 = 0;
     (void)size;
     (void)user_data;
 
-    u32 pc = (u32)address & ~1u;
-    u32 moduleR9 = vm_module_r9_for_pool_pc(pc);
-    u32 currentR9 = 0;
-
     uc_reg_read(uc, UC_ARM_REG_R9, &currentR9);
-    if (currentR9 && vm_pool_module_r9_matches_pc(pc, currentR9))
-        vm_dl_note_sp_bf(currentR9, "pool-current");
-
-    if (moduleR9 != 0)
+    if (currentR9 >= VM_Memory_Pool_ADDRESS &&
+        currentR9 < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
     {
-        if (currentR9 != moduleR9)
-        {
-            uc_reg_write(uc, UC_ARM_REG_R9, &moduleR9);
-            vm_dl_note_sp_bf(moduleR9, "pool-switch");
-            if (g_autotestEnabled && s_poolR9SwitchTraceCount < 64)
-            {
-                ++s_poolR9SwitchTraceCount;
-                vm_autotest_note("pool_r9_switch pc=%08x old=%08x new=%08x count=%u\n",
-                                 pc, currentR9, moduleR9, s_poolR9SwitchTraceCount);
-            }
-        }
+        vm_dl_note_sp_bf(currentR9, "pool-exec");
     }
-
 }
 
 
@@ -2889,11 +2875,15 @@ static void vm_net_mock_append_preview_u32(char *out, u32 outCap, u32 *pos, u32 
 
 enum
 {
-    VM_NET_MOCK_BACKPACK_CAPACITY = 40,
-    VM_NET_MOCK_BACKPACK_MAX_ITEMS = 40,
+    VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY = 20,
+    VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT = 200,
+    VM_NET_MOCK_BACKPACK_MAX_ITEMS = 200,
+    VM_NET_MOCK_BACKPACK_LEGACY_MAX_ITEMS = 40,
     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_ID = 800,
     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_SEQ = 1,
     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_COUNT = 5,
+    VM_NET_MOCK_BACKPACK_EXPAND_ITEM_ID = 806,
+    VM_NET_MOCK_BACKPACK_EXPAND_STEP = 5,
     VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE = 1,
     VM_NET_MOCK_SHOP_DEFAULT_ITEM_STOCK = 99,
     VM_NET_MOCK_SHOP_DEFAULT_WCOIN = 999999,
@@ -2913,7 +2903,8 @@ enum
     VM_NET_MOCK_ROLE_DB_MAX_ROLES = 5,
     VM_NET_MOCK_ROLE_DB_LEGACY_VERSION = 1,
     VM_NET_MOCK_ROLE_DB_BACKPACK_VERSION = 2,
-    VM_NET_MOCK_ROLE_DB_VERSION = 3,
+    VM_NET_MOCK_ROLE_DB_EQUIP_VERSION = 3,
+    VM_NET_MOCK_ROLE_DB_VERSION = 4,
     VM_NET_MOCK_ROLE_DESIGNATION_COUNT = 10,
     VM_NET_MOCK_ROLE_EXP_PER_LEVEL = 100,
     VM_NET_MOCK_EQUIP_SLOT_COUNT = 8,
@@ -2990,8 +2981,33 @@ typedef struct
     u8 backpackItemCount;
     u8 reserved1;
     u16 nextBackpackSeq;
-    vm_net_mock_backpack_item_state backpackItems[VM_NET_MOCK_BACKPACK_MAX_ITEMS];
+    vm_net_mock_backpack_item_state backpackItems[VM_NET_MOCK_BACKPACK_LEGACY_MAX_ITEMS];
 } vm_net_mock_role_state_v2;
+
+typedef struct
+{
+    u32 roleId;
+    char name[32];
+    u8 job;
+    u8 sex;
+    u8 backpackCapacity;
+    u8 reserved0;
+    u32 level;
+    u32 exp;
+    u32 hp;
+    u32 hpMax;
+    u32 mp;
+    u32 mpMax;
+    u32 money;
+    char scene[64];
+    u16 x;
+    u16 y;
+    u8 backpackItemCount;
+    u8 designationId;
+    u16 nextBackpackSeq;
+    u32 equippedItemIds[VM_NET_MOCK_EQUIP_SLOT_COUNT];
+    vm_net_mock_backpack_item_state backpackItems[VM_NET_MOCK_BACKPACK_LEGACY_MAX_ITEMS];
+} vm_net_mock_role_state_v3;
 
 typedef struct
 {
@@ -3030,6 +3046,15 @@ typedef struct
     u32 roleCount;
     vm_net_mock_role_state_v2 roles[VM_NET_MOCK_ROLE_DB_MAX_ROLES];
 } vm_net_mock_role_db_file_v2;
+
+typedef struct
+{
+    char magic[4];
+    u32 version;
+    u32 activeRoleId;
+    u32 roleCount;
+    vm_net_mock_role_state_v3 roles[VM_NET_MOCK_ROLE_DB_MAX_ROLES];
+} vm_net_mock_role_db_file_v3;
 
 typedef struct
 {
@@ -5323,6 +5348,79 @@ static u32 vm_net_mock_mul_capped_u32(u32 value, u32 count)
     return product > 0xffffffffull ? 0xffffffffu : (u32)product;
 }
 
+static bool vm_net_mock_item_is_backpack_expand_card(u32 itemId,
+                                                     const vm_net_mock_item_effect_catalog_item *effect)
+{
+    return itemId == VM_NET_MOCK_BACKPACK_EXPAND_ITEM_ID ||
+           (effect != NULL && effect->itemId == VM_NET_MOCK_BACKPACK_EXPAND_ITEM_ID);
+}
+
+static u32 vm_net_mock_role_backpack_expand_usable_count(const vm_net_mock_role_state *role, u32 requestedCount)
+{
+    u32 current = 0;
+    u32 room = 0;
+    u32 usable = 0;
+
+    if (role == NULL || requestedCount == 0)
+        return 0;
+    current = role->backpackCapacity;
+    if (current < VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY)
+        current = VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY;
+    if (current >= VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT)
+        return 0;
+    room = VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT - current;
+    usable = room / VM_NET_MOCK_BACKPACK_EXPAND_STEP;
+    if (room % VM_NET_MOCK_BACKPACK_EXPAND_STEP)
+        usable += 1;
+    return requestedCount < usable ? requestedCount : usable;
+}
+
+static u32 vm_net_mock_role_expand_backpack_capacity(vm_net_mock_role_state *role, u32 useCount)
+{
+    u32 applied = 0;
+    u32 newCapacity = 0;
+
+    if (role == NULL || useCount == 0)
+        return 0;
+    applied = vm_net_mock_role_backpack_expand_usable_count(role, useCount);
+    if (applied == 0)
+        return 0;
+    newCapacity = (u32)role->backpackCapacity +
+                  vm_net_mock_mul_capped_u32(VM_NET_MOCK_BACKPACK_EXPAND_STEP, applied);
+    if (newCapacity > VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT)
+        newCapacity = VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT;
+    role->backpackCapacity = (u8)newCapacity;
+    return applied;
+}
+
+static u8 vm_net_mock_role_round_backpack_capacity_for_count(u32 itemCount)
+{
+    u32 rounded = 0;
+
+    if (itemCount < VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY)
+        itemCount = VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY;
+    if (itemCount >= VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT)
+        return VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT;
+    rounded = ((itemCount + VM_NET_MOCK_BACKPACK_EXPAND_STEP - 1) /
+               VM_NET_MOCK_BACKPACK_EXPAND_STEP) *
+              VM_NET_MOCK_BACKPACK_EXPAND_STEP;
+    if (rounded > VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT)
+        rounded = VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT;
+    return (u8)rounded;
+}
+
+static void vm_net_mock_role_migrate_legacy_backpack_capacity(vm_net_mock_role_state *role)
+{
+    u32 itemCount = 0;
+
+    if (role == NULL || role->backpackCapacity != VM_NET_MOCK_BACKPACK_LEGACY_MAX_ITEMS)
+        return;
+    itemCount = role->backpackItemCount;
+    if (itemCount > VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+        itemCount = VM_NET_MOCK_BACKPACK_MAX_ITEMS;
+    role->backpackCapacity = vm_net_mock_role_round_backpack_capacity_for_count(itemCount);
+}
+
 static void vm_net_mock_role_apply_item_effect(vm_net_mock_role_state *role,
                                                u32 hp, u32 mp, u32 exp,
                                                u32 count)
@@ -5381,9 +5479,15 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
     u32 hp = 0;
     u32 mp = 0;
     u32 exp = 0;
+    u32 useCount = 0;
+    u32 consumedCount = 0;
+    u32 expandedCount = 0;
+    u8 oldCapacity = 0;
+    u8 newCapacity = 0;
     u32 remaining = 0;
     bool consumed = false;
     bool applied = false;
+    bool capacityExpanded = false;
     u8 itemInfo[64];
     u32 itemInfoLen = 0;
     u8 countInfo[32];
@@ -5397,10 +5501,12 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
         return 0;
     if (!vm_net_mock_parse_item_use_request(request, requestLen, &parsed))
         return 0;
+    useCount = parsed.count ? parsed.count : 1;
 
     role = vm_net_mock_active_role();
     if (role == NULL)
         return vm_net_mock_build_item_use_hint_response(out, outCap, "item unavailable");
+    oldCapacity = role->backpackCapacity;
 
     item = vm_net_mock_role_find_backpack_item(role, parsed.itemId, parsed.seq);
     if (item == NULL && !parsed.haveItemSelector && parsed.haveEffect)
@@ -5430,14 +5536,37 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
     if (exp == 0)
         exp = parsed.exp;
 
-    if (itemId != 0)
-        consumed = vm_net_mock_role_consume_backpack_item(role, itemId, seq, parsed.count, &remaining);
+    if (vm_net_mock_item_is_backpack_expand_card(itemId, effect))
+    {
+        consumedCount = vm_net_mock_role_backpack_expand_usable_count(role, useCount);
+        if (consumedCount == 0)
+            return vm_net_mock_build_item_use_hint_response(out, outCap, "capacity max");
+    }
+    else
+    {
+        consumedCount = useCount;
+    }
+
+    if (itemId != 0 && consumedCount != 0)
+        consumed = vm_net_mock_role_consume_backpack_item(role, itemId, seq, consumedCount, &remaining);
+
+    if (consumed && vm_net_mock_item_is_backpack_expand_card(itemId, effect))
+    {
+        expandedCount = vm_net_mock_role_expand_backpack_capacity(role, consumedCount);
+        if (expandedCount != 0)
+        {
+            capacityExpanded = true;
+            applied = true;
+        }
+    }
 
     if (consumed && (hp != 0 || mp != 0 || exp != 0))
     {
-        vm_net_mock_role_apply_item_effect(role, hp, mp, exp, parsed.count);
+        vm_net_mock_role_apply_item_effect(role, hp, mp, exp, consumedCount);
         applied = true;
     }
+
+    newCapacity = role->backpackCapacity;
 
     if (applied || consumed)
         vm_net_mock_role_db_save("item-use");
@@ -5504,14 +5633,26 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
         vm_net_mock_finish_wt_object(out, objectStart, pos);
         objectCount += 1;
     }
+    if (capacityExpanded)
+    {
+        if (!vm_net_mock_append_backpack_items_object(out, outCap, &pos))
+            return 0;
+        objectCount += 1;
+    }
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
 
-    printf("[info][network] mock_item_use item=%u seq=%u count=%u remaining=%u hp=%u mp=%u exp=%u applied=%u consumed=%u refresh=7/1+7/11 resp=%u\n",
-           itemId, seq, parsed.count, remaining, hp, mp, exp,
-           applied ? 1 : 0, consumed ? 1 : 0, pos);
-    vm_autotest_note("mock_item_use item=%u seq=%u count=%u remaining=%u hp=%u mp=%u exp=%u applied=%u consumed=%u response=7/1-use-ok+7/7-type2+7/11-info evidence=runtime:wt7/1 mmGame:0x11CE->0xD04 JianghuOL.CBE:0x1033544\n",
-                     itemId, seq, parsed.count, remaining, hp, mp, exp,
-                     applied ? 1 : 0, consumed ? 1 : 0);
+    printf("[info][network] mock_item_use item=%u seq=%u count=%u consumed=%u remaining=%u hp=%u mp=%u exp=%u cap=%u->%u expand=%u applied=%u consumed_ok=%u refresh=%s resp=%u\n",
+           itemId, seq, parsed.count, consumedCount, remaining, hp, mp, exp,
+           oldCapacity, newCapacity, expandedCount,
+           applied ? 1 : 0, consumed ? 1 : 0,
+           capacityExpanded ? "7/1+7/7+7/11+17/1-followup" : "7/1+7/7+7/11",
+           pos);
+    vm_autotest_note("mock_item_use item=%u seq=%u count=%u consumed=%u remaining=%u hp=%u mp=%u exp=%u cap=%u->%u expand=%u applied=%u consumed=%u response=%s evidence=runtime:wt7/1 mmGame:0x11CE->0xD04 JianghuOL.CBE:0x1033544\n",
+                     itemId, seq, parsed.count, consumedCount, remaining, hp, mp, exp,
+                     oldCapacity, newCapacity, expandedCount,
+                     applied ? 1 : 0, consumed ? 1 : 0,
+                     capacityExpanded ? "7/1-use-ok+7/7-type2+7/11-info+17/1-followup" :
+                                        "7/1-use-ok+7/7-type2+7/11-info");
     return pos;
 }
 
@@ -5620,7 +5761,7 @@ static bool vm_net_mock_append_backpack_items_object(u8 *out, u32 outCap, u32 *p
     u32 itemInfoLen = 0;
     u32 rowCount = 0;
     vm_net_mock_role_state *role = vm_net_mock_active_role();
-    u16 capacity = role ? role->backpackCapacity : VM_NET_MOCK_BACKPACK_CAPACITY;
+    u16 capacity = role ? role->backpackCapacity : VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY;
 
     if (out == NULL || pos == NULL)
         return false;
@@ -7477,7 +7618,7 @@ static void vm_net_mock_role_init_default_backpack(vm_net_mock_role_state *role)
     if (role == NULL)
         return;
     memset(role->backpackItems, 0, sizeof(role->backpackItems));
-    role->backpackCapacity = VM_NET_MOCK_BACKPACK_CAPACITY;
+    role->backpackCapacity = VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY;
     role->backpackItemCount = 0;
     role->nextBackpackSeq = 1;
 }
@@ -7506,7 +7647,7 @@ static void vm_net_mock_role_init_default(vm_net_mock_role_state *role)
     snprintf(role->name, sizeof(role->name), "%s", vm_net_mock_default_role_name());
     role->job = 1;
     role->sex = 0;
-    role->backpackCapacity = VM_NET_MOCK_BACKPACK_CAPACITY;
+    role->backpackCapacity = VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY;
     role->level = 1;
     role->exp = 0;
     role->hp = VM_NET_MOCK_ROLE_DEFAULT_HP;
@@ -7572,8 +7713,38 @@ static void vm_net_mock_role_copy_from_v2(vm_net_mock_role_state *dst,
     dst->backpackItemCount = src->backpackItemCount;
     dst->designationId = 0;
     dst->nextBackpackSeq = src->nextBackpackSeq;
-    memcpy(dst->backpackItems, src->backpackItems, sizeof(dst->backpackItems));
+    memcpy(dst->backpackItems, src->backpackItems, sizeof(src->backpackItems));
     vm_net_mock_role_init_default_equipment(dst);
+    vm_net_mock_role_migrate_legacy_backpack_capacity(dst);
+}
+
+static void vm_net_mock_role_copy_from_v3(vm_net_mock_role_state *dst,
+                                          const vm_net_mock_role_state_v3 *src)
+{
+    if (dst == NULL || src == NULL)
+        return;
+    memset(dst, 0, sizeof(*dst));
+    dst->roleId = src->roleId;
+    memcpy(dst->name, src->name, sizeof(dst->name));
+    dst->job = src->job;
+    dst->sex = src->sex;
+    dst->backpackCapacity = src->backpackCapacity;
+    dst->level = src->level;
+    dst->exp = src->exp;
+    dst->hp = src->hp;
+    dst->hpMax = src->hpMax;
+    dst->mp = src->mp;
+    dst->mpMax = src->mpMax;
+    dst->money = src->money;
+    memcpy(dst->scene, src->scene, sizeof(dst->scene));
+    dst->x = src->x;
+    dst->y = src->y;
+    dst->backpackItemCount = src->backpackItemCount;
+    dst->designationId = src->designationId;
+    dst->nextBackpackSeq = src->nextBackpackSeq;
+    memcpy(dst->equippedItemIds, src->equippedItemIds, sizeof(src->equippedItemIds));
+    memcpy(dst->backpackItems, src->backpackItems, sizeof(src->backpackItems));
+    vm_net_mock_role_migrate_legacy_backpack_capacity(dst);
 }
 
 static void vm_net_mock_role_normalize_backpack(vm_net_mock_role_state *role)
@@ -7585,8 +7756,10 @@ static void vm_net_mock_role_normalize_backpack(vm_net_mock_role_state *role)
     if (role == NULL)
         return;
     memset(compact, 0, sizeof(compact));
-    if (role->backpackCapacity == 0 || role->backpackCapacity > VM_NET_MOCK_BACKPACK_CAPACITY)
-        role->backpackCapacity = VM_NET_MOCK_BACKPACK_CAPACITY;
+    if (role->backpackCapacity == 0)
+        role->backpackCapacity = VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY;
+    else if (role->backpackCapacity > VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT)
+        role->backpackCapacity = VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT;
     if (role->backpackItemCount > VM_NET_MOCK_BACKPACK_MAX_ITEMS)
         role->backpackItemCount = VM_NET_MOCK_BACKPACK_MAX_ITEMS;
     if (role->backpackItemCount > role->backpackCapacity)
@@ -7631,8 +7804,10 @@ static void vm_net_mock_role_normalize(vm_net_mock_role_state *role)
         role->job = 1;
     if (role->sex > 1)
         role->sex = 0;
-    if (role->backpackCapacity == 0 || role->backpackCapacity > VM_NET_MOCK_BACKPACK_CAPACITY)
-        role->backpackCapacity = VM_NET_MOCK_BACKPACK_CAPACITY;
+    if (role->backpackCapacity == 0)
+        role->backpackCapacity = VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY;
+    else if (role->backpackCapacity > VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT)
+        role->backpackCapacity = VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT;
     if (role->designationId >= VM_NET_MOCK_ROLE_DESIGNATION_COUNT)
         role->designationId = 0;
     if (!vm_net_mock_designation_is_unlocked(role, vm_net_mock_designation_by_id(role->designationId)))
@@ -7738,6 +7913,7 @@ static void vm_net_mock_role_db_load(void)
     char path[128];
     u8 fileBuf[sizeof(vm_net_mock_role_db_file)];
     vm_net_mock_role_db_file loaded;
+    vm_net_mock_role_db_file_v3 equippedBackpackFile;
     vm_net_mock_role_db_file_v2 backpackFile;
     vm_net_mock_role_db_file_v1 legacy;
     bool loadedFromFile = false;
@@ -7773,6 +7949,28 @@ static void vm_net_mock_role_db_load(void)
             g_vm_net_mock_role_db = loaded;
             loadedFromFile = true;
         }
+        else if (readLen == sizeof(equippedBackpackFile))
+        {
+            memcpy(&equippedBackpackFile, fileBuf, sizeof(equippedBackpackFile));
+            if (memcmp(equippedBackpackFile.magic, "JHR1", 4) == 0 &&
+                equippedBackpackFile.version == VM_NET_MOCK_ROLE_DB_EQUIP_VERSION &&
+                equippedBackpackFile.roleCount <= VM_NET_MOCK_ROLE_DB_MAX_ROLES)
+            {
+                memset(&g_vm_net_mock_role_db, 0, sizeof(g_vm_net_mock_role_db));
+                memcpy(g_vm_net_mock_role_db.magic, "JHR1", 4);
+                g_vm_net_mock_role_db.version = VM_NET_MOCK_ROLE_DB_VERSION;
+                g_vm_net_mock_role_db.activeRoleId = equippedBackpackFile.activeRoleId;
+                g_vm_net_mock_role_db.roleCount = equippedBackpackFile.roleCount;
+                for (u32 i = 0; i < equippedBackpackFile.roleCount; ++i)
+                    vm_net_mock_role_copy_from_v3(&g_vm_net_mock_role_db.roles[i],
+                                                  &equippedBackpackFile.roles[i]);
+                loadedFromFile = true;
+                needsSave = true;
+                vm_autotest_note("mock_role_db_migrate version=3->4 roles=%u active=%u\n",
+                                 g_vm_net_mock_role_db.roleCount,
+                                 g_vm_net_mock_role_db.activeRoleId);
+            }
+        }
         else if (readLen == sizeof(backpackFile))
         {
             memcpy(&backpackFile, fileBuf, sizeof(backpackFile));
@@ -7790,7 +7988,7 @@ static void vm_net_mock_role_db_load(void)
                                                   &backpackFile.roles[i]);
                 loadedFromFile = true;
                 needsSave = true;
-                vm_autotest_note("mock_role_db_migrate version=2->3 roles=%u active=%u\n",
+                vm_autotest_note("mock_role_db_migrate version=2->4 roles=%u active=%u\n",
                                  g_vm_net_mock_role_db.roleCount,
                                  g_vm_net_mock_role_db.activeRoleId);
             }
@@ -7812,7 +8010,7 @@ static void vm_net_mock_role_db_load(void)
                                                   &legacy.roles[i]);
                 loadedFromFile = true;
                 needsSave = true;
-                vm_autotest_note("mock_role_db_migrate version=1->3 roles=%u active=%u\n",
+                vm_autotest_note("mock_role_db_migrate version=1->4 roles=%u active=%u\n",
                                  g_vm_net_mock_role_db.roleCount,
                                  g_vm_net_mock_role_db.activeRoleId);
             }
@@ -9340,15 +9538,31 @@ typedef struct vm_mock_service_account_state
 
 static vm_mock_service_account_state *g_vm_mock_service_accounts = NULL;
 static vm_mock_service_account_state *g_vm_mock_service_active_account = NULL;
+static u32 g_vm_mock_service_active_client_id = 0;
 
 typedef struct vm_mock_service_client_session
 {
     u32 clientId;
     char accountId[64];
+    bool onlinePresenceValid;
+    u32 onlineRoleId;
+    char onlineRoleName[32];
+    u8 onlineJob;
+    u8 onlineSex;
+    u16 onlineLevel;
+    char onlineScene[64];
+    u16 onlineX;
+    u16 onlineY;
+    u32 onlineTick;
     struct vm_mock_service_client_session *next;
 } vm_mock_service_client_session;
 
 static vm_mock_service_client_session *g_vm_mock_service_client_sessions = NULL;
+
+enum
+{
+    VM_MOCK_SERVICE_ONLINE_PRESENCE_MAX_AGE_TICKS = 300
+};
 
 static void vm_mock_service_account_state_init(vm_mock_service_account_state *state, const char *accountId)
 {
@@ -9584,7 +9798,7 @@ static vm_mock_service_account_state *vm_mock_service_account_find_or_create(con
     return state;
 }
 
-static const char *vm_mock_service_find_session_account(u32 clientId)
+static vm_mock_service_client_session *vm_mock_service_find_client_session(u32 clientId)
 {
     vm_mock_service_client_session *session = g_vm_mock_service_client_sessions;
     if (clientId == 0)
@@ -9592,10 +9806,35 @@ static const char *vm_mock_service_find_session_account(u32 clientId)
     while (session)
     {
         if (session->clientId == clientId)
-            return session->accountId;
+            return session;
         session = session->next;
     }
     return NULL;
+}
+
+static vm_mock_service_client_session *vm_mock_service_get_or_create_client_session(u32 clientId)
+{
+    vm_mock_service_client_session *session = NULL;
+    if (clientId == 0)
+        return NULL;
+    session = vm_mock_service_find_client_session(clientId);
+    if (session != NULL)
+        return session;
+    session = (vm_mock_service_client_session *)calloc(1, sizeof(*session));
+    if (session == NULL)
+        return NULL;
+    session->clientId = clientId;
+    session->next = g_vm_mock_service_client_sessions;
+    g_vm_mock_service_client_sessions = session;
+    return session;
+}
+
+static const char *vm_mock_service_find_session_account(u32 clientId)
+{
+    vm_mock_service_client_session *session = vm_mock_service_find_client_session(clientId);
+    if (clientId == 0)
+        return NULL;
+    return session ? session->accountId : NULL;
 }
 
 static void vm_mock_service_bind_session_account(u32 clientId, const char *accountId)
@@ -9603,24 +9842,70 @@ static void vm_mock_service_bind_session_account(u32 clientId, const char *accou
     vm_mock_service_client_session *session = NULL;
     if (clientId == 0 || accountId == NULL || accountId[0] == 0)
         return;
-    session = g_vm_mock_service_client_sessions;
-    while (session)
-    {
-        if (session->clientId == clientId)
-        {
-            snprintf(session->accountId, sizeof(session->accountId), "%s", accountId);
-            return;
-        }
-        session = session->next;
-    }
-    session = (vm_mock_service_client_session *)calloc(1, sizeof(*session));
+    session = vm_mock_service_get_or_create_client_session(clientId);
     if (session == NULL)
         return;
-    session->clientId = clientId;
     snprintf(session->accountId, sizeof(session->accountId), "%s", accountId);
-    session->next = g_vm_mock_service_client_sessions;
-    g_vm_mock_service_client_sessions = session;
     printf("[info][mock-service] session_bind client=%08x account=%s\n", clientId, accountId);
+}
+
+static void vm_mock_service_capture_session_presence(u32 clientId)
+{
+    vm_mock_service_client_session *session = NULL;
+    vm_net_mock_role_state *role = NULL;
+    const char *scene = NULL;
+    const char *roleScene = NULL;
+    u16 x = 0;
+    u16 y = 0;
+
+    if (clientId == 0)
+        return;
+    session = vm_mock_service_get_or_create_client_session(clientId);
+    if (session == NULL)
+        return;
+    session->onlinePresenceValid = false;
+    role = vm_net_mock_active_role();
+    if (role == NULL)
+        return;
+    roleScene = vm_net_mock_scene_name_is_safe(role->scene) ? role->scene : vm_net_mock_current_scene_name();
+    scene = roleScene;
+    x = role->x;
+    y = role->y;
+    if (g_vm_net_mock_last_moveinfo_source_valid &&
+        vm_net_mock_scene_name_is_safe(g_vm_net_mock_last_moveinfo_source_scene) &&
+        (roleScene == NULL ||
+         roleScene[0] == 0 ||
+         vm_net_mock_scene_names_equal_loose(g_vm_net_mock_last_moveinfo_source_scene, roleScene)))
+    {
+        scene = g_vm_net_mock_last_moveinfo_source_scene;
+        x = g_vm_net_mock_last_moveinfo_source_x;
+        y = g_vm_net_mock_last_moveinfo_source_y;
+    }
+    if (!vm_net_mock_scene_name_is_safe(scene) || x == 0 || y == 0)
+        return;
+    session->onlinePresenceValid = true;
+    session->onlineRoleId = role->roleId;
+    snprintf(session->onlineRoleName, sizeof(session->onlineRoleName), "%s",
+             role->name[0] ? role->name : vm_net_mock_default_role_name());
+    session->onlineJob = role->job;
+    session->onlineSex = role->sex;
+    session->onlineLevel = (u16)(role->level ? role->level : 1);
+    snprintf(session->onlineScene, sizeof(session->onlineScene), "%s", scene);
+    session->onlineX = x;
+    session->onlineY = y;
+    session->onlineTick = g_schedulerTick;
+}
+
+static bool vm_mock_service_session_presence_is_recent(const vm_mock_service_client_session *session)
+{
+    u32 age = 0;
+
+    if (session == NULL || !session->onlinePresenceValid)
+        return false;
+    if (g_schedulerTick < session->onlineTick)
+        return true;
+    age = g_schedulerTick - session->onlineTick;
+    return age <= VM_MOCK_SERVICE_ONLINE_PRESENCE_MAX_AGE_TICKS;
 }
 
 static void vm_mock_service_print_command_help(void)
@@ -12829,6 +13114,9 @@ static u32 vm_net_mock_build_role_designation23_response(const u8 *request, u32 
     return pos;
 }
 
+static bool vm_net_mock_append_scene_room_roles_object(u8 *out, u32 outCap, u32 *pos, u32 *roleNumOut);
+static bool vm_net_mock_scene_runtime_pending_without_target(void);
+
 static bool vm_net_mock_is_scene_ctrl_page_request(const u8 *request, u32 requestLen, u32 *pageOut)
 {
     u32 offset = 4;
@@ -12858,6 +13146,9 @@ static u32 vm_net_mock_build_scene_ctrl_page_response(const u8 *request, u32 req
     u32 pos = 5;
     u32 objectStart = 0;
     u32 page = 0;
+    u32 nearbyRoleNum = 0;
+    u8 objectCount = 0;
+    bool allowRoleList = false;
 
     if (outCap < pos || !vm_net_mock_is_scene_ctrl_page_request(request, requestLen, &page))
         return 0;
@@ -12868,10 +13159,28 @@ static u32 vm_net_mock_build_scene_ctrl_page_response(const u8 *request, u32 req
     if (!vm_net_mock_put_object_u32(out, outCap, &pos, "pgIdx", page))
         return 0;
     vm_net_mock_finish_wt_object(out, objectStart, pos);
-    vm_net_mock_finish_wt_packet(out, pos, 1);
-    printf("[info][network] mock_scene_ctrl_page pgIdx=%u resp=%u\n", page, pos);
-    vm_autotest_note("mock_scene_ctrl_page pgIdx=%u response=2/7 result=1 evidence=xxjh:0x103014C\n",
-                     page);
+    objectCount += 1;
+    allowRoleList = page == 0 &&
+                    !g_vm_net_mock_last_scene_change_target_valid &&
+                    !vm_net_mock_scene_runtime_pending_without_target();
+    if (allowRoleList &&
+        vm_net_mock_append_scene_room_roles_object(out, outCap, &pos, &nearbyRoleNum))
+    {
+        objectCount += 1;
+    }
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    printf("[info][network] mock_scene_ctrl_page pgIdx=%u nearby_roles=%u allow_rolelist=%u pending_target=%u pending_runtime=%u resp=%u\n",
+           page,
+           nearbyRoleNum,
+           allowRoleList ? 1u : 0u,
+           g_vm_net_mock_last_scene_change_target_valid ? 1u : 0u,
+           vm_net_mock_scene_runtime_pending_without_target() ? 1u : 0u,
+           pos);
+    vm_autotest_note("mock_scene_ctrl_page pgIdx=%u nearby_roles=%u allow_rolelist=%u response=%s evidence=JianghuOL.CBE:0x0103014C + 0x01039430\n",
+                     page,
+                     nearbyRoleNum,
+                     allowRoleList ? 1u : 0u,
+                     nearbyRoleNum > 0 ? "2/7+30/7" : "2/7");
     return pos;
 }
 
@@ -13033,33 +13342,208 @@ static bool vm_net_mock_append_scene_room_npc_object(u8 *out, u32 outCap, u32 *p
     return true;
 }
 
-static bool vm_net_mock_append_scene_room_roles_object(u8 *out, u32 outCap, u32 *pos)
+enum
+{
+    VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX = 3
+};
+
+typedef struct
+{
+    u32 actorId;
+    u16 x;
+    u16 y;
+    u8 job;
+    u8 sex;
+    u16 level;
+    const char *displayName;
+    const char *stateText;
+    const char *longLabel;
+} vm_net_mock_scene_role_seed;
+
+static const char *vm_net_mock_role_job_name_ascii(u8 job)
+{
+    switch (job)
+    {
+    case 2:
+        return "Assassin";
+    case 3:
+        return "Mage";
+    default:
+        return "Warrior";
+    }
+}
+
+static u16 vm_net_mock_offset_coord(u16 base, int delta)
+{
+    int value = (int)base + delta;
+    if (value < 16)
+        value = 16;
+    if (value > 0x7fff)
+        value = 0x7fff;
+    return (u16)value;
+}
+
+static bool vm_net_mock_scene_role_actor_id_in_use(const vm_net_mock_scene_role_seed *seeds,
+                                                   u8 count,
+                                                   u32 actorId)
+{
+    if (seeds == NULL || actorId == 0)
+        return false;
+    for (u8 i = 0; i < count; ++i)
+    {
+        if (seeds[i].actorId == actorId)
+            return true;
+    }
+    return false;
+}
+
+static u32 vm_net_mock_scene_role_actor_id_for_session(const vm_mock_service_client_session *session,
+                                                       const vm_net_mock_scene_role_seed *seeds,
+                                                       u8 count,
+                                                       const vm_net_mock_role_state *activeRole)
+{
+    u32 actorId = 0;
+    if (session == NULL)
+        return 0;
+    actorId = session->onlineRoleId;
+    if (actorId != 0 &&
+        (activeRole == NULL || actorId != activeRole->roleId) &&
+        !vm_net_mock_scene_role_actor_id_in_use(seeds, count, actorId))
+    {
+        return actorId;
+    }
+    actorId = 0x6A000000u | (session->clientId & 0x00FFFFFFu);
+    while (actorId == 0 ||
+           (activeRole != NULL && actorId == activeRole->roleId) ||
+           vm_net_mock_scene_role_actor_id_in_use(seeds, count, actorId))
+    {
+        ++actorId;
+    }
+    return actorId;
+}
+
+static u8 vm_net_mock_build_scene_role_seeds(const char *scene,
+                                             vm_net_mock_scene_role_seed *seeds,
+                                             u8 seedCap)
+{
+    static const struct
+    {
+        int dx;
+        int dy;
+    } offsets[VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX] = {
+        { 32, 0 },
+        { -40, 24 },
+        { 20, -36 },
+    };
+    u8 count = 0;
+    u16 baseX = vm_net_mock_scene_spawn_x();
+    u16 baseY = vm_net_mock_scene_spawn_y();
+    vm_net_mock_role_state *activeRole = vm_net_mock_active_role();
+    vm_mock_service_client_session *session = NULL;
+
+    if (seeds == NULL || seedCap == 0)
+        return 0;
+    memset(seeds, 0, sizeof(*seeds) * seedCap);
+    if (activeRole != NULL)
+    {
+        if (activeRole->x != 0)
+            baseX = activeRole->x;
+        if (activeRole->y != 0)
+            baseY = activeRole->y;
+    }
+    if (!vm_net_mock_scene_name_is_safe(scene))
+        return 0;
+
+    session = g_vm_mock_service_client_sessions;
+    while (session != NULL && count < seedCap)
+    {
+        if (vm_mock_service_session_presence_is_recent(session) &&
+            session->clientId != 0 &&
+            session->clientId != g_vm_mock_service_active_client_id &&
+            vm_net_mock_scene_name_is_safe(session->onlineScene) &&
+            vm_net_mock_scene_names_equal_loose(session->onlineScene, scene))
+        {
+            seeds[count].actorId = vm_net_mock_scene_role_actor_id_for_session(session,
+                                                                               seeds,
+                                                                               count,
+                                                                               activeRole);
+            seeds[count].x = session->onlineX ? session->onlineX :
+                             vm_net_mock_offset_coord(baseX, offsets[count].dx);
+            seeds[count].y = session->onlineY ? session->onlineY :
+                             vm_net_mock_offset_coord(baseY, offsets[count].dy);
+            seeds[count].job = session->onlineJob ? session->onlineJob : 1;
+            seeds[count].sex = session->onlineSex <= 1 ? session->onlineSex : 0;
+            seeds[count].level = session->onlineLevel ? session->onlineLevel : 1;
+            seeds[count].displayName = session->onlineRoleName[0] ? session->onlineRoleName : "Player";
+            seeds[count].stateText = "Online";
+            seeds[count].longLabel = "";
+            ++count;
+        }
+        session = session->next;
+    }
+    return count;
+}
+
+static bool vm_net_mock_build_scene_room_roles_blob(const char *scene,
+                                                    u8 *rolesInfo,
+                                                    u32 rolesInfoCap,
+                                                    u32 *rolesInfoLenOut,
+                                                    u32 *roleNumOut)
+{
+    vm_net_mock_scene_role_seed seeds[VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX];
+    u8 roleCount = 0;
+    u32 rolesInfoLen = 0;
+
+    if (rolesInfoLenOut)
+        *rolesInfoLenOut = 0;
+    if (roleNumOut)
+        *roleNumOut = 0;
+    if (rolesInfo == NULL || rolesInfoCap == 0)
+        return false;
+
+    roleCount = vm_net_mock_build_scene_role_seeds(scene, seeds, VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX);
+    if (roleCount == 0)
+        return false;
+    for (u8 i = 0; i < roleCount; ++i)
+    {
+        char levelText[16];
+        snprintf(levelText, sizeof(levelText), "Lv%u", seeds[i].level ? seeds[i].level : 1);
+        if (!vm_net_mock_seq_put_string(rolesInfo, rolesInfoCap, &rolesInfoLen, seeds[i].displayName) ||
+            !vm_net_mock_seq_put_string(rolesInfo, rolesInfoCap, &rolesInfoLen,
+                                        vm_net_mock_role_job_name_ascii(seeds[i].job)) ||
+            !vm_net_mock_seq_put_string(rolesInfo, rolesInfoCap, &rolesInfoLen, levelText) ||
+            !vm_net_mock_seq_put_string(rolesInfo, rolesInfoCap, &rolesInfoLen,
+                                        seeds[i].stateText ? seeds[i].stateText : "Nearby"))
+        {
+            return false;
+        }
+    }
+    if (rolesInfoLenOut)
+        *rolesInfoLenOut = rolesInfoLen;
+    if (roleNumOut)
+        *roleNumOut = roleCount;
+    return true;
+}
+
+static bool vm_net_mock_append_scene_room_roles_object(u8 *out, u32 outCap, u32 *pos, u32 *roleNumOut)
 {
     u32 objectStart = 0;
-    u8 rolesInfo[128];
+    u8 rolesInfo[512];
     u8 colNames[64];
-    char levelText[16];
     u32 rolesInfoLen = 0;
     u32 colNamesLen = 0;
-    vm_net_mock_role_state *role = vm_net_mock_active_role();
-    const char *roleName = role ? role->name : vm_net_mock_default_role_name();
-    const char *jobName = "Warrior";
-    u32 level = role ? role->level : 1;
+    u32 roleNum = 0;
+    const char *scene = vm_net_mock_current_scene_name();
     static const char *const roleColumns[] = {"name", "job", "level", "state"};
-    if (role && role->job == 2)
-        jobName = "Assassin";
-    else if (role && role->job == 3)
-        jobName = "Mage";
-    snprintf(levelText, sizeof(levelText), "Lv%u", level);
+    if (roleNumOut)
+        *roleNumOut = 0;
     if (!vm_net_mock_seq_put_string_list(colNames, sizeof(colNames), &colNamesLen, roleColumns, 4))
         return false;
-    if (!vm_net_mock_seq_put_string(rolesInfo, sizeof(rolesInfo), &rolesInfoLen, roleName))
-        return false;
-    if (!vm_net_mock_seq_put_string(rolesInfo, sizeof(rolesInfo), &rolesInfoLen, jobName))
-        return false;
-    if (!vm_net_mock_seq_put_string(rolesInfo, sizeof(rolesInfo), &rolesInfoLen, levelText))
-        return false;
-    if (!vm_net_mock_seq_put_string(rolesInfo, sizeof(rolesInfo), &rolesInfoLen, "Ready"))
+    if (!vm_net_mock_build_scene_room_roles_blob(scene,
+                                                 rolesInfo,
+                                                 sizeof(rolesInfo),
+                                                 &rolesInfoLen,
+                                                 &roleNum))
         return false;
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 0x1e, 7, &objectStart))
         return false;
@@ -13069,11 +13553,13 @@ static bool vm_net_mock_append_scene_room_roles_object(u8 *out, u32 outCap, u32 
         return false;
     if (!vm_net_mock_put_object_raw(out, outCap, pos, "colnames", colNames, (u16)colNamesLen))
         return false;
-    if (!vm_net_mock_put_object_u8(out, outCap, pos, "rolenum", 1))
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "rolenum", (u8)roleNum))
         return false;
     if (!vm_net_mock_put_object_raw(out, outCap, pos, "rolesinfo", rolesInfo, (u16)rolesInfoLen))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    if (roleNumOut)
+        *roleNumOut = roleNum;
     return true;
 }
 
@@ -13161,7 +13647,7 @@ static u32 vm_net_mock_build_group_type1_response(const u8 *request, u32 request
         return 0;
     if (hasType1 && includeRoomNpc)
         objectCount += 1;
-    if (hasType1 && includeRoomRoles && !vm_net_mock_append_scene_room_roles_object(out, outCap, &pos))
+    if (hasType1 && includeRoomRoles && !vm_net_mock_append_scene_room_roles_object(out, outCap, &pos, NULL))
         return 0;
     if (hasType1 && includeRoomRoles)
         objectCount += 1;
@@ -14274,6 +14760,7 @@ static u32 vm_net_mock_build_mmgame_scene_transfer_followup_response(const u8 *r
     u32 pos = 5;
     u8 objectCount = 0;
     vm_net_mock_scene_change_target target;
+    const char *currentScene = NULL;
     char missingResource[64];
     bool resourcesReady = false;
 
@@ -14324,6 +14811,34 @@ static u32 vm_net_mock_build_mmgame_scene_transfer_followup_response(const u8 *r
                                                                    sizeof(missingResource));
     }
     g_vm_net_mock_last_scene_change_target = target;
+    currentScene = vm_net_mock_current_scene_name();
+    if (resourcesReady &&
+        currentScene != NULL &&
+        vm_net_mock_scene_names_equal_loose(currentScene, target.scene) &&
+        vm_net_mock_is_recent_completed_scene_name(currentScene, 90))
+    {
+        u32 ackLen = 0;
+
+        g_vm_net_mock_last_scene_change_target_valid = false;
+        g_vm_net_mock_teleport_stone_subtype3_ack_sent = false;
+        g_vm_net_mock_teleport_stone_map_enter_pending = false;
+        g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+        ackLen = vm_net_mock_build_scene_default_event_response(out, outCap);
+        if (ackLen == 0)
+            return 0;
+        printf("[info][network] mock_mmgame_scene_transfer_repeat_ack scene=%s pos=(%u,%u) resp=%u age=%u\n",
+               target.scene,
+               target.x,
+               target.y,
+               ackLen,
+               g_schedulerTick - g_vm_net_mock_last_completed_scene_change_tick);
+        vm_autotest_note("mock_mmgame_scene_transfer_repeat_ack scene=%s pos=(%u,%u) response=25/5-ack-only age=%u\n",
+                         target.scene,
+                         target.x,
+                         target.y,
+                         g_schedulerTick - g_vm_net_mock_last_completed_scene_change_tick);
+        return ackLen;
+    }
 
     if (!vm_net_mock_append_scene_resource_followup_objects(out, outCap, &pos, &objectCount,
                                                            true, true, true, true,
@@ -14527,6 +15042,8 @@ static bool vm_net_mock_append_taskaction_empty14_object(u8 *out, u32 outCap, u3
     return true;
 }
 
+static const char *vm_net_mock_actor_resource_name(u8 actorJob, u8 actorSex);
+
 static bool vm_net_mock_append_actor_other_empty10_object(u8 *out, u32 outCap, u32 *pos)
 {
     u32 objectStart = 0;
@@ -14535,9 +15052,96 @@ static bool vm_net_mock_append_actor_other_empty10_object(u8 *out, u32 outCap, u
         return false;
     if (!vm_net_mock_put_object_u32(out, outCap, pos, "othernum", 0))
         return false;
-    if (!vm_net_mock_put_object_blob(out, outCap, pos, "otherinfo", NULL, 0))
+    if (!vm_net_mock_put_object_raw(out, outCap, pos, "otherinfo", NULL, 0))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
+static void vm_net_mock_copy_scene_node_label(const char *src, char *dst, u32 dstCap, u32 maxBytes)
+{
+    u32 copyLen = 0;
+
+    if (dst == NULL || dstCap == 0)
+        return;
+    memset(dst, 0, dstCap);
+    if (src == NULL || src[0] == 0 || maxBytes == 0)
+        return;
+    copyLen = vm_net_mock_shop_safe_name_len((const u8 *)src, (u32)strlen(src), maxBytes);
+    if (copyLen >= dstCap)
+        copyLen = dstCap - 1;
+    memcpy(dst, src, copyLen);
+    dst[copyLen] = 0;
+}
+
+static bool vm_net_mock_seq_put_actor_other_scene_role(u8 *out, u32 outCap, u32 *pos,
+                                                       const vm_net_mock_scene_role_seed *seed)
+{
+    const char *actorResource = NULL;
+    const char *shortLabel = NULL;
+    const char *longLabel = NULL;
+    char shortLabelBuf[16];
+    char longLabelBuf[32];
+
+    if (seed == NULL)
+        return false;
+    actorResource = vm_net_mock_actor_resource_name(seed->job, seed->sex);
+    shortLabel = seed->displayName ? seed->displayName : "Nearby";
+    longLabel = seed->longLabel ? seed->longLabel : "";
+    vm_net_mock_copy_scene_node_label(shortLabel, shortLabelBuf, sizeof(shortLabelBuf), 9);
+    vm_net_mock_copy_scene_node_label(longLabel, longLabelBuf, sizeof(longLabelBuf), 19);
+
+    return vm_net_mock_seq_put_u32(out, outCap, pos, seed->actorId) &&
+           vm_net_mock_seq_put_u8(out, outCap, pos, seed->job > 0 ? (u8)(seed->job - 1) : 0) &&
+           vm_net_mock_seq_put_u8(out, outCap, pos, (u8)(seed->sex + 1)) &&
+           vm_net_mock_seq_put_string(out, outCap, pos, actorResource) &&
+           vm_net_mock_seq_put_u8(out, outCap, pos, (u8)(seed->x / 16u)) &&
+           vm_net_mock_seq_put_u8(out, outCap, pos, (u8)(seed->y / 16u)) &&
+           vm_net_mock_seq_put_string(out, outCap, pos, shortLabelBuf) &&
+           vm_net_mock_seq_put_string(out, outCap, pos, longLabelBuf) &&
+           vm_net_mock_seq_put_i16(out, outCap, pos, seed->x) &&
+           vm_net_mock_seq_put_i16(out, outCap, pos, seed->y);
+}
+
+static bool vm_net_mock_append_actor_other_scene_roles10_object(u8 *out, u32 outCap, u32 *pos,
+                                                               const char *scene,
+                                                               u32 *roleCountOut,
+                                                               u32 *otherInfoLenOut)
+{
+    vm_net_mock_scene_role_seed seeds[VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX];
+    u8 otherInfo[512];
+    u32 objectStart = 0;
+    u32 otherInfoLen = 0;
+    u8 roleCount = 0;
+
+    if (roleCountOut)
+        *roleCountOut = 0;
+    if (otherInfoLenOut)
+        *otherInfoLenOut = 0;
+
+    roleCount = vm_net_mock_build_scene_role_seeds(scene, seeds, VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX);
+    if (roleCount == 0)
+        return false;
+    memset(otherInfo, 0, sizeof(otherInfo));
+    for (u8 i = 0; i < roleCount; ++i)
+    {
+        if (!vm_net_mock_seq_put_actor_other_scene_role(otherInfo, sizeof(otherInfo),
+                                                        &otherInfoLen, &seeds[i]))
+        {
+            return false;
+        }
+    }
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 2, 10, &objectStart))
+        return false;
+    if (!vm_net_mock_put_object_u32(out, outCap, pos, "othernum", roleCount))
+        return false;
+    if (!vm_net_mock_put_object_raw(out, outCap, pos, "otherinfo", otherInfo, (u16)otherInfoLen))
+        return false;
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    if (roleCountOut)
+        *roleCountOut = roleCount;
+    if (otherInfoLenOut)
+        *otherInfoLenOut = otherInfoLen;
     return true;
 }
 
@@ -14795,6 +15399,8 @@ static u32 vm_net_mock_build_actor_other_only10_response(const u8 *request, u32 
     u32 pos = 5;
     u8 objectCount = 0;
     u8 requestType = 0;
+    u32 nearbyRoleCount = 0;
+    u32 nearbyOtherInfoLen = 0;
     bool hasType = false;
     bool allowDirectNpcOtherInfo = false;
 
@@ -14823,6 +15429,55 @@ static u32 vm_net_mock_build_actor_other_only10_response(const u8 *request, u32 
             return 0;
         vm_net_mock_finish_wt_packet(out, pos, 1);
         return pos;
+    }
+
+    if (hasType && requestType == 1)
+    {
+        const char *scene = vm_net_mock_current_scene_name();
+        if (g_vm_net_mock_last_scene_change_target_valid ||
+            vm_net_mock_scene_runtime_pending_without_target())
+        {
+            if (!vm_net_mock_append_actor_other_empty10_object(out, outCap, &pos))
+                return 0;
+            vm_net_mock_finish_wt_packet(out, pos, 1);
+            printf("[info][network] mock_actor_other_roles_defer scene=%s type=%u pending_target=%u pending_runtime=%u resp=%u\n",
+                   scene ? scene : "-",
+                   requestType,
+                   g_vm_net_mock_last_scene_change_target_valid ? 1u : 0u,
+                   vm_net_mock_scene_runtime_pending_without_target() ? 1u : 0u,
+                   pos);
+            vm_autotest_note("mock_actor_other_roles_defer scene=%s type=%u pending_target=%u pending_runtime=%u response=2/10-empty-defer\n",
+                             scene ? scene : "-",
+                             requestType,
+                             g_vm_net_mock_last_scene_change_target_valid ? 1u : 0u,
+                             vm_net_mock_scene_runtime_pending_without_target() ? 1u : 0u);
+            return pos;
+        }
+        if (!vm_net_mock_append_actor_other_scene_roles10_object(out,
+                                                                 outCap,
+                                                                 &pos,
+                                                                 scene,
+                                                                 &nearbyRoleCount,
+                                                                 &nearbyOtherInfoLen))
+        {
+            pos = 5;
+        }
+        else if (nearbyRoleCount > 0)
+        {
+            vm_net_mock_finish_wt_packet(out, pos, 1);
+            printf("[info][network] mock_actor_other_roles scene=%s type=%u roles=%u otherinfo_len=%u resp=%u\n",
+                   scene ? scene : "-",
+                   requestType,
+                   nearbyRoleCount,
+                   nearbyOtherInfoLen,
+                   pos);
+            vm_autotest_note("mock_actor_other_roles scene=%s type=%u roles=%u otherinfo_len=%u response=2/10 evidence=JianghuOL.CBE:0x01012958\n",
+                             scene ? scene : "-",
+                             requestType,
+                             nearbyRoleCount,
+                             nearbyOtherInfoLen);
+            return pos;
+        }
     }
 
     allowDirectNpcOtherInfo = hasType &&
@@ -19252,6 +19907,7 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     u32 sceneNpcActorInfoLen = 0;
     u32 sceneNpcActorId = 0;
     const char *currentScene = NULL;
+    bool startupDirectSceneEnter = false;
     vm_net_mock_scene_change_target downloadedTarget;
     bool useDownloadedTarget = false;
     if (outCap < pos || !vm_net_mock_is_scene_resource_followup_request(request, requestLen))
@@ -19260,6 +19916,38 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     currentScene = vm_net_mock_current_scene_name();
     includeSkillBooks = vm_net_mock_request_contains_object(request, requestLen, 1, 0x0c, 1) &&
                         vm_net_mock_request_contains_object(request, requestLen, 1, 7, 42);
+    if (!g_vm_net_mock_last_scene_change_target_valid &&
+        currentScene != NULL &&
+        vm_net_mock_is_recent_completed_scene_name(currentScene, 90))
+    {
+        /*
+         * Runtime repeat after visible scene entry:
+         * - the client can re-emit the full WT49 resource/task/other request
+         *   after the same scene has already completed;
+         * - appending another trailing 30/1 here re-enters the same scene
+         *   shell and shows the extra loading pass the user observes.
+         *
+         * Keep the requested resource/task objects, but acknowledge this as a
+         * post-enter refresh only. The scene is already live on screen.
+         */
+        if (!vm_net_mock_append_scene_resource_followup_objects(out, outCap, &pos, &objectCount,
+                                                               includeSkillBooks, true, true, true,
+                                                               false, false, false))
+        {
+            return 0;
+        }
+        vm_net_mock_finish_wt_packet(out, pos, objectCount);
+        printf("[info][network] mock_scene_resource_followup_repeat_ack scene=%s objects=%u resp=%u age=%u\n",
+               currentScene,
+               objectCount,
+               pos,
+               g_schedulerTick - g_vm_net_mock_last_completed_scene_change_tick);
+        vm_autotest_note("mock_scene_resource_followup_repeat_ack scene=%s objects=%u response=resource-followup-no-30/1 age=%u\n",
+                         currentScene,
+                         objectCount,
+                         g_schedulerTick - g_vm_net_mock_last_completed_scene_change_tick);
+        return pos;
+    }
     hasActorOtherRequestType = vm_net_mock_get_object_u8_field(request, requestLen, "Type", &actorOtherRequestType);
     if (g_vm_net_mock_last_scene_change_target_valid)
     {
@@ -19292,6 +19980,8 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
                          downloadedTarget.scene, downloadedTarget.x, downloadedTarget.y);
         return pos;
     }
+    startupDirectSceneEnter = !g_vm_net_mock_last_scene_change_target_valid &&
+                              !g_vm_net_mock_last_completed_scene_change_target_valid;
     sceneSupportsActorOtherNpcSeed = vm_net_mock_scene_supports_actor_other_npc_seed(currentScene);
     /*
      * Runtime evidence from the latest manual runs:
@@ -19413,6 +20103,29 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     }
 
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    if (startupDirectSceneEnter &&
+        !keepBusinessGate &&
+        currentScene != NULL &&
+        currentScene[0] != 0)
+    {
+        vm_net_mock_scene_change_target target;
+        u16 targetX = vm_net_mock_scene_spawn_x();
+        u16 targetY = vm_net_mock_scene_spawn_y();
+
+        memset(&target, 0, sizeof(target));
+        snprintf(target.scene, sizeof(target.scene), "%s", currentScene);
+        if (!vm_net_mock_read_current_player_grid(NULL, NULL, &targetX, &targetY, NULL, NULL))
+            vm_net_mock_adjust_safe_player_pos_for_scene(currentScene, &targetX, &targetY);
+        target.x = targetX;
+        target.y = targetY;
+        target.mapType = 2;
+        target.exitId = 0;
+        target.hasSceEntry = true;
+        target.needsSceneDownload = false;
+        vm_net_mock_mark_direct_scene_enter_completed(&target, "scene-resource-followup-startup");
+        vm_net_mock_save_player_pos_state(target.scene, target.x, target.y,
+                                          "scene-resource-followup-startup");
+    }
     if (actorOtherNpcSeedInFollowup)
     {
         g_vm_net_mock_scene_moveinfo_npc_pending = false;
@@ -20338,7 +21051,7 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
     u32 actorSummaryStatus = 0;
     u8 actorBackpackCapacity = vm_net_mock_env_u8("CBE_ACTOR_BACKPACK_CAPACITY",
                                                    role ? role->backpackCapacity :
-                                                   VM_NET_MOCK_BACKPACK_CAPACITY);
+                                                   VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY);
     u8 actorStateByte1 = vm_net_mock_env_u8("CBE_ACTOR_STATE_BYTE1", 0);
     u8 actorTargetX = 12;
     u8 actorTargetY = 10;
@@ -21569,6 +22282,12 @@ static bool vm_net_mock_object_is_split_safe(const vm_net_mock_request_object *o
 
 static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out, u32 outCap);
 
+static void vm_net_mock_clear_followup_response(void)
+{
+    g_vmNetMockFollowupResponseLen = 0;
+    g_vmNetMockFollowupResponseEventType = 7;
+}
+
 static u32 vm_net_mock_build_single_object_request(const vm_net_mock_request_object *object, u8 *out, u32 outCap)
 {
     u32 len = 0;
@@ -22324,6 +23043,74 @@ static u32 vm_net_mock_sync_response_to_vm(void)
     return g_netMockResponseVmPtr;
 }
 
+static bool vm_net_mock_extract_item_use_backpack_followup(u8 *response,
+                                                           u32 *responseLen,
+                                                           u8 *followOut,
+                                                           u32 followCap,
+                                                           u32 *followLenOut)
+{
+    u32 offset = 4;
+    u32 primaryPos = 5;
+    u32 followPos = 5;
+    u8 primaryCount = 0;
+    u8 followCount = 0;
+    bool haveItemUse = false;
+    vm_net_mock_request_object object;
+
+    if (followLenOut)
+        *followLenOut = 0;
+    if (response == NULL || responseLen == NULL || *responseLen < 10 ||
+        response[0] != 'W' || response[1] != 'T' || followOut == NULL || followCap < 5)
+    {
+        return false;
+    }
+
+    while (offset + 5 <= *responseLen && vm_net_mock_next_request_object(response, *responseLen, &offset, &object))
+    {
+        if (object.major == 1 && object.kind == 7 && object.subtype == 1)
+            haveItemUse = true;
+        if (object.major == 1 && object.kind == 17 && object.subtype == 1)
+            ++followCount;
+        else
+            ++primaryCount;
+    }
+    if (offset != *responseLen || !haveItemUse || followCount == 0 || primaryCount == 0)
+        return false;
+
+    offset = 4;
+    primaryPos = 5;
+    followPos = 5;
+    primaryCount = 0;
+    followCount = 0;
+    while (offset + 5 <= *responseLen)
+    {
+        u32 objectStart = offset;
+        u32 objectLen = 0;
+        if (!vm_net_mock_next_request_object(response, *responseLen, &offset, &object))
+            return false;
+        objectLen = offset - objectStart;
+        if (object.major == 1 && object.kind == 17 && object.subtype == 1)
+        {
+            if (followPos + objectLen > followCap || followCount == 0xff)
+                return false;
+            memcpy(followOut + followPos, response + objectStart, objectLen);
+            followPos += objectLen;
+            ++followCount;
+            continue;
+        }
+        memmove(response + primaryPos, response + objectStart, objectLen);
+        primaryPos += objectLen;
+        ++primaryCount;
+    }
+
+    vm_net_mock_finish_wt_packet(response, primaryPos, primaryCount);
+    vm_net_mock_finish_wt_packet(followOut, followPos, followCount);
+    *responseLen = primaryPos;
+    if (followLenOut)
+        *followLenOut = followPos;
+    return true;
+}
+
 static u32 vm_net_mock_sync_buffer_to_vm(const u8 *buffer, u32 bufferLen)
 {
     u32 responsePtr = 0;
@@ -22738,6 +23525,7 @@ static int vm_net_mock_remote_request(const u8 *request,
         *responseEventTypeOut = 7;
     if (closeAfterDataOut)
         *closeAfterDataOut = false;
+    vm_net_mock_clear_followup_response();
     if (request == NULL || requestLen == 0 || response == NULL || responseCap == 0)
         return 0;
     if (!vm_mock_service_connect(g_mockServiceHost, g_mockServicePort, &sock))
@@ -22787,6 +23575,14 @@ static int vm_net_mock_remote_request(const u8 *request,
     }
 
     vm_mock_service_socket_close(sock);
+    if (responseEventType == 7)
+    {
+        (void)vm_net_mock_extract_item_use_backpack_followup(response,
+                                                             &responseLen,
+                                                             g_vmNetMockFollowupResponse,
+                                                             sizeof(g_vmNetMockFollowupResponse),
+                                                             &g_vmNetMockFollowupResponseLen);
+    }
     g_netLastHandledValid = 1;
     g_netLastHandledResponseLen = responseLen;
     snprintf(g_netLastHandledSource, sizeof(g_netLastHandledSource),
@@ -22980,6 +23776,7 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
     }
 
     g_schedulerTick = scheduler_get_tick_ms() / VM_SCHED_FRAME_MS;
+    g_vm_mock_service_active_client_id = requestMeta.clientId;
     responseLen = vm_net_mock_process_request_bytes(0,
                                                     requestBuffer + requestMetaLen,
                                                     payloadLen,
@@ -22988,12 +23785,16 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
                                                     &responseEventType,
                                                     &closeAfterData);
     if (accountState != NULL)
+    {
+        vm_mock_service_capture_session_presence(requestMeta.clientId);
         vm_mock_service_account_capture(accountState);
+    }
     memset(g_vm_mock_service_login_issue_username, 0, sizeof(g_vm_mock_service_login_issue_username));
     memset(g_vm_mock_service_login_issue_password, 0, sizeof(g_vm_mock_service_login_issue_password));
     g_vm_mock_service_login_issue_result = 0;
     g_vm_mock_service_active_account = NULL;
     g_vm_mock_service_active_account_id = NULL;
+    g_vm_mock_service_active_client_id = 0;
     if (closeAfterData)
         responseFlags |= VM_MOCK_SERVICE_RESPONSE_FLAG_CLOSE_AFTER_DATA;
 
@@ -23169,9 +23970,33 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
     if (channel && channel->callback)
     {
         scheduler_queue_net_event(responseEventType, responsePtr, g_netMockResponseLen, g_netMockResponseLen, channel->callback, channel->context);
-        printf("[info][network] net_queue_data connect=%u event=%u resp=%u cb=%08x ctx=%08x depth=%u\n",
+        printf("[info][network] net_queue_data connect=%u event=%u resp=%u source=%s cb=%08x ctx=%08x depth=%u\n",
                connectId, responseEventType, g_netMockResponseLen,
+               g_netLastHandledValid ? g_netLastHandledSource : "-",
                channel->callback, channel->context, g_netTaskDispatchDepth);
+        if (g_vmNetMockFollowupResponseLen != 0)
+        {
+            u32 followupPtr = vm_net_mock_sync_buffer_to_vm(g_vmNetMockFollowupResponse,
+                                                            g_vmNetMockFollowupResponseLen);
+            if (followupPtr != 0)
+            {
+                scheduler_queue_net_event(g_vmNetMockFollowupResponseEventType,
+                                          followupPtr,
+                                          g_vmNetMockFollowupResponseLen,
+                                          g_vmNetMockFollowupResponseLen,
+                                          channel->callback,
+                                          channel->context);
+                printf("[info][network] net_queue_followup connect=%u event=%u resp=%u source=%s cb=%08x ctx=%08x depth=%u\n",
+                       connectId,
+                       g_vmNetMockFollowupResponseEventType,
+                       g_vmNetMockFollowupResponseLen,
+                       g_netLastHandledValid ? g_netLastHandledSource : "-",
+                       channel->callback,
+                       channel->context,
+                       g_netTaskDispatchDepth);
+            }
+            vm_net_mock_clear_followup_response();
+        }
         if (closeAfterData)
         {
             scheduler_queue_net_event(9, 0, 0, 0, channel->callback, channel->context);

@@ -143,7 +143,7 @@ u8 backpackItemCount
 u8 reserved
 u16 nextBackpackSeq
 equippedItemIds[8]
-backpackItems[40]:
+backpackItems[200]:
   u32 itemId
   u16 seq
   u16 reserved
@@ -159,7 +159,7 @@ job = 1
 sex = 0
 hp/mp = 120/100
 money = 1000
-backpackCapacity = 40
+backpackCapacity = 20
 scene = c00蓬莱仙岛_01.sce (Penglai TongQueTai)
 position = 216,216
 backpack = empty
@@ -167,11 +167,12 @@ nextBackpackSeq = 1
 equippedItemIds[0] = 1001
 ```
 
-Version 1 role DB files are upgraded in-place to version 3 by copying existing
+Version 1 role DB files are upgraded in-place to version 4 by copying existing
 role fields, keeping an empty backpack for each role, and assigning starter
-equipment. Version 2 files migrate to version 3 by keeping the existing
-backpack and adding equipment slots. The old `nvram/jhol_mock_player_pos.bin`
-mirror is no longer read or written.
+equipment. Version 2 and 3 files migrate to version 4 by keeping the existing
+backpack/equipment rows while normalizing the old default `40`-slot backpack to
+the new `20`-slot baseline whenever that does not discard occupied rows. The
+old `nvram/jhol_mock_player_pos.bin` mirror is no longer read or written.
 
 ## Server Behavior
 
@@ -247,6 +248,10 @@ Backpack:
 - backpack UI `17/1` emits the active role's backpack rows and capacity.
 - NPC/shop buy `17/2` adds or stacks the purchased item into the active role
   before returning `14/3 { seq, result }`.
+- item `806` (`背包扩容`) consumes one card per use, increases persisted
+  capacity by `5`, and caps at `200`. The server follows the normal item-use
+  success packet with a separate `17/1` refresh so the client re-reads the new
+  capacity through its backpack parser.
 
 Battle:
 
