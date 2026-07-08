@@ -238,8 +238,8 @@ Title role list:
 
 Money sync:
 
-- shop `coolmoney`, group/type `money`, and generic game-type `money` read the
-  active role money.
+- shop `coolmoney` reads the active role `wcoin` balance.
+- group/type `money` and generic game-type `money` read the active role money.
 
 Backpack:
 

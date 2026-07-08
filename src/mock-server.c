@@ -38,7 +38,6 @@ static u8 g_netMockShop17ListPending = 0;
 static u32 g_netMockTitleServerListTick = 0;
 static u32 g_netMockTitleServerSelectTick = 0;
 static u32 g_netMockTitleSelectedServerId = 0;
-static u32 g_netMockShopWCoinBalance = 0;
 static u8 g_netMockBackpackPreferRoleListAfterShopBuy = 0;
 static bool g_vm_net_mock_update_completed_reenter_pending = false;
 static char g_vm_net_mock_update_completed_name[64];
@@ -2886,8 +2885,6 @@ enum
     VM_NET_MOCK_BACKPACK_EXPAND_STEP = 5,
     VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE = 1,
     VM_NET_MOCK_SHOP_DEFAULT_ITEM_STOCK = 99,
-    VM_NET_MOCK_SHOP_LEGACY_DEFAULT_WCOIN = 999999,
-    VM_NET_MOCK_SHOP_DEFAULT_WCOIN = 999999999,
     VM_NET_MOCK_SHOP_PAGE_SIZE = 10,
     VM_NET_MOCK_SHOP_SECRET_MAX_ITEMS = 8,
     VM_NET_MOCK_SHOP_EQUIP_CATEGORY_MAX_ITEMS = 80,
@@ -2905,7 +2902,8 @@ enum
     VM_NET_MOCK_ROLE_DB_LEGACY_VERSION = 1,
     VM_NET_MOCK_ROLE_DB_BACKPACK_VERSION = 2,
     VM_NET_MOCK_ROLE_DB_EQUIP_VERSION = 3,
-    VM_NET_MOCK_ROLE_DB_VERSION = 4,
+    VM_NET_MOCK_ROLE_DB_SHOP_WCOIN_VERSION = 4,
+    VM_NET_MOCK_ROLE_DB_VERSION = 5,
     VM_NET_MOCK_ROLE_DESIGNATION_COUNT = 10,
     VM_NET_MOCK_ROLE_EXP_PER_LEVEL = 100,
     VM_NET_MOCK_EQUIP_SLOT_COUNT = 8,
@@ -2951,6 +2949,7 @@ typedef struct
     u32 mp;
     u32 mpMax;
     u32 money;
+    u32 wcoin;
     char scene[64];
     u16 x;
     u16 y;
@@ -2960,6 +2959,31 @@ typedef struct
     u32 equippedItemIds[VM_NET_MOCK_EQUIP_SLOT_COUNT];
     vm_net_mock_backpack_item_state backpackItems[VM_NET_MOCK_BACKPACK_MAX_ITEMS];
 } vm_net_mock_role_state;
+
+typedef struct
+{
+    u32 roleId;
+    char name[32];
+    u8 job;
+    u8 sex;
+    u8 backpackCapacity;
+    u8 reserved0;
+    u32 level;
+    u32 exp;
+    u32 hp;
+    u32 hpMax;
+    u32 mp;
+    u32 mpMax;
+    u32 money;
+    char scene[64];
+    u16 x;
+    u16 y;
+    u8 backpackItemCount;
+    u8 designationId;
+    u16 nextBackpackSeq;
+    u32 equippedItemIds[VM_NET_MOCK_EQUIP_SLOT_COUNT];
+    vm_net_mock_backpack_item_state backpackItems[VM_NET_MOCK_BACKPACK_MAX_ITEMS];
+} vm_net_mock_role_state_v4;
 
 typedef struct
 {
@@ -3063,6 +3087,15 @@ typedef struct
     u32 version;
     u32 activeRoleId;
     u32 roleCount;
+    vm_net_mock_role_state_v4 roles[VM_NET_MOCK_ROLE_DB_MAX_ROLES];
+} vm_net_mock_role_db_file_v4;
+
+typedef struct
+{
+    char magic[4];
+    u32 version;
+    u32 activeRoleId;
+    u32 roleCount;
     vm_net_mock_role_state roles[VM_NET_MOCK_ROLE_DB_MAX_ROLES];
 } vm_net_mock_role_db_file;
 
@@ -3082,6 +3115,9 @@ typedef struct
     u32 accountCount;
     vm_mock_service_account_record accounts[VM_MOCK_SERVICE_ACCOUNT_DB_MAX_ACCOUNTS];
 } vm_mock_service_account_db_file;
+
+static vm_net_mock_role_state *vm_net_mock_active_role(void);
+static u32 vm_net_mock_role_wcoin_balance(const vm_net_mock_role_state *role);
 
 typedef struct
 {
@@ -4822,10 +4858,7 @@ static bool vm_net_mock_append_shop_open_status14_object(u8 *out, u32 outCap, u3
 
 static u32 vm_net_mock_shop_wcoin_balance(void)
 {
-    if (g_netMockShopWCoinBalance == 0 ||
-        g_netMockShopWCoinBalance == VM_NET_MOCK_SHOP_LEGACY_DEFAULT_WCOIN)
-        g_netMockShopWCoinBalance = VM_NET_MOCK_SHOP_DEFAULT_WCOIN;
-    return g_netMockShopWCoinBalance;
+    return vm_net_mock_role_wcoin_balance(vm_net_mock_active_role());
 }
 
 static bool vm_net_mock_append_shop_money4_object(u8 *out, u32 outCap, u32 *pos)
@@ -7677,6 +7710,7 @@ static void vm_net_mock_role_init_default(vm_net_mock_role_state *role)
     role->mp = VM_NET_MOCK_ROLE_DEFAULT_MP;
     role->mpMax = VM_NET_MOCK_ROLE_DEFAULT_MP;
     role->money = VM_NET_MOCK_ROLE_DEFAULT_MONEY;
+    role->wcoin = 0;
     snprintf(role->scene, sizeof(role->scene), "%s", vm_net_mock_role_initial_scene_name());
     role->x = VM_NET_MOCK_ROLE_INITIAL_X;
     role->y = VM_NET_MOCK_ROLE_INITIAL_Y;
@@ -7767,6 +7801,35 @@ static void vm_net_mock_role_copy_from_v3(vm_net_mock_role_state *dst,
     memcpy(dst->equippedItemIds, src->equippedItemIds, sizeof(src->equippedItemIds));
     memcpy(dst->backpackItems, src->backpackItems, sizeof(src->backpackItems));
     vm_net_mock_role_migrate_legacy_backpack_capacity(dst);
+}
+
+static void vm_net_mock_role_copy_from_v4(vm_net_mock_role_state *dst,
+                                          const vm_net_mock_role_state_v4 *src)
+{
+    if (dst == NULL || src == NULL)
+        return;
+    memset(dst, 0, sizeof(*dst));
+    dst->roleId = src->roleId;
+    memcpy(dst->name, src->name, sizeof(dst->name));
+    dst->job = src->job;
+    dst->sex = src->sex;
+    dst->backpackCapacity = src->backpackCapacity;
+    dst->level = src->level;
+    dst->exp = src->exp;
+    dst->hp = src->hp;
+    dst->hpMax = src->hpMax;
+    dst->mp = src->mp;
+    dst->mpMax = src->mpMax;
+    dst->money = src->money;
+    dst->wcoin = 0;
+    memcpy(dst->scene, src->scene, sizeof(dst->scene));
+    dst->x = src->x;
+    dst->y = src->y;
+    dst->backpackItemCount = src->backpackItemCount;
+    dst->designationId = src->designationId;
+    dst->nextBackpackSeq = src->nextBackpackSeq;
+    memcpy(dst->equippedItemIds, src->equippedItemIds, sizeof(src->equippedItemIds));
+    memcpy(dst->backpackItems, src->backpackItems, sizeof(src->backpackItems));
 }
 
 static void vm_net_mock_role_normalize_backpack(vm_net_mock_role_state *role)
@@ -7935,6 +7998,7 @@ static void vm_net_mock_role_db_load(void)
     char path[128];
     u8 fileBuf[sizeof(vm_net_mock_role_db_file)];
     vm_net_mock_role_db_file loaded;
+    vm_net_mock_role_db_file_v4 shopWcoinFile;
     vm_net_mock_role_db_file_v3 equippedBackpackFile;
     vm_net_mock_role_db_file_v2 backpackFile;
     vm_net_mock_role_db_file_v1 legacy;
@@ -7988,7 +8052,29 @@ static void vm_net_mock_role_db_load(void)
                                                   &equippedBackpackFile.roles[i]);
                 loadedFromFile = true;
                 needsSave = true;
-                vm_autotest_note("mock_role_db_migrate version=3->4 roles=%u active=%u\n",
+                vm_autotest_note("mock_role_db_migrate version=3->5 roles=%u active=%u\n",
+                                 g_vm_net_mock_role_db.roleCount,
+                                 g_vm_net_mock_role_db.activeRoleId);
+            }
+        }
+        else if (readLen == sizeof(shopWcoinFile))
+        {
+            memcpy(&shopWcoinFile, fileBuf, sizeof(shopWcoinFile));
+            if (memcmp(shopWcoinFile.magic, "JHR1", 4) == 0 &&
+                shopWcoinFile.version == VM_NET_MOCK_ROLE_DB_SHOP_WCOIN_VERSION &&
+                shopWcoinFile.roleCount <= VM_NET_MOCK_ROLE_DB_MAX_ROLES)
+            {
+                memset(&g_vm_net_mock_role_db, 0, sizeof(g_vm_net_mock_role_db));
+                memcpy(g_vm_net_mock_role_db.magic, "JHR1", 4);
+                g_vm_net_mock_role_db.version = VM_NET_MOCK_ROLE_DB_VERSION;
+                g_vm_net_mock_role_db.activeRoleId = shopWcoinFile.activeRoleId;
+                g_vm_net_mock_role_db.roleCount = shopWcoinFile.roleCount;
+                for (u32 i = 0; i < shopWcoinFile.roleCount; ++i)
+                    vm_net_mock_role_copy_from_v4(&g_vm_net_mock_role_db.roles[i],
+                                                  &shopWcoinFile.roles[i]);
+                loadedFromFile = true;
+                needsSave = true;
+                vm_autotest_note("mock_role_db_migrate version=4->5 roles=%u active=%u\n",
                                  g_vm_net_mock_role_db.roleCount,
                                  g_vm_net_mock_role_db.activeRoleId);
             }
@@ -8010,7 +8096,7 @@ static void vm_net_mock_role_db_load(void)
                                                   &backpackFile.roles[i]);
                 loadedFromFile = true;
                 needsSave = true;
-                vm_autotest_note("mock_role_db_migrate version=2->4 roles=%u active=%u\n",
+                vm_autotest_note("mock_role_db_migrate version=2->5 roles=%u active=%u\n",
                                  g_vm_net_mock_role_db.roleCount,
                                  g_vm_net_mock_role_db.activeRoleId);
             }
@@ -8032,7 +8118,7 @@ static void vm_net_mock_role_db_load(void)
                                                   &legacy.roles[i]);
                 loadedFromFile = true;
                 needsSave = true;
-                vm_autotest_note("mock_role_db_migrate version=1->4 roles=%u active=%u\n",
+                vm_autotest_note("mock_role_db_migrate version=1->5 roles=%u active=%u\n",
                                  g_vm_net_mock_role_db.roleCount,
                                  g_vm_net_mock_role_db.activeRoleId);
             }
@@ -8109,6 +8195,71 @@ static vm_net_mock_role_state *vm_net_mock_active_role(void)
     }
     g_vm_net_mock_role_db.activeRoleId = g_vm_net_mock_role_db.roles[0].roleId;
     return &g_vm_net_mock_role_db.roles[0];
+}
+
+static bool vm_net_mock_parse_u32_strict(const char *text, u32 *valueOut)
+{
+    char *end = NULL;
+    unsigned long value = 0;
+
+    if (valueOut)
+        *valueOut = 0;
+    if (text == NULL || text[0] == 0)
+        return false;
+    value = strtoul(text, &end, 10);
+    if (end == NULL || *end != 0 || value > 0xfffffffful)
+        return false;
+    if (valueOut)
+        *valueOut = (u32)value;
+    return true;
+}
+
+static vm_net_mock_role_state *vm_net_mock_find_role_in_db(vm_net_mock_role_db_file *db,
+                                                           const char *selector)
+{
+    u32 roleId = 0;
+
+    if (db == NULL || db->roleCount == 0)
+        return NULL;
+    if (selector == NULL || selector[0] == 0 || strcmp(selector, "active") == 0)
+    {
+        for (u32 i = 0; i < db->roleCount; ++i)
+        {
+            if (db->roles[i].roleId == db->activeRoleId)
+                return &db->roles[i];
+        }
+        return &db->roles[0];
+    }
+    if (vm_net_mock_parse_u32_strict(selector, &roleId))
+    {
+        for (u32 i = 0; i < db->roleCount; ++i)
+        {
+            if (db->roles[i].roleId == roleId)
+                return &db->roles[i];
+        }
+    }
+    for (u32 i = 0; i < db->roleCount; ++i)
+    {
+        if (strcmp(db->roles[i].name, selector) == 0)
+            return &db->roles[i];
+    }
+    return NULL;
+}
+
+static u32 vm_net_mock_role_wcoin_balance(const vm_net_mock_role_state *role)
+{
+    return role ? role->wcoin : 0;
+}
+
+static u32 vm_net_mock_role_add_wcoin(vm_net_mock_role_state *role, u32 amount)
+{
+    uint64_t total = 0;
+
+    if (role == NULL || amount == 0)
+        return role ? role->wcoin : 0;
+    total = (uint64_t)role->wcoin + (uint64_t)amount;
+    role->wcoin = total > 0xffffffffull ? 0xffffffffu : (u32)total;
+    return role->wcoin;
 }
 
 static bool vm_net_mock_select_active_role(u32 roleId)
@@ -9505,7 +9656,6 @@ typedef struct vm_mock_service_account_state
     u32 netMockTitleServerListTick;
     u32 netMockTitleServerSelectTick;
     u32 netMockTitleSelectedServerId;
-    u32 netMockShopWCoinBalance;
     u8 netMockBackpackPreferRoleListAfterShopBuy;
     bool updateCompletedReenterPending;
     char updateCompletedName[64];
@@ -9639,7 +9789,6 @@ static void vm_mock_service_account_capture(vm_mock_service_account_state *state
     state->netMockTitleServerListTick = g_netMockTitleServerListTick;
     state->netMockTitleServerSelectTick = g_netMockTitleServerSelectTick;
     state->netMockTitleSelectedServerId = g_netMockTitleSelectedServerId;
-    state->netMockShopWCoinBalance = g_netMockShopWCoinBalance;
     state->netMockBackpackPreferRoleListAfterShopBuy = g_netMockBackpackPreferRoleListAfterShopBuy;
     state->updateCompletedReenterPending = g_vm_net_mock_update_completed_reenter_pending;
     memcpy(state->updateCompletedName, g_vm_net_mock_update_completed_name, sizeof(state->updateCompletedName));
@@ -9739,7 +9888,6 @@ static void vm_mock_service_account_restore(vm_mock_service_account_state *state
     g_netMockTitleServerListTick = state->netMockTitleServerListTick;
     g_netMockTitleServerSelectTick = state->netMockTitleServerSelectTick;
     g_netMockTitleSelectedServerId = state->netMockTitleSelectedServerId;
-    g_netMockShopWCoinBalance = state->netMockShopWCoinBalance;
     g_netMockBackpackPreferRoleListAfterShopBuy = state->netMockBackpackPreferRoleListAfterShopBuy;
     g_vm_net_mock_update_completed_reenter_pending = state->updateCompletedReenterPending;
     memcpy(g_vm_net_mock_update_completed_name, state->updateCompletedName,
@@ -9930,13 +10078,129 @@ static bool vm_mock_service_session_presence_is_recent(const vm_mock_service_cli
     return age <= VM_MOCK_SERVICE_ONLINE_PRESENCE_MAX_AGE_TICKS;
 }
 
+static vm_mock_service_account_state *vm_mock_service_open_account_role_db_for_console(const char *accountId,
+                                                                                       const char **messageOut)
+{
+    vm_mock_service_account_state *state = NULL;
+
+    if (messageOut)
+        *messageOut = "ok";
+    if (accountId == NULL || accountId[0] == 0)
+    {
+        if (messageOut)
+            *messageOut = "account cannot be empty";
+        return NULL;
+    }
+    if (vm_mock_service_account_find_record(accountId) == NULL)
+    {
+        if (messageOut)
+            *messageOut = "account not found";
+        return NULL;
+    }
+    state = vm_mock_service_account_find_or_create(accountId);
+    if (state == NULL)
+    {
+        if (messageOut)
+            *messageOut = "account state unavailable";
+        return NULL;
+    }
+    g_vm_mock_service_active_client_id = 0;
+    vm_mock_service_account_restore(state);
+    vm_net_mock_role_db_load();
+    if (!g_vm_net_mock_role_db_valid)
+    {
+        if (messageOut)
+            *messageOut = "role db unavailable";
+        vm_mock_service_account_restore(NULL);
+        return NULL;
+    }
+    return state;
+}
+
+static void vm_mock_service_close_account_role_db_for_console(vm_mock_service_account_state *state,
+                                                              bool captureState)
+{
+    if (captureState && state != NULL)
+        vm_mock_service_account_capture(state);
+    vm_mock_service_account_restore(NULL);
+    g_vm_mock_service_active_client_id = 0;
+}
+
+static bool vm_mock_service_account_print_roles(const char *accountId, const char **messageOut)
+{
+    vm_mock_service_account_state *state =
+        vm_mock_service_open_account_role_db_for_console(accountId, messageOut);
+    u32 roleCount = 0;
+
+    if (state == NULL)
+        return false;
+    roleCount = g_vm_net_mock_role_db.roleCount;
+    printf("[info][mock-service] account_roles user=%s count=%u active=%u\n",
+           accountId,
+           roleCount,
+           g_vm_net_mock_role_db.activeRoleId);
+    for (u32 i = 0; i < roleCount; ++i)
+    {
+        const vm_net_mock_role_state *role = &g_vm_net_mock_role_db.roles[i];
+        printf("  %u: id=%u name=%s level=%u money=%u wcoin=%u%s\n",
+               i + 1,
+               role->roleId,
+               role->name[0] ? role->name : "-",
+               role->level,
+               role->money,
+               role->wcoin,
+               role->roleId == g_vm_net_mock_role_db.activeRoleId ? " [active]" : "");
+    }
+    vm_mock_service_close_account_role_db_for_console(state, true);
+    return true;
+}
+
+static bool vm_mock_service_account_add_role_wcoin(const char *accountId,
+                                                   const char *roleSelector,
+                                                   u32 amount,
+                                                   const char **messageOut)
+{
+    vm_mock_service_account_state *state =
+        vm_mock_service_open_account_role_db_for_console(accountId, messageOut);
+    vm_net_mock_role_state *role = NULL;
+    u32 before = 0;
+    u32 after = 0;
+
+    if (state == NULL)
+        return false;
+    role = vm_net_mock_find_role_in_db(&g_vm_net_mock_role_db, roleSelector);
+    if (role == NULL)
+    {
+        if (messageOut)
+            *messageOut = "role not found";
+        vm_mock_service_close_account_role_db_for_console(state, true);
+        return false;
+    }
+    before = role->wcoin;
+    after = vm_net_mock_role_add_wcoin(role, amount);
+    vm_net_mock_role_db_save("console-wcoin-add");
+    vm_mock_service_account_capture(state);
+    printf("[info][mock-service] account_wcoin_add user=%s role=%s id=%u add=%u before=%u after=%u\n",
+           accountId,
+           role->name[0] ? role->name : "-",
+           role->roleId,
+           amount,
+           before,
+           after);
+    vm_mock_service_close_account_role_db_for_console(state, false);
+    return true;
+}
+
 static void vm_mock_service_print_command_help(void)
 {
     printf("[info][mock-service] commands:\n");
     printf("  help\n");
     printf("  account list\n");
+    printf("  account roles <username>\n");
     printf("  account create <username> <password>\n");
     printf("  account passwd <username> <newpassword>\n");
+    printf("  account wcoin <username> <amount>\n");
+    printf("  account wcoin <username> <roleId|roleName|active> <amount>\n");
 }
 
 static void vm_mock_service_handle_console_command(const char *line)
@@ -9945,7 +10209,10 @@ static void vm_mock_service_handle_console_command(const char *line)
     char cmd1[32];
     char arg1[64];
     char arg2[64];
+    char arg3[64];
     const char *message = NULL;
+    u32 amount = 0;
+    int argCount = 0;
 
     if (line == NULL)
         return;
@@ -9958,6 +10225,7 @@ static void vm_mock_service_handle_console_command(const char *line)
     memset(cmd1, 0, sizeof(cmd1));
     memset(arg1, 0, sizeof(arg1));
     memset(arg2, 0, sizeof(arg2));
+    memset(arg3, 0, sizeof(arg3));
 
     if (strcmp(line, "help") == 0)
     {
@@ -9965,7 +10233,8 @@ static void vm_mock_service_handle_console_command(const char *line)
         return;
     }
 
-    if (sscanf(line, "%31s %31s %63s %63s", cmd0, cmd1, arg1, arg2) < 2)
+    argCount = sscanf(line, "%31s %31s %63s %63s %63s", cmd0, cmd1, arg1, arg2, arg3);
+    if (argCount < 2)
     {
         printf("[warn][mock-service] unknown command: %s\n", line);
         return;
@@ -9983,6 +10252,18 @@ static void vm_mock_service_handle_console_command(const char *line)
         printf("[info][mock-service] account_count=%u\n", g_vm_mock_service_account_db.accountCount);
         for (u32 i = 0; i < g_vm_mock_service_account_db.accountCount; ++i)
             printf("  %u: %s\n", i + 1, g_vm_mock_service_account_db.accounts[i].username);
+        return;
+    }
+    if (strcmp(cmd1, "roles") == 0)
+    {
+        if (arg1[0] == 0)
+        {
+            printf("[warn][mock-service] usage: account roles <username>\n");
+            return;
+        }
+        if (!vm_mock_service_account_print_roles(arg1, &message))
+            printf("[warn][mock-service] account_roles failed user=%s reason=%s\n",
+                   arg1, message ? message : "-");
         return;
     }
     if (strcmp(cmd1, "create") == 0)
@@ -10011,6 +10292,40 @@ static void vm_mock_service_handle_console_command(const char *line)
         else
             printf("[warn][mock-service] account_passwd failed user=%s reason=%s\n",
                    arg1, message ? message : "-");
+        return;
+    }
+    if (strcmp(cmd1, "wcoin") == 0)
+    {
+        const char *roleSelector = "active";
+        const char *amountText = NULL;
+
+        if (arg1[0] == 0 || arg2[0] == 0)
+        {
+            printf("[warn][mock-service] usage: account wcoin <username> <amount>\n");
+            printf("[warn][mock-service] usage: account wcoin <username> <roleId|roleName|active> <amount>\n");
+            return;
+        }
+        if (arg3[0] != 0)
+        {
+            roleSelector = arg2;
+            amountText = arg3;
+        }
+        else
+        {
+            amountText = arg2;
+        }
+        if (!vm_net_mock_parse_u32_strict(amountText, &amount))
+        {
+            printf("[warn][mock-service] invalid wcoin amount: %s\n", amountText ? amountText : "-");
+            return;
+        }
+        if (vm_mock_service_account_add_role_wcoin(arg1, roleSelector, amount, &message))
+            return;
+        printf("[warn][mock-service] account_wcoin failed user=%s role=%s amount=%u reason=%s\n",
+               arg1,
+               roleSelector ? roleSelector : "active",
+               amount,
+               message ? message : "-");
         return;
     }
 
@@ -20882,8 +21197,8 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
                 directExpandApplied = vm_net_mock_role_expand_backpack_capacity(role, 1);
                 if (directExpandApplied != 0)
                 {
-                    g_netMockShopWCoinBalance = wcoinBefore - cost;
-                    wcoinAfter = g_netMockShopWCoinBalance;
+                    role->wcoin = wcoinBefore - cost;
+                    wcoinAfter = role->wcoin;
                     g_netMockShop17ListPending = 0;
                     g_netMockBackpackPreferRoleListAfterShopBuy = 0;
                     g_netMockBackpackGridSeededRoleId = 0;
@@ -20904,11 +21219,12 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
         }
         else if (vm_net_mock_role_add_backpack_item(itemId, count, &seq))
         {
-            g_netMockShopWCoinBalance = wcoinBefore - cost;
-            wcoinAfter = g_netMockShopWCoinBalance;
+            role->wcoin = wcoinBefore - cost;
+            wcoinAfter = role->wcoin;
             g_netMockShop17ListPending = 0;
             g_netMockBackpackPreferRoleListAfterShopBuy = 1;
             g_netMockBackpackGridSeededRoleId = 0;
+            vm_net_mock_role_db_save("shop-buy14-item");
             result = 1;
         }
         else

@@ -46,7 +46,7 @@ Status: implemented for shop open, DSH-backed catalog paging, shop-friendly cata
 
 - WT objects:
   - `1/14/14 { result=1, shopinfo="Codex Shop" }`
-  - `1/14/4 { coolmoney=999999, ticket=0 }`
+  - `1/14/4 { coolmoney=<active-role wcoin>, ticket=0 }`
   - `1/14/5 { totalnum=<secret item count>, iteminfo=<秘宝道具 page 0 rows> }`
   - `1/14/6 { totalnum=<weapon item count>, iteminfo=<神兵利器/武器 page 0 rows> }`
   - `1/1/14 { revivetype=0, ruffianflag=0, type=0, actorinfo=<current-role actorinfo blob> }`
@@ -102,7 +102,7 @@ Status: implemented for shop open, DSH-backed catalog paging, shop-friendly cata
   - those build the same kind-14 status/money requests that `sub_9DE` parses.
 - Response:
   - `1/14/14 { result=1, shopinfo="Codex Shop" }`
-  - `1/14/4 { coolmoney=999999, ticket=0 }`
+  - `1/14/4 { coolmoney=<active-role wcoin>, ticket=0 }`
 
 ### NPC Dialog Buy + Shop Combo Request
 
@@ -115,7 +115,7 @@ Status: implemented for shop open, DSH-backed catalog paging, shop-friendly cata
 - Response now returns:
   - requested safe scene/dialog follow-up objects (`2/10`, `27/11`, `27/4`, `7/42`) when present;
   - `1/14/14 { result=1, shopinfo="Codex Shop" }`
-  - `1/14/4 { coolmoney=999999, ticket=0 }`
+  - `1/14/4 { coolmoney=<active-role wcoin>, ticket=0 }`
   - `1/14/5 { totalnum=<secret item count>, iteminfo=<秘宝道具 page index rows> }`
   - `1/14/6 { totalnum=<weapon item count>, iteminfo=<神兵利器/武器 page index rows> }`
 - If `14/5/14/6` are batched in the same request, do not drop them. `mmShop:0x9DE` uses one local response-object counter and clears loading after the full four-object family is parsed.
@@ -137,10 +137,11 @@ Status: implemented for shop open, DSH-backed catalog paging, shop-friendly cata
   - `seq`
   - `result`
 
-- The W-coin `14/3` request is handled by `builtin-shop-buy14`; the normal path
-  checks the shop W-coin balance, deducts `price * num`, adds the item to the
-  active role backpack, saves the role DB through the normal backpack add path,
-  then returns `seq/result`.
+- The W-coin `14/3` request is handled by `builtin-shop-buy14`; the balance now
+  comes from the active role's persisted `wcoin` field and new roles start at
+  `0`. The normal path checks that balance, deducts `price * num`, adds the
+  item to the active role backpack, saves the role DB, then returns
+  `seq/result`.
 - Special case confirmed in `mmShopMstarWqvga.cbm:sub_9DE`: local purchase
   `type=2` + `id=806` (`背包扩容`) does not route through the normal backpack
   add callback. The client handles that success by increasing its local
