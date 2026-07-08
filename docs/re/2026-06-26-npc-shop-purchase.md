@@ -137,10 +137,16 @@ Status: implemented for shop open, DSH-backed catalog paging, shop-friendly cata
   - `seq`
   - `result`
 
-- The W-coin `14/3` request is handled by `builtin-shop-buy14`; the server
+- The W-coin `14/3` request is handled by `builtin-shop-buy14`; the normal path
   checks the shop W-coin balance, deducts `price * num`, adds the item to the
   active role backpack, saves the role DB through the normal backpack add path,
   then returns `seq/result`.
+- Special case confirmed in `mmShopMstarWqvga.cbm:sub_9DE`: local purchase
+  `type=2` + `id=806` (`背包扩容`) does not route through the normal backpack
+  add callback. The client handles that success by increasing its local
+  capacity field directly, so the mock must expand persisted backpack capacity
+  immediately, return `14/3 { seq=0, result=1 }`, and avoid arming the
+  one-shot role-backpack sync that is only valid for ordinary purchased items.
 - On successful buy, clear the one-shot shop `17/1` pending flag. That flag is
   only for the shop list sync after open/page requests; leaving it set after a
   completed purchase hijacks the next backpack `17/1`/open request and makes the

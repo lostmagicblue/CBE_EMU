@@ -2886,7 +2886,8 @@ enum
     VM_NET_MOCK_BACKPACK_EXPAND_STEP = 5,
     VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE = 1,
     VM_NET_MOCK_SHOP_DEFAULT_ITEM_STOCK = 99,
-    VM_NET_MOCK_SHOP_DEFAULT_WCOIN = 999999,
+    VM_NET_MOCK_SHOP_LEGACY_DEFAULT_WCOIN = 999999,
+    VM_NET_MOCK_SHOP_DEFAULT_WCOIN = 999999999,
     VM_NET_MOCK_SHOP_PAGE_SIZE = 10,
     VM_NET_MOCK_SHOP_SECRET_MAX_ITEMS = 8,
     VM_NET_MOCK_SHOP_EQUIP_CATEGORY_MAX_ITEMS = 80,
@@ -4821,7 +4822,8 @@ static bool vm_net_mock_append_shop_open_status14_object(u8 *out, u32 outCap, u3
 
 static u32 vm_net_mock_shop_wcoin_balance(void)
 {
-    if (g_netMockShopWCoinBalance == 0)
+    if (g_netMockShopWCoinBalance == 0 ||
+        g_netMockShopWCoinBalance == VM_NET_MOCK_SHOP_LEGACY_DEFAULT_WCOIN)
         g_netMockShopWCoinBalance = VM_NET_MOCK_SHOP_DEFAULT_WCOIN;
     return g_netMockShopWCoinBalance;
 }
@@ -5353,6 +5355,26 @@ static bool vm_net_mock_item_is_backpack_expand_card(u32 itemId,
 {
     return itemId == VM_NET_MOCK_BACKPACK_EXPAND_ITEM_ID ||
            (effect != NULL && effect->itemId == VM_NET_MOCK_BACKPACK_EXPAND_ITEM_ID);
+}
+
+static bool vm_net_mock_shop_item_is_direct_backpack_expand(u8 type, u32 itemId)
+{
+    /*
+     * mmShopMstarWqvga.cbm:sub_9DE case 14/3 success has a dedicated branch for
+     * local purchase type 2 + item 806. The client does not add a usable row to
+     * the backpack there; it expands capacity immediately.
+     */
+    return type == 2 && itemId == VM_NET_MOCK_BACKPACK_EXPAND_ITEM_ID;
+}
+
+static u8 vm_net_mock_shop_buy14_failure_result(u8 type)
+{
+    /*
+     * mmShopMstarWqvga.cbm:sub_9DE only has an explicit handled failure branch
+     * for result==2 on the W-coin buy flow (type==2). Returning 0 keeps the
+     * local loading flag set and looks like a permanent network wait.
+     */
+    return type == 2 ? 2 : 0;
 }
 
 static u32 vm_net_mock_role_backpack_expand_usable_count(const vm_net_mock_role_state *role, u32 requestedCount)
@@ -20814,9 +20836,15 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
     u32 cost = 0;
     u32 wcoinBefore = 0;
     u32 wcoinAfter = 0;
+    u8 capacityBefore = VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY;
+    u8 capacityAfter = VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY;
     u16 seq = 0;
     u8 result = 0;
     bool knownItem = false;
+    bool directExpand = false;
+    bool directExpandRejectedCount = false;
+    bool insufficientFunds = false;
+    u32 directExpandApplied = 0;
     vm_net_mock_role_state *role = NULL;
 
     if (out == NULL || outCap < pos)
@@ -20828,16 +20856,65 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
     knownItem = vm_net_mock_shop_calculate_cost(itemId, count, &unitPrice, &cost);
     wcoinBefore = vm_net_mock_shop_wcoin_balance();
     wcoinAfter = wcoinBefore;
-
-    if (role != NULL && knownItem && wcoinBefore >= cost &&
-        vm_net_mock_role_add_backpack_item(itemId, count, &seq))
+    directExpand = vm_net_mock_shop_item_is_direct_backpack_expand(type, itemId);
+    if (role != NULL)
     {
-        g_netMockShopWCoinBalance = wcoinBefore - cost;
-        wcoinAfter = g_netMockShopWCoinBalance;
-        g_netMockShop17ListPending = 0;
-        g_netMockBackpackPreferRoleListAfterShopBuy = 1;
-        g_netMockBackpackGridSeededRoleId = 0;
-        result = 1;
+        capacityBefore = role->backpackCapacity;
+        capacityAfter = role->backpackCapacity;
+    }
+
+    if (role != NULL && knownItem)
+    {
+        if (wcoinBefore < cost)
+        {
+            insufficientFunds = true;
+            result = vm_net_mock_shop_buy14_failure_result(type);
+        }
+        else if (directExpand)
+        {
+            /*
+             * mmShopMstarWqvga.cbm:sub_9DE handles type=2 + item 806 as a
+             * direct capacity update. That success branch ignores seq and does
+             * not route through the normal backpack add/sync path.
+             */
+            if (count <= 1)
+            {
+                directExpandApplied = vm_net_mock_role_expand_backpack_capacity(role, 1);
+                if (directExpandApplied != 0)
+                {
+                    g_netMockShopWCoinBalance = wcoinBefore - cost;
+                    wcoinAfter = g_netMockShopWCoinBalance;
+                    g_netMockShop17ListPending = 0;
+                    g_netMockBackpackPreferRoleListAfterShopBuy = 0;
+                    g_netMockBackpackGridSeededRoleId = 0;
+                    capacityAfter = role->backpackCapacity;
+                    vm_net_mock_role_db_save("shop-buy14-expand");
+                    result = 1;
+                }
+                else
+                {
+                    result = vm_net_mock_shop_buy14_failure_result(type);
+                }
+            }
+            else
+            {
+                directExpandRejectedCount = true;
+                result = vm_net_mock_shop_buy14_failure_result(type);
+            }
+        }
+        else if (vm_net_mock_role_add_backpack_item(itemId, count, &seq))
+        {
+            g_netMockShopWCoinBalance = wcoinBefore - cost;
+            wcoinAfter = g_netMockShopWCoinBalance;
+            g_netMockShop17ListPending = 0;
+            g_netMockBackpackPreferRoleListAfterShopBuy = 1;
+            g_netMockBackpackGridSeededRoleId = 0;
+            result = 1;
+        }
+        else
+        {
+            result = vm_net_mock_shop_buy14_failure_result(type);
+        }
     }
 
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 14, 3, &objectStart))
@@ -20849,14 +20926,20 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);
 
-    printf("[info][network] mock_shop_buy14 type=%u item=%u count=%u unit=%u cost=%u wcoin=%u/%u seq=%u result=%u known=%u shop_pending=%u backpack_prefer_role=%u grid_reseed=%u resp=14/3\n",
+    printf("[info][network] mock_shop_buy14 type=%u item=%u count=%u unit=%u cost=%u wcoin=%u/%u seq=%u result=%u known=%u direct_expand=%u direct_applied=%u direct_reject_count=%u insufficient=%u capacity=%u/%u shop_pending=%u backpack_prefer_role=%u grid_reseed=%u resp=14/3\n",
            type, itemId, count, unitPrice, cost, wcoinBefore, wcoinAfter, seq,
-           result, knownItem ? 1 : 0, g_netMockShop17ListPending,
+           result, knownItem ? 1 : 0, directExpand ? 1 : 0, directExpandApplied,
+           directExpandRejectedCount ? 1 : 0, insufficientFunds ? 1 : 0,
+           capacityBefore, capacityAfter,
+           g_netMockShop17ListPending,
            g_netMockBackpackPreferRoleListAfterShopBuy,
            result ? 1 : 0);
-    vm_autotest_note("mock_shop_buy14 type=%u item=%u count=%u unit=%u cost=%u wcoin=%u/%u seq=%u result=%u shop_pending=%u backpack_prefer_role=%u grid_reseed=%u response=14/3 evidence=mmShop:0x2F6C/0x9DE\n",
+    vm_autotest_note("mock_shop_buy14 type=%u item=%u count=%u unit=%u cost=%u wcoin=%u/%u seq=%u result=%u direct_expand=%u direct_applied=%u direct_reject_count=%u insufficient=%u capacity=%u/%u shop_pending=%u backpack_prefer_role=%u grid_reseed=%u response=14/3 evidence=mmShop:0x2F6C/0x9DE\n",
                      type, itemId, count, unitPrice, cost, wcoinBefore, wcoinAfter,
-                     seq, result, g_netMockShop17ListPending,
+                     seq, result, directExpand ? 1 : 0, directExpandApplied,
+                     directExpandRejectedCount ? 1 : 0, insufficientFunds ? 1 : 0,
+                     capacityBefore, capacityAfter,
+                     g_netMockShop17ListPending,
                      g_netMockBackpackPreferRoleListAfterShopBuy,
                      result ? 1 : 0);
     return pos;

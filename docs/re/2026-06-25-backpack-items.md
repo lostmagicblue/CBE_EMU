@@ -99,7 +99,7 @@ nextBackpackSeq
 backpackItems[...] = itemId, seq, count
 ```
 
-New roles now start with an empty backpack and initial capacity `20`. Legacy role DB files that still carried the old default `40`-slot capacity are migrated forward to the new baseline while preserving occupied rows. NPC/shop buy responses add or stack the purchased item into the active role before returning the parser-facing `14/3 { seq, result }`.
+New roles now start with an empty backpack and initial capacity `20`. Legacy role DB files that still carried the old default `40`-slot capacity are migrated forward to the new baseline while preserving occupied rows. NPC/shop buy responses normally add or stack the purchased item into the active role before returning the parser-facing `14/3 { seq, result }`, but the mall `type=2` purchase of item `806` (`背包扩容`) is a confirmed client-side special case and must expand capacity directly instead of inserting an inventory row.
 
 ## Removed Failed Paths
 
