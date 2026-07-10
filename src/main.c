@@ -3231,6 +3231,7 @@ static uc_err scheduler_tick(void)
     uc_err err = scheduler_dispatch_timers();
     if (err != UC_ERR_OK)
         return err;
+    vm_net_mock_poll_push_if_due();
     err = scheduler_dispatch_net_tasks();
     if (err != UC_ERR_OK)
         return err;
@@ -3592,7 +3593,13 @@ static void vm_mock_service_init_config(int argc, char *args[])
 
     if (g_mockServiceClientId == 0)
     {
-        g_mockServiceClientId = (u32)time(NULL) ^ (u32)(uintptr_t)&g_mockServiceClientId;
+        /* Two emulator processes commonly start within the same second and
+         * are loaded at the same image address. Include the process id so
+         * simultaneous role logins cannot collapse into one service session.
+         */
+        g_mockServiceClientId = (u32)time(NULL) ^
+                                (u32)(uintptr_t)&g_mockServiceClientId ^
+                                ((u32)getpid() * 0x9e3779b9u);
         if (g_mockServiceClientId == 0)
             g_mockServiceClientId = 1;
     }
@@ -7210,6 +7217,7 @@ int main(int argc, char *args[])
         printf("Unicorn Engine Initialized\n");
 
         loop();
+        vm_net_mock_service_notify_disconnect("host-loop-exit");
     }
     return 0;
 }
