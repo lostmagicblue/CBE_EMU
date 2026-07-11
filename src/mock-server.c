@@ -3117,6 +3117,8 @@ typedef struct
 
 #define VM_MOCK_SERVICE_ACCOUNT_DB_VERSION 1
 #define VM_MOCK_SERVICE_ACCOUNT_DB_MAX_ACCOUNTS 64
+#define VM_MOCK_SERVICE_FRIEND_DB_VERSION 1
+#define VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS 256
 
 typedef struct
 {
@@ -3131,6 +3133,28 @@ typedef struct
     u32 accountCount;
     vm_mock_service_account_record accounts[VM_MOCK_SERVICE_ACCOUNT_DB_MAX_ACCOUNTS];
 } vm_mock_service_account_db_file;
+
+typedef struct
+{
+    char ownerAccountId[64];
+    u32 ownerRoleId;
+    char targetAccountId[64];
+    u32 targetRoleId;
+    char targetRoleName[32];
+    u32 friendDegree;
+    u32 targetLevel;
+    u8 targetJob;
+    u8 targetSex;
+    u16 reserved0;
+} vm_mock_service_friend_record;
+
+typedef struct
+{
+    char magic[4];
+    u32 version;
+    u32 recordCount;
+    vm_mock_service_friend_record records[VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS];
+} vm_mock_service_friend_db_file;
 
 static vm_net_mock_role_state *vm_net_mock_active_role(void);
 static u32 vm_net_mock_role_wcoin_balance(const vm_net_mock_role_state *role);
@@ -3147,6 +3171,9 @@ typedef struct
 static vm_mock_service_account_db_file g_vm_mock_service_account_db;
 static bool g_vm_mock_service_account_db_loaded = false;
 static bool g_vm_mock_service_account_db_valid = false;
+static vm_mock_service_friend_db_file g_vm_mock_service_friend_db;
+static bool g_vm_mock_service_friend_db_loaded = false;
+static bool g_vm_mock_service_friend_db_valid = false;
 static char g_vm_mock_service_login_issue_username[64];
 static char g_vm_mock_service_login_issue_password[64];
 static u8 g_vm_mock_service_login_issue_result = 0;
@@ -6710,6 +6737,264 @@ static void vm_mock_service_account_db_load(void)
         g_vm_mock_service_account_db = loaded;
     }
     fclose(fp);
+}
+
+static void vm_mock_service_friend_db_path(char *path, size_t pathSize)
+{
+    if (path == NULL || pathSize == 0)
+        return;
+    snprintf(path, pathSize, "nvram/mock_service_friends.bin");
+}
+
+static void vm_mock_service_friend_db_save(const char *reason)
+{
+    char path[128];
+
+    if (!g_vm_mock_service_friend_db_valid)
+        return;
+    memcpy(g_vm_mock_service_friend_db.magic, "JHF1", 4);
+    g_vm_mock_service_friend_db.version = VM_MOCK_SERVICE_FRIEND_DB_VERSION;
+    if (g_vm_mock_service_friend_db.recordCount > VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS)
+        g_vm_mock_service_friend_db.recordCount = VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS;
+#ifdef _WIN32
+    _mkdir("nvram");
+#else
+    mkdir("nvram", 0777);
+#endif
+    vm_mock_service_friend_db_path(path, sizeof(path));
+    FILE *fp = fopen(path, "wb");
+    if (fp)
+    {
+        fwrite(&g_vm_mock_service_friend_db, 1, sizeof(g_vm_mock_service_friend_db), fp);
+        fclose(fp);
+        vm_autotest_note("mock_friend_db_save reason=%s records=%u\n",
+                         reason ? reason : "state",
+                         g_vm_mock_service_friend_db.recordCount);
+    }
+}
+
+static void vm_mock_service_friend_db_load(void)
+{
+    char path[128];
+    vm_mock_service_friend_db_file loaded;
+    vm_mock_service_friend_record compact[VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS];
+    u32 compactCount = 0;
+    bool needsSave = false;
+
+    if (g_vm_mock_service_friend_db_loaded)
+        return;
+    g_vm_mock_service_friend_db_loaded = true;
+    memset(&g_vm_mock_service_friend_db, 0, sizeof(g_vm_mock_service_friend_db));
+    memcpy(g_vm_mock_service_friend_db.magic, "JHF1", 4);
+    g_vm_mock_service_friend_db.version = VM_MOCK_SERVICE_FRIEND_DB_VERSION;
+    g_vm_mock_service_friend_db_valid = true;
+
+    vm_mock_service_friend_db_path(path, sizeof(path));
+    FILE *fp = fopen(path, "rb");
+    if (!fp)
+        return;
+    memset(&loaded, 0, sizeof(loaded));
+    if (fread(&loaded, 1, sizeof(loaded), fp) != sizeof(loaded) ||
+        memcmp(loaded.magic, "JHF1", 4) != 0 ||
+        loaded.version != VM_MOCK_SERVICE_FRIEND_DB_VERSION ||
+        loaded.recordCount > VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS)
+    {
+        fclose(fp);
+        vm_autotest_note("mock_friend_db_load invalid path=%s action=empty\n", path);
+        return;
+    }
+    fclose(fp);
+
+    memset(compact, 0, sizeof(compact));
+    for (u32 i = 0; i < loaded.recordCount; ++i)
+    {
+        vm_mock_service_friend_record record = loaded.records[i];
+        bool duplicate = false;
+
+        record.ownerAccountId[sizeof(record.ownerAccountId) - 1] = 0;
+        record.targetAccountId[sizeof(record.targetAccountId) - 1] = 0;
+        record.targetRoleName[sizeof(record.targetRoleName) - 1] = 0;
+        if (record.ownerAccountId[0] == 0 || record.targetAccountId[0] == 0 ||
+            record.ownerRoleId == 0 || record.targetRoleId == 0 ||
+            (record.ownerRoleId == record.targetRoleId &&
+             strcmp(record.ownerAccountId, record.targetAccountId) == 0))
+        {
+            needsSave = true;
+            continue;
+        }
+        for (u32 j = 0; j < compactCount; ++j)
+        {
+            if (compact[j].ownerRoleId == record.ownerRoleId &&
+                compact[j].targetRoleId == record.targetRoleId &&
+                strcmp(compact[j].ownerAccountId, record.ownerAccountId) == 0 &&
+                strcmp(compact[j].targetAccountId, record.targetAccountId) == 0)
+            {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate)
+        {
+            needsSave = true;
+            continue;
+        }
+        if (record.targetRoleName[0] == 0)
+            snprintf(record.targetRoleName, sizeof(record.targetRoleName), "Player");
+        if (record.targetLevel == 0)
+            record.targetLevel = 1;
+        if (record.targetJob == 0 || record.targetJob > 3)
+            record.targetJob = 1;
+        compact[compactCount++] = record;
+    }
+    memset(&g_vm_mock_service_friend_db, 0, sizeof(g_vm_mock_service_friend_db));
+    memcpy(g_vm_mock_service_friend_db.magic, "JHF1", 4);
+    g_vm_mock_service_friend_db.version = VM_MOCK_SERVICE_FRIEND_DB_VERSION;
+    g_vm_mock_service_friend_db.recordCount = compactCount;
+    if (compactCount > 0)
+        memcpy(g_vm_mock_service_friend_db.records, compact,
+               compactCount * sizeof(compact[0]));
+    if (needsSave)
+        vm_mock_service_friend_db_save("normalize");
+}
+
+static vm_mock_service_friend_record *vm_mock_service_friend_db_find(
+    const char *ownerAccountId, u32 ownerRoleId,
+    const char *targetAccountId, u32 targetRoleId)
+{
+    vm_mock_service_friend_db_load();
+    if (!g_vm_mock_service_friend_db_valid || ownerAccountId == NULL ||
+        targetAccountId == NULL || ownerRoleId == 0 || targetRoleId == 0)
+    {
+        return NULL;
+    }
+    for (u32 i = 0; i < g_vm_mock_service_friend_db.recordCount; ++i)
+    {
+        vm_mock_service_friend_record *record = &g_vm_mock_service_friend_db.records[i];
+        if (record->ownerRoleId == ownerRoleId &&
+            record->targetRoleId == targetRoleId &&
+            strcmp(record->ownerAccountId, ownerAccountId) == 0 &&
+            strcmp(record->targetAccountId, targetAccountId) == 0)
+        {
+            return record;
+        }
+    }
+    return NULL;
+}
+
+static bool vm_mock_service_friend_db_upsert_one(
+    const char *ownerAccountId, u32 ownerRoleId,
+    const char *targetAccountId, u32 targetRoleId,
+    const char *targetRoleName, u32 targetLevel, u8 targetJob, u8 targetSex,
+    bool *createdOut, bool *changedOut)
+{
+    vm_mock_service_friend_record *record = NULL;
+    bool created = false;
+    bool changed = false;
+
+    if (createdOut)
+        *createdOut = false;
+    if (changedOut)
+        *changedOut = false;
+    record = vm_mock_service_friend_db_find(ownerAccountId, ownerRoleId,
+                                            targetAccountId, targetRoleId);
+    if (record == NULL)
+    {
+        if (g_vm_mock_service_friend_db.recordCount >= VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS)
+            return false;
+        record = &g_vm_mock_service_friend_db.records[g_vm_mock_service_friend_db.recordCount++];
+        memset(record, 0, sizeof(*record));
+        snprintf(record->ownerAccountId, sizeof(record->ownerAccountId), "%s", ownerAccountId);
+        record->ownerRoleId = ownerRoleId;
+        snprintf(record->targetAccountId, sizeof(record->targetAccountId), "%s", targetAccountId);
+        record->targetRoleId = targetRoleId;
+        created = true;
+        changed = true;
+    }
+    if (targetRoleName != NULL && targetRoleName[0] != 0 &&
+        strcmp(record->targetRoleName, targetRoleName) != 0)
+    {
+        snprintf(record->targetRoleName, sizeof(record->targetRoleName), "%s", targetRoleName);
+        changed = true;
+    }
+    if (record->targetLevel != (targetLevel ? targetLevel : 1))
+    {
+        record->targetLevel = targetLevel ? targetLevel : 1;
+        changed = true;
+    }
+    if (targetJob == 0 || targetJob > 3)
+        targetJob = 1;
+    if (record->targetJob != targetJob)
+    {
+        record->targetJob = targetJob;
+        changed = true;
+    }
+    if (record->targetSex != (targetSex <= 1 ? targetSex : 0))
+    {
+        record->targetSex = targetSex <= 1 ? targetSex : 0;
+        changed = true;
+    }
+    if (record->targetRoleName[0] == 0)
+    {
+        snprintf(record->targetRoleName, sizeof(record->targetRoleName), "Player");
+        changed = true;
+    }
+    if (createdOut)
+        *createdOut = created;
+    if (changedOut)
+        *changedOut = changed;
+    return true;
+}
+
+static bool vm_mock_service_friend_db_add_pair(
+    const char *ownerAccountId, u32 ownerRoleId,
+    const char *ownerRoleName, u32 ownerLevel, u8 ownerJob, u8 ownerSex,
+    const char *targetAccountId, u32 targetRoleId,
+    const char *targetRoleName, u32 targetLevel, u8 targetJob, u8 targetSex,
+    bool *createdOut)
+{
+    bool forwardExists = false;
+    bool reverseExists = false;
+    bool forwardCreated = false;
+    bool reverseCreated = false;
+    bool forwardChanged = false;
+    bool reverseChanged = false;
+    u32 missing = 0;
+
+    if (createdOut)
+        *createdOut = false;
+    if (ownerAccountId == NULL || ownerAccountId[0] == 0 || ownerRoleId == 0 ||
+        targetAccountId == NULL || targetAccountId[0] == 0 || targetRoleId == 0 ||
+        (ownerRoleId == targetRoleId && strcmp(ownerAccountId, targetAccountId) == 0))
+    {
+        return false;
+    }
+    vm_mock_service_friend_db_load();
+    forwardExists = vm_mock_service_friend_db_find(ownerAccountId, ownerRoleId,
+                                                    targetAccountId, targetRoleId) != NULL;
+    reverseExists = vm_mock_service_friend_db_find(targetAccountId, targetRoleId,
+                                                    ownerAccountId, ownerRoleId) != NULL;
+    missing = (forwardExists ? 0u : 1u) + (reverseExists ? 0u : 1u);
+    if (!g_vm_mock_service_friend_db_valid ||
+        g_vm_mock_service_friend_db.recordCount + missing > VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS)
+    {
+        return false;
+    }
+    if (!vm_mock_service_friend_db_upsert_one(ownerAccountId, ownerRoleId,
+                                              targetAccountId, targetRoleId,
+                                              targetRoleName, targetLevel, targetJob, targetSex,
+                                              &forwardCreated, &forwardChanged) ||
+        !vm_mock_service_friend_db_upsert_one(targetAccountId, targetRoleId,
+                                              ownerAccountId, ownerRoleId,
+                                              ownerRoleName, ownerLevel, ownerJob, ownerSex,
+                                              &reverseCreated, &reverseChanged))
+    {
+        return false;
+    }
+    if (forwardChanged || reverseChanged)
+        vm_mock_service_friend_db_save("friend-add-auto-accept");
+    if (createdOut)
+        *createdOut = forwardCreated || reverseCreated;
+    return true;
 }
 
 static vm_mock_service_account_record *vm_mock_service_account_find_record(const char *username)
@@ -14047,6 +14332,11 @@ static void vm_net_mock_apply_actor_moveinfo_timeline(u16 *x, u16 *y,
                                                       const u8 *moveInfo, u16 moveInfoLen);
 static void vm_net_mock_format_moveinfo_timeline(const u8 *moveInfo, u16 moveInfoLen,
                                                  char *out, u32 outCap);
+static bool vm_net_mock_build_scene_list_otherinfo_blob(const char *scene,
+                                                        u8 *otherInfo,
+                                                        u32 otherInfoCap,
+                                                        u32 *otherInfoLenOut,
+                                                        u32 *roleCountOut);
 
 static bool vm_net_mock_active_client_scene_ready_for_nearby(const char *scene)
 {
@@ -14067,6 +14357,7 @@ static bool vm_net_mock_is_scene_ctrl_page_request(const u8 *request, u32 reques
     u32 offset = 4;
     vm_net_mock_request_object object;
     u32 page = 0;
+    u8 page8 = 0;
 
     if (pageOut)
         *pageOut = 0;
@@ -14076,7 +14367,11 @@ static bool vm_net_mock_is_scene_ctrl_page_request(const u8 *request, u32 reques
     {
         if (object.major == 1 && object.kind == 2 && object.subtype == 7)
         {
-            (void)vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "pgIdx", &page);
+            /* InitSceneCtrlState writes pgIdx through the event's u8 setter. */
+            if (!vm_net_mock_get_object_u8_field(object.payload, object.payloadLen, "pgIdx", &page8))
+                (void)vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "pgIdx", &page);
+            else
+                page = page8;
             if (pageOut)
                 *pageOut = page;
             return true;
@@ -14088,45 +14383,90 @@ static bool vm_net_mock_is_scene_ctrl_page_request(const u8 *request, u32 reques
 static u32 vm_net_mock_build_scene_ctrl_page_response(const u8 *request, u32 requestLen,
                                                       u8 *out, u32 outCap)
 {
+    u8 otherInfo[512];
     u32 pos = 5;
     u32 objectStart = 0;
     u32 page = 0;
     u32 nearbyRoleNum = 0;
+    u32 otherInfoLen = 0;
     u8 objectCount = 0;
-    bool allowRoleList = false;
+    bool allowNearbyList = false;
+    bool appendedNearbyList = false;
+    bool promotedSceneReady = false;
     const char *scene = NULL;
 
     if (outCap < pos || !vm_net_mock_is_scene_ctrl_page_request(request, requestLen, &page))
         return 0;
+
+    scene = vm_net_mock_current_scene_name();
+    memset(otherInfo, 0, sizeof(otherInfo));
+    /*
+     * InitSceneCtrlState sends 2/7 only after the current map UI exists.  If
+     * the normal post-enter task subset did not run (for example the user
+     * opened the page before making a move), this request is concrete packet
+     * evidence that the active role is observing its saved scene.  Promote
+     * before constructing this answer so the first page open can contain its
+     * already-visible peers.
+     */
+    if (page == 0 &&
+        !vm_net_mock_active_client_scene_ready_for_nearby(scene) &&
+        !g_vm_net_mock_last_scene_change_target_valid &&
+        !vm_net_mock_scene_runtime_pending_without_target())
+    {
+        promotedSceneReady = vm_mock_service_mark_active_session_scene_ready_from_role(
+            scene,
+            "scene-ctrl-page");
+    }
+    /*
+     * HandleFactionOtherInfoResponse(0x01031162) owns the 2/7 page.  It
+     * reads allpgs, othernum and otherinfo from this very object; 30/7 is a
+     * distinct task-hall room table and never reaches the page cache.
+     */
+    allowNearbyList = page == 0 && vm_net_mock_active_client_scene_ready_for_nearby(scene);
+    if (allowNearbyList)
+    {
+        if (!vm_net_mock_build_scene_list_otherinfo_blob(scene,
+                                                         otherInfo, sizeof(otherInfo),
+                                                         &otherInfoLen, &nearbyRoleNum))
+        {
+            return 0;
+        }
+        appendedNearbyList = true;
+    }
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 2, 7, &objectStart))
         return 0;
     if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
         return 0;
     if (!vm_net_mock_put_object_u32(out, outCap, &pos, "pgIdx", page))
         return 0;
+    /* LookupItemByteField (+0x4C) consumes allpgs in the 2/7 handler. */
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "allpgs", 1) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "othernum", nearbyRoleNum) ||
+        !vm_net_mock_put_object_raw(out, outCap, &pos, "otherinfo",
+                                    otherInfo, (u16)otherInfoLen))
+    {
+        return 0;
+    }
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     objectCount += 1;
-    scene = vm_net_mock_current_scene_name();
-    allowRoleList = page == 0 && vm_net_mock_active_client_scene_ready_for_nearby(scene);
-    if (allowRoleList &&
-        vm_net_mock_append_scene_room_roles_object(out, outCap, &pos, &nearbyRoleNum))
-    {
-        objectCount += 1;
-    }
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
-    printf("[info][network] mock_scene_ctrl_page pgIdx=%u scene=%s nearby_roles=%u allow_rolelist=%u pending_target=%u pending_runtime=%u resp=%u\n",
+    printf("[info][network] mock_scene_ctrl_page pgIdx=%u scene=%s nearby_roles=%u otherinfo_len=%u allow_nearby_list=%u appended_nearby_list=%u promoted_ready=%u pending_target=%u pending_runtime=%u resp=%u\n",
            page,
            scene ? scene : "-",
            nearbyRoleNum,
-           allowRoleList ? 1u : 0u,
+           otherInfoLen,
+           allowNearbyList ? 1u : 0u,
+           appendedNearbyList ? 1u : 0u,
+           promotedSceneReady ? 1u : 0u,
            g_vm_net_mock_last_scene_change_target_valid ? 1u : 0u,
            vm_net_mock_scene_runtime_pending_without_target() ? 1u : 0u,
            pos);
-    vm_autotest_note("mock_scene_ctrl_page pgIdx=%u nearby_roles=%u allow_rolelist=%u response=%s evidence=JianghuOL.CBE:0x0103014C + 0x01039430\n",
+    vm_autotest_note("mock_scene_ctrl_page pgIdx=%u nearby_roles=%u otherinfo_len=%u allow_nearby_list=%u appended_nearby_list=%u response=2/7-otherinfo evidence=JianghuOL.CBE:0x0103014C + 0x01031162\n",
                      page,
                      nearbyRoleNum,
-                     allowRoleList ? 1u : 0u,
-                     nearbyRoleNum > 0 ? "2/7+30/7" : "2/7");
+                     otherInfoLen,
+                     allowNearbyList ? 1u : 0u,
+                     appendedNearbyList ? 1u : 0u);
     return pos;
 }
 
@@ -14479,6 +14819,64 @@ static u8 vm_net_mock_build_scene_role_seeds(const char *scene,
     return count;
 }
 
+/*
+ * The 2/7 scene-control page has its own otherinfo table.  Its row layout is
+ * exactly the reader sequence in HandleFactionOtherInfoResponse(0x01031162):
+ * id, two u8 values, display name, two u8 values, two strings, and two i16
+ * coordinates.  The page only retains the id, first two bytes and display
+ * name today, but serializing every consumed field keeps the stream aligned.
+ */
+static bool vm_net_mock_build_scene_list_otherinfo_blob(const char *scene,
+                                                        u8 *otherInfo,
+                                                        u32 otherInfoCap,
+                                                        u32 *otherInfoLenOut,
+                                                        u32 *roleCountOut)
+{
+    vm_net_mock_scene_role_seed seeds[VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX];
+    u8 roleCount = 0;
+    u32 otherInfoLen = 0;
+
+    if (otherInfoLenOut)
+        *otherInfoLenOut = 0;
+    if (roleCountOut)
+        *roleCountOut = 0;
+    if (otherInfo == NULL || otherInfoCap == 0)
+        return false;
+
+    roleCount = vm_net_mock_build_scene_role_seeds(scene, seeds,
+                                                    VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX);
+    for (u8 i = 0; i < roleCount; ++i)
+    {
+        const vm_net_mock_scene_role_seed *seed = &seeds[i];
+
+        if (!vm_net_mock_seq_put_u32(otherInfo, otherInfoCap, &otherInfoLen, seed->actorId) ||
+            !vm_net_mock_seq_put_u8(otherInfo, otherInfoCap, &otherInfoLen,
+                                    seed->job > 0 ? (u8)(seed->job - 1) : 0) ||
+            !vm_net_mock_seq_put_u8(otherInfo, otherInfoCap, &otherInfoLen,
+                                    (u8)(seed->sex + 1)) ||
+            !vm_net_mock_seq_put_string(otherInfo, otherInfoCap, &otherInfoLen,
+                                        seed->roleName ? seed->roleName : "Player") ||
+            !vm_net_mock_seq_put_u8(otherInfo, otherInfoCap, &otherInfoLen,
+                                    (u8)(seed->x / 16u)) ||
+            !vm_net_mock_seq_put_u8(otherInfo, otherInfoCap, &otherInfoLen,
+                                    (u8)(seed->y / 16u)) ||
+            !vm_net_mock_seq_put_string(otherInfo, otherInfoCap, &otherInfoLen,
+                                        seed->titleText ? seed->titleText : "") ||
+            !vm_net_mock_seq_put_string(otherInfo, otherInfoCap, &otherInfoLen,
+                                        seed->titleBadge ? seed->titleBadge : "") ||
+            !vm_net_mock_seq_put_i16(otherInfo, otherInfoCap, &otherInfoLen, seed->x) ||
+            !vm_net_mock_seq_put_i16(otherInfo, otherInfoCap, &otherInfoLen, seed->y))
+        {
+            return false;
+        }
+    }
+    if (otherInfoLenOut)
+        *otherInfoLenOut = otherInfoLen;
+    if (roleCountOut)
+        *roleCountOut = roleCount;
+    return true;
+}
+
 static bool vm_net_mock_build_scene_room_roles_blob(const char *scene,
                                                     u8 *rolesInfo,
                                                     u32 rolesInfoCap,
@@ -14497,8 +14895,6 @@ static bool vm_net_mock_build_scene_room_roles_blob(const char *scene,
         return false;
 
     roleCount = vm_net_mock_build_scene_role_seeds(scene, seeds, VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX);
-    if (roleCount == 0)
-        return false;
     for (u8 i = 0; i < roleCount; ++i)
     {
         char levelText[16];
@@ -14556,6 +14952,307 @@ static bool vm_net_mock_append_scene_room_roles_object(u8 *out, u32 outCap, u32 
     if (roleNumOut)
         *roleNumOut = roleNum;
     return true;
+}
+
+static vm_mock_service_client_session *vm_mock_service_find_online_friend_session(
+    const vm_mock_service_friend_record *record)
+{
+    vm_mock_service_client_session *session = g_vm_mock_service_client_sessions;
+
+    if (record == NULL)
+        return NULL;
+    while (session != NULL)
+    {
+        if (session->roleOnline && session->onlinePresenceValid &&
+            vm_mock_service_session_presence_is_recent(session) &&
+            session->onlineRoleId == record->targetRoleId &&
+            strcmp(session->accountId, record->targetAccountId) == 0)
+        {
+            return session;
+        }
+        session = session->next;
+    }
+    return NULL;
+}
+
+static bool vm_net_mock_find_nearby_role_seed_by_actor_id(
+    const char *scene, u32 actorId, vm_net_mock_scene_role_seed *seedOut)
+{
+    vm_net_mock_scene_role_seed seeds[VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX];
+    u8 seedCount = 0;
+
+    if (seedOut)
+        memset(seedOut, 0, sizeof(*seedOut));
+    if (actorId == 0 || !vm_net_mock_scene_name_is_safe(scene))
+        return false;
+    seedCount = vm_net_mock_build_scene_role_seeds(scene, seeds,
+                                                   VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX);
+    for (u8 i = 0; i < seedCount; ++i)
+    {
+        if (seeds[i].actorId == actorId && seeds[i].session != NULL)
+        {
+            if (seedOut)
+                *seedOut = seeds[i];
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool vm_net_mock_is_friend_add_request(const u8 *request, u32 requestLen,
+                                               u32 *actorIdOut)
+{
+    u32 offset = 4;
+    u32 actorId = 0;
+    vm_net_mock_request_object object;
+
+    if (actorIdOut)
+        *actorIdOut = 0;
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T')
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        offset != requestLen ||
+        object.major != 1 || object.kind != 10 || object.subtype != 3 ||
+        !vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "id", &actorId) ||
+        actorId == 0)
+    {
+        return false;
+    }
+    if (actorIdOut)
+        *actorIdOut = actorId;
+    return true;
+}
+
+static u32 vm_net_mock_build_friend_add_response(const u8 *request, u32 requestLen,
+                                                  u8 *out, u32 outCap)
+{
+    vm_net_mock_scene_role_seed targetSeed;
+    vm_net_mock_role_state *ownerRole = vm_net_mock_active_role();
+    const char *ownerAccountId = g_vm_mock_service_active_account_id;
+    const char *scene = vm_net_mock_current_scene_name();
+    u32 actorId = 0;
+    u32 pos = 5;
+    u8 result = 1;
+    bool created = false;
+
+    memset(&targetSeed, 0, sizeof(targetSeed));
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_is_friend_add_request(request, requestLen, &actorId))
+    {
+        return 0;
+    }
+    if (ownerRole != NULL && ownerAccountId != NULL && ownerAccountId[0] != 0 &&
+        vm_net_mock_find_nearby_role_seed_by_actor_id(scene, actorId, &targetSeed) &&
+        targetSeed.session != NULL && targetSeed.session->accountId[0] != 0 &&
+        vm_mock_service_friend_db_add_pair(
+            ownerAccountId,
+            ownerRole->roleId,
+            ownerRole->name,
+            ownerRole->level,
+            ownerRole->job,
+            ownerRole->sex,
+            targetSeed.session->accountId,
+            targetSeed.session->onlineRoleId,
+            targetSeed.session->onlineRoleName,
+            targetSeed.session->onlineLevel,
+            targetSeed.session->onlineJob,
+            targetSeed.session->onlineSex,
+            &created))
+    {
+        /* The mock auto-accepts the client's 10/3 invitation. */
+        result = 0;
+    }
+
+    /*
+     * sub_101A2EA sends 10/3 and immediately displays "invitation sent"; it
+     * does not install a request-specific response callback.  The confirmed
+     * friend response dispatcher at 0x0102FF54 handles 10/1, 10/2 and 10/24,
+     * but not 10/3.  Do not invent a 10/3 downlink object: acknowledge the
+     * transport with an empty WT packet and let the next real 10/1 page query
+     * expose the auto-accepted relationship.
+     */
+    vm_net_mock_finish_wt_packet(out, pos, 0);
+
+    printf("[info][network] mock_friend_add actor=%u result=%u created=%u owner=%s/%u target=%s/%u resp=%u\n",
+           actorId,
+           result,
+           created ? 1u : 0u,
+           ownerAccountId ? ownerAccountId : "-",
+           ownerRole ? ownerRole->roleId : 0,
+           targetSeed.session && targetSeed.session->accountId[0] ? targetSeed.session->accountId : "-",
+           targetSeed.session ? targetSeed.session->onlineRoleId : 0,
+           pos);
+    vm_autotest_note("mock_friend_add actor=%u result=%u created=%u response=empty-wt evidence=JianghuOL.CBE:0x0101A2EA+0x0102FF54 message=invite-sent\n",
+                     actorId,
+                     result,
+                     created ? 1u : 0u);
+    return pos;
+}
+
+static bool vm_net_mock_is_friend_page_request(const u8 *request, u32 requestLen,
+                                                u32 *indexOut, u8 *pageSizeOut)
+{
+    u32 offset = 4;
+    u32 index = 0;
+    u8 pageSize = 0;
+    vm_net_mock_request_object object;
+
+    if (indexOut)
+        *indexOut = 0;
+    if (pageSizeOut)
+        *pageSizeOut = 0;
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T')
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        offset != requestLen ||
+        object.major != 1 || object.kind != 10 || object.subtype != 1)
+    {
+        return false;
+    }
+    /* JianghuOL.CBE:SendPagedListReq(0x0101A5EE) writes these exact fields. */
+    if (!vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "index", &index) ||
+        !vm_net_mock_get_object_u8_field(object.payload, object.payloadLen, "pageSize", &pageSize) ||
+        pageSize == 0)
+    {
+        return false;
+    }
+    if (indexOut)
+        *indexOut = index;
+    if (pageSizeOut)
+        *pageSizeOut = pageSize;
+    return true;
+}
+
+static u32 vm_net_mock_build_friend_page_response(const u8 *request, u32 requestLen,
+                                                   u8 *out, u32 outCap)
+{
+    u8 friendInfo[8192];
+    vm_net_mock_role_state *ownerRole = vm_net_mock_active_role();
+    const char *ownerAccountId = g_vm_mock_service_active_account_id;
+    u32 index = 0;
+    u32 friendInfoLen = 0;
+    u32 objectStart = 0;
+    u32 pos = 5;
+    u32 totalPages = 1;
+    u32 totalFriends = 0;
+    u32 skippedFriends = 0;
+    u16 rowCount = 0;
+    u8 pageSize = 0;
+    u8 allPages8 = 1;
+
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_is_friend_page_request(request, requestLen, &index, &pageSize))
+    {
+        return 0;
+    }
+
+    /*
+     * HandleFriendInfoResponse(0x0102FF54) first reads an i16 row count, then
+     * consumes {u32 id, string name, u8 state, u32 attr32, u8 attr8}.
+     * SortFriendListByOnline(0x0102FD86) proves state 1/2 are the live-row
+     * family. HandleFriendResponse(0x0102157A) matches friendid and adds
+     * addedfd to attr32, proving that attr32 is the persisted friend degree.
+     */
+    vm_mock_service_friend_db_load();
+    if (ownerRole != NULL && ownerAccountId != NULL && ownerAccountId[0] != 0 &&
+        g_vm_mock_service_friend_db_valid)
+    {
+        for (u32 i = 0; i < g_vm_mock_service_friend_db.recordCount; ++i)
+        {
+            const vm_mock_service_friend_record *record = &g_vm_mock_service_friend_db.records[i];
+            if (record->ownerRoleId == ownerRole->roleId &&
+                strcmp(record->ownerAccountId, ownerAccountId) == 0)
+            {
+                ++totalFriends;
+            }
+        }
+    }
+    if (totalFriends > 0)
+        totalPages = (totalFriends + pageSize - 1u) / pageSize;
+    allPages8 = (u8)(totalPages > 0xffu ? 0xffu : totalPages);
+
+    if (!vm_net_mock_seq_put_i16(friendInfo, sizeof(friendInfo), &friendInfoLen, 0))
+        return 0;
+    if (ownerRole != NULL && ownerAccountId != NULL && ownerAccountId[0] != 0)
+    {
+        for (u32 i = 0; i < g_vm_mock_service_friend_db.recordCount; ++i)
+        {
+            const vm_mock_service_friend_record *record = &g_vm_mock_service_friend_db.records[i];
+            vm_mock_service_client_session *onlineSession = NULL;
+            const char *friendName = NULL;
+            u8 friendState = 0;
+            u8 friendAttr8 = 1;
+
+            if (record->ownerRoleId != ownerRole->roleId ||
+                strcmp(record->ownerAccountId, ownerAccountId) != 0)
+            {
+                continue;
+            }
+            if (skippedFriends < index)
+            {
+                ++skippedFriends;
+                continue;
+            }
+            if (rowCount >= pageSize)
+                break;
+            onlineSession = vm_mock_service_find_online_friend_session(record);
+            friendName = onlineSession && onlineSession->onlineRoleName[0] ?
+                         onlineSession->onlineRoleName : record->targetRoleName;
+            friendState = onlineSession ? 1 : 0;
+            friendAttr8 = onlineSession && onlineSession->onlineJob ?
+                          onlineSession->onlineJob : record->targetJob;
+            if (!vm_net_mock_seq_put_u32(friendInfo, sizeof(friendInfo), &friendInfoLen,
+                                         record->targetRoleId) ||
+                !vm_net_mock_seq_put_string(friendInfo, sizeof(friendInfo), &friendInfoLen,
+                                            friendName && friendName[0] ? friendName : "Player") ||
+                !vm_net_mock_seq_put_u8(friendInfo, sizeof(friendInfo), &friendInfoLen,
+                                        friendState) ||
+                !vm_net_mock_seq_put_u32(friendInfo, sizeof(friendInfo), &friendInfoLen,
+                                         record->friendDegree) ||
+                !vm_net_mock_seq_put_u8(friendInfo, sizeof(friendInfo), &friendInfoLen,
+                                        friendAttr8 ? friendAttr8 : 1))
+            {
+                return 0;
+            }
+            ++rowCount;
+        }
+    }
+    /* Patch the typed i16 row count emitted at the head of friendinfo. */
+    friendInfo[2] = (u8)(rowCount >> 8);
+    friendInfo[3] = (u8)rowCount;
+
+    if (friendInfoLen > 0xffff ||
+        !vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 10, 1, &objectStart))
+    {
+        return 0;
+    }
+    /* HandleFriendInfoResponse reads allpgs through LookupItemByteField. */
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "allpgs", allPages8) ||
+        !vm_net_mock_put_object_raw(out, outCap, &pos, "friendinfo",
+                                    friendInfo, (u16)friendInfoLen))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+
+    printf("[info][network] mock_friend_page index=%u page_size=%u owner=%s/%u total=%u rows=%u allpgs=%u friendinfo_len=%u resp=%u\n",
+           index,
+           pageSize,
+           ownerAccountId ? ownerAccountId : "-",
+           ownerRole ? ownerRole->roleId : 0,
+           totalFriends,
+           rowCount,
+           totalPages,
+           friendInfoLen,
+           pos);
+    vm_autotest_note("mock_friend_page index=%u page_size=%u owner=%u total=%u rows=%u response=10/1 evidence=JianghuOL.CBE:0x0101A5EE+0x0102FF54+0x0102157A\n",
+                     index,
+                     pageSize,
+                     ownerRole ? ownerRole->roleId : 0,
+                     totalFriends,
+                     rowCount);
+    return pos;
 }
 
 static bool vm_net_mock_append_scene_resource_followup_objects(u8 *out, u32 outCap, u32 *pos,
@@ -24289,6 +24986,20 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     if (hookedLen)
     {
         vm_net_log_handled_packet("builtin-scene-ctrl-page", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_friend_add_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-friend-add", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_friend_page_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-friend-page", request, requestLen, hookedLen);
         return hookedLen;
     }
 
