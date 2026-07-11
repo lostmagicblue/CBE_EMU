@@ -6990,7 +6990,7 @@ static bool vm_mock_service_friend_db_add_pair(
         return false;
     }
     if (forwardChanged || reverseChanged)
-        vm_mock_service_friend_db_save("friend-add-auto-accept");
+        vm_mock_service_friend_db_save("friend-invite-accepted");
     if (createdOut)
         *createdOut = forwardCreated || reverseCreated;
     return true;
@@ -10080,7 +10080,8 @@ static u32 g_vm_mock_service_active_client_id = 0;
 
 enum
 {
-    VM_MOCK_SERVICE_PEER_SYNC_MAX = 16
+    VM_MOCK_SERVICE_PEER_SYNC_MAX = 16,
+    VM_MOCK_SERVICE_SOCIAL_NOTICE_MAX = 4
 };
 
 typedef struct
@@ -10090,6 +10091,29 @@ typedef struct
     u32 lastMoveSerial;
     bool visible;
 } vm_mock_service_peer_sync;
+
+enum
+{
+    VM_MOCK_SERVICE_SOCIAL_NOTICE_NONE = 0,
+    VM_MOCK_SERVICE_SOCIAL_NOTICE_FRIEND_INVITE = 1,
+    VM_MOCK_SERVICE_SOCIAL_NOTICE_TRADE_INVITE = 2,
+    VM_MOCK_SERVICE_SOCIAL_NOTICE_FRIEND_RESULT = 3,
+    VM_MOCK_SERVICE_SOCIAL_NOTICE_TRADE_RESULT = 4
+};
+
+typedef struct
+{
+    u8 type;
+    u8 result;
+    u32 sourceClientId;
+    u32 sourceRoleId;
+    u16 sourceLevel;
+    u8 sourceJob;
+    u8 sourceSex;
+    char sourceAccountId[64];
+    char sourceName[32];
+    u32 queuedTick;
+} vm_mock_service_social_notice;
 
 typedef struct vm_mock_service_client_session
 {
@@ -10104,6 +10128,7 @@ typedef struct vm_mock_service_client_session
     u8 onlineJob;
     u8 onlineSex;
     u16 onlineLevel;
+    u32 onlineEquippedItemIds[VM_NET_MOCK_EQUIP_SLOT_COUNT];
     u32 onlineHp;
     u32 onlineHpMax;
     u32 onlineMp;
@@ -10132,6 +10157,13 @@ typedef struct vm_mock_service_client_session
     u8 pendingDirQueueBlob[32];
     u32 pendingDirQueueTick;
     u32 pendingDirQueueSerial;
+    vm_mock_service_social_notice socialNotices[VM_MOCK_SERVICE_SOCIAL_NOTICE_MAX];
+    bool friendInviteReplyActive;
+    u32 friendInviteSourceClientId;
+    u32 friendInviteSourceRoleId;
+    bool tradeInviteReplyActive;
+    u32 tradeInviteSourceClientId;
+    u32 tradeInviteSourceRoleId;
     char scenePendingScene[64];
     vm_mock_service_peer_sync peerSync[VM_MOCK_SERVICE_PEER_SYNC_MAX];
     struct vm_mock_service_client_session *next;
@@ -10423,6 +10455,84 @@ static vm_mock_service_client_session *vm_mock_service_get_active_client_session
     if (g_vm_mock_service_active_client_id == 0)
         return NULL;
     return vm_mock_service_find_client_session(g_vm_mock_service_active_client_id);
+}
+
+static const char *vm_mock_service_social_notice_name(u8 type)
+{
+    switch (type)
+    {
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_FRIEND_INVITE:
+        return "friend-invite";
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_TRADE_INVITE:
+        return "trade-invite";
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_FRIEND_RESULT:
+        return "friend-result";
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_TRADE_RESULT:
+        return "trade-result";
+    default:
+        return "unknown";
+    }
+}
+
+static bool vm_mock_service_session_enqueue_social_notice(
+    vm_mock_service_client_session *target,
+    u8 type,
+    u8 result,
+    const vm_mock_service_client_session *source,
+    const vm_net_mock_role_state *sourceRole,
+    const char *sourceAccountId)
+{
+    vm_mock_service_social_notice *slot = NULL;
+
+    if (target == NULL || source == NULL || sourceRole == NULL ||
+        type == VM_MOCK_SERVICE_SOCIAL_NOTICE_NONE || sourceRole->roleId == 0)
+    {
+        return false;
+    }
+    for (u32 i = 0; i < VM_MOCK_SERVICE_SOCIAL_NOTICE_MAX; ++i)
+    {
+        vm_mock_service_social_notice *entry = &target->socialNotices[i];
+        if (entry->type == type && entry->sourceClientId == source->clientId &&
+            entry->sourceRoleId == sourceRole->roleId)
+        {
+            /* Duplicate button presses must not create multiple modal prompts. */
+            return true;
+        }
+        if (slot == NULL && entry->type == VM_MOCK_SERVICE_SOCIAL_NOTICE_NONE)
+            slot = entry;
+    }
+    if (slot == NULL)
+    {
+        printf("[warn][mock-service] social_notice_drop target=%08x action=%s source=%08x/%u reason=queue-full\n",
+               target->clientId,
+               vm_mock_service_social_notice_name(type),
+               source->clientId,
+               sourceRole->roleId);
+        return false;
+    }
+
+    memset(slot, 0, sizeof(*slot));
+    slot->type = type;
+    slot->result = result;
+    slot->sourceClientId = source->clientId;
+    slot->sourceRoleId = sourceRole->roleId;
+    slot->sourceLevel = (u16)(sourceRole->level ? sourceRole->level : 1);
+    slot->sourceJob = sourceRole->job ? sourceRole->job : 1;
+    slot->sourceSex = sourceRole->sex <= 1 ? sourceRole->sex : 0;
+    snprintf(slot->sourceAccountId, sizeof(slot->sourceAccountId), "%s",
+             sourceAccountId && sourceAccountId[0] ? sourceAccountId : source->accountId);
+    snprintf(slot->sourceName, sizeof(slot->sourceName), "%s",
+             sourceRole->name[0] ? sourceRole->name :
+             (source->onlineRoleName[0] ? source->onlineRoleName : "Player"));
+    slot->queuedTick = g_schedulerTick;
+    printf("[info][mock-service] social_notice_queue target=%08x action=%s source=%08x/%u name=%s result=%u\n",
+           target->clientId,
+           vm_mock_service_social_notice_name(type),
+           source->clientId,
+           sourceRole->roleId,
+           slot->sourceName,
+           result);
+    return true;
 }
 
 static bool vm_net_mock_is_actor_moveinfo_timeline(const u8 *moveInfo, u16 moveInfoLen);
@@ -10833,6 +10943,8 @@ static void vm_mock_service_capture_session_presence(u32 clientId)
     session->onlineJob = role->job;
     session->onlineSex = role->sex;
     session->onlineLevel = (u16)(role->level ? role->level : 1);
+    memcpy(session->onlineEquippedItemIds, role->equippedItemIds,
+           sizeof(session->onlineEquippedItemIds));
     session->onlineHp = role->hp ? role->hp : hp;
     session->onlineHpMax = role->hpMax ? role->hpMax : hpMax;
     session->onlineMp = role->mp ? role->mp : mp;
@@ -14998,6 +15110,463 @@ static bool vm_net_mock_find_nearby_role_seed_by_actor_id(
     return false;
 }
 
+/* A friend-list row uses the persistent role id, rather than a temporary
+ * scene-node index.  29/4 is available from that list even if the target is
+ * no longer in the caller's nearby seed set, so resolve only a confirmed
+ * friend row as the second, still-narrow target scope. */
+static bool vm_net_mock_find_friend_role_seed_by_role_id(
+    u32 roleId, vm_net_mock_scene_role_seed *seedOut)
+{
+    vm_net_mock_role_state *ownerRole = vm_net_mock_active_role();
+    const char *ownerAccountId = g_vm_mock_service_active_account_id;
+
+    if (seedOut)
+        memset(seedOut, 0, sizeof(*seedOut));
+    if (roleId == 0 || ownerRole == NULL || ownerAccountId == NULL ||
+        ownerAccountId[0] == 0)
+    {
+        return false;
+    }
+
+    vm_mock_service_friend_db_load();
+    if (!g_vm_mock_service_friend_db_valid)
+        return false;
+    for (u32 i = 0; i < g_vm_mock_service_friend_db.recordCount; ++i)
+    {
+        const vm_mock_service_friend_record *record = &g_vm_mock_service_friend_db.records[i];
+        vm_mock_service_client_session *onlineSession = NULL;
+        vm_net_mock_scene_role_seed seed;
+
+        if (record->ownerRoleId != ownerRole->roleId ||
+            record->targetRoleId != roleId ||
+            strcmp(record->ownerAccountId, ownerAccountId) != 0)
+        {
+            continue;
+        }
+        memset(&seed, 0, sizeof(seed));
+        onlineSession = vm_mock_service_find_online_friend_session(record);
+        seed.actorId = record->targetRoleId;
+        seed.x = onlineSession ? onlineSession->onlineX : 0;
+        seed.y = onlineSession ? onlineSession->onlineY : 0;
+        seed.job = onlineSession && onlineSession->onlineJob ?
+                   onlineSession->onlineJob : (record->targetJob ? record->targetJob : 1);
+        seed.sex = onlineSession && onlineSession->onlineSex <= 1 ?
+                   onlineSession->onlineSex : (record->targetSex <= 1 ? record->targetSex : 0);
+        seed.level = onlineSession && onlineSession->onlineLevel ?
+                     onlineSession->onlineLevel : (u16)(record->targetLevel ? record->targetLevel : 1);
+        seed.hp = onlineSession ? onlineSession->onlineHp : 0;
+        seed.hpMax = onlineSession ? onlineSession->onlineHpMax : 0;
+        seed.mp = onlineSession ? onlineSession->onlineMp : 0;
+        seed.mpMax = onlineSession ? onlineSession->onlineMpMax : 0;
+        seed.roleName = onlineSession && onlineSession->onlineRoleName[0] ?
+                        onlineSession->onlineRoleName :
+                        (record->targetRoleName[0] ? record->targetRoleName : "Player");
+        seed.stateText = onlineSession ? "Online" : "Offline";
+        seed.session = onlineSession;
+        if (seedOut)
+            *seedOut = seed;
+        return true;
+    }
+    return false;
+}
+
+/*
+ * The surrounding-player action menu is a set of independent client requests,
+ * not variants of 2/7.  The sender functions are:
+ *
+ *   10/2  { id, type=2 }      player/faction information
+ *   29/4  { id }              equipment view
+ *   10/13 { id, fid }         faction invitation
+ *   21/1  { id }              trade request
+ *   5/1   { id }              team invitation
+ *   4/14  { id }              sparring request
+ *   10/3  { id }              friend invitation (handled below)
+ *
+ * Evidence: JianghuOL.CBE Init/HandleFriendListInput at 0x0103023C and
+ * SendShopType2Event/SendBattleEnterReq/SendSkillUseReq/EnterSceneTransition/
+ * CheckBattleJoinCondition/ShowSceneActionConfirm at 0x0101A5AA,
+ * 0x0101A2B6, 0x0101A3C8, 0x0101C408, 0x0101BEF4, and 0x0102E624.
+ */
+static bool vm_net_mock_is_nearby_actor_action_request(const u8 *request, u32 requestLen,
+                                                        u8 kind, u8 subtype,
+                                                        const char *requiredField,
+                                                        bool requireType, u8 typeValue,
+                                                        u32 *actorIdOut)
+{
+    u32 offset = 4;
+    u32 actorId = 0;
+    u8 requestType = 0;
+    const u8 *requiredValue = NULL;
+    u16 requiredValueLen = 0;
+    vm_net_mock_request_object object;
+
+    if (actorIdOut)
+        *actorIdOut = 0;
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T')
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        offset != requestLen ||
+        object.major != 1 || object.kind != kind || object.subtype != subtype ||
+        !vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "id", &actorId) ||
+        actorId == 0)
+    {
+        return false;
+    }
+    if (requiredField != NULL &&
+        !vm_net_mock_get_object_entry_field(object.payload, object.payloadLen, requiredField,
+                                            &requiredValue, &requiredValueLen))
+    {
+        return false;
+    }
+    if (requireType &&
+        (!vm_net_mock_get_object_u8_field(object.payload, object.payloadLen, "type", &requestType) ||
+         requestType != typeValue))
+    {
+        return false;
+    }
+    if (actorIdOut)
+        *actorIdOut = actorId;
+    return true;
+}
+
+static bool vm_net_mock_is_nearby_player_info_request(const u8 *request, u32 requestLen,
+                                                       u32 *actorIdOut)
+{
+    return vm_net_mock_is_nearby_actor_action_request(request, requestLen, 10, 2,
+                                                       NULL, true, 2, actorIdOut);
+}
+
+static bool vm_net_mock_is_nearby_equip_view_request(const u8 *request, u32 requestLen,
+                                                      u32 *actorIdOut)
+{
+    return vm_net_mock_is_nearby_actor_action_request(request, requestLen, 29, 4,
+                                                       NULL, false, 0, actorIdOut);
+}
+
+static bool vm_net_mock_is_nearby_guild_invite_request(const u8 *request, u32 requestLen,
+                                                        u32 *actorIdOut)
+{
+    return vm_net_mock_is_nearby_actor_action_request(request, requestLen, 10, 13,
+                                                       "fid", false, 0, actorIdOut);
+}
+
+static bool vm_net_mock_is_nearby_trade_request(const u8 *request, u32 requestLen,
+                                                 u32 *actorIdOut)
+{
+    return vm_net_mock_is_nearby_actor_action_request(request, requestLen, 21, 1,
+                                                       NULL, false, 0, actorIdOut);
+}
+
+static bool vm_net_mock_is_nearby_team_invite_request(const u8 *request, u32 requestLen,
+                                                       u32 *actorIdOut)
+{
+    return vm_net_mock_is_nearby_actor_action_request(request, requestLen, 5, 1,
+                                                       NULL, false, 0, actorIdOut);
+}
+
+static bool vm_net_mock_is_nearby_spar_request(const u8 *request, u32 requestLen,
+                                                u32 *actorIdOut)
+{
+    return vm_net_mock_is_nearby_actor_action_request(request, requestLen, 4, 14,
+                                                       NULL, false, 0, actorIdOut);
+}
+
+static u32 vm_net_mock_build_nearby_player_info_response(const u8 *request, u32 requestLen,
+                                                          u8 *out, u32 outCap)
+{
+    vm_net_mock_scene_role_seed targetSeed;
+    u8 playerInfo[256];
+    char nameLine[96];
+    char levelJobLine[128];
+    char factionSexLine[128];
+    u32 playerInfoLen = 0;
+    u32 objectStart = 0;
+    u32 actorId = 0;
+    u32 pos = 5;
+    const char *scene = vm_net_mock_current_scene_name();
+    const char *displayName = NULL;
+    const char *jobName = NULL;
+    const char *sexName = NULL;
+
+    memset(&targetSeed, 0, sizeof(targetSeed));
+    memset(playerInfo, 0, sizeof(playerInfo));
+    memset(nameLine, 0, sizeof(nameLine));
+    memset(levelJobLine, 0, sizeof(levelJobLine));
+    memset(factionSexLine, 0, sizeof(factionSexLine));
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_is_nearby_player_info_request(request, requestLen, &actorId) ||
+        !vm_net_mock_find_nearby_role_seed_by_actor_id(scene, actorId, &targetSeed))
+    {
+        return 0;
+    }
+
+    /* The CBE renders the strings as GBK.  Keep fixed labels as explicit GBK
+     * bytes so they remain Chinese regardless of the host compiler's source
+     * encoding; roleName itself is already the role DB's GBK display name. */
+    displayName = targetSeed.roleName && targetSeed.roleName[0] &&
+                  strcmp(targetSeed.roleName, "Player") != 0 ?
+                  targetSeed.roleName : "\xcf\xc0\xbf\xcd"; /* GBK: 侠客 */
+    switch (targetSeed.job)
+    {
+    case 2:
+        jobName = "\xb4\xcc\xbf\xcd"; /* GBK: 刺客 */
+        break;
+    case 3:
+        jobName = "\xb7\xa8\xca\xa6"; /* GBK: 法师 */
+        break;
+    case 1:
+    default:
+        jobName = "\xd5\xbd\xca\xbf"; /* GBK: 战士 */
+        break;
+    }
+    sexName = targetSeed.sex == 1 ? "\xc5\xae" : "\xc4\xd0"; /* GBK: 女 / 男 */
+    snprintf(nameLine, sizeof(nameLine), "\xd0\xd5\xc3\xfb\xa3\xba%s", displayName); /* 姓名： */
+    snprintf(levelJobLine, sizeof(levelJobLine),
+             "\xb5\xc8\xbc\xb6\xa3\xba%u\xbc\xb6\xa1\xa1\xd6\xb0\xd2\xb5\xa3\xba%s",
+             targetSeed.level ? targetSeed.level : 1, jobName); /* 等级：<n>级　职业： */
+    snprintf(factionSexLine, sizeof(factionSexLine),
+             "\xb0\xef\xc5\xc9\xa3\xba\xd4\xdd\xce\xde\xa1\xa1\xd0\xd4\xb1\xf0\xa3\xba%s",
+             sexName); /* 帮派：暂无　性别： */
+    /* HandleFactionDegreeResponse reads each playerinfo element as a normal
+     * length-prefixed serial string, then appends fdegree as its final row.
+     * Two playerinfo rows plus fdegree make a compact, evenly spaced Chinese
+     * profile without changing the client's list renderer. */
+    if (!vm_net_mock_seq_put_string(playerInfo, sizeof(playerInfo), &playerInfoLen,
+                                    nameLine) ||
+        !vm_net_mock_seq_put_string(playerInfo, sizeof(playerInfo), &playerInfoLen,
+                                    levelJobLine) ||
+        playerInfoLen == 0 || playerInfoLen > 0xffffu ||
+        !vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 10, 2, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "type", 2) ||
+        !vm_net_mock_put_object_string(out, outCap, &pos, "fdegree", factionSexLine) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "num", 2) ||
+        !vm_net_mock_put_object_raw(out, outCap, &pos, "playerinfo",
+                                    playerInfo, (u16)playerInfoLen))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    printf("[info][network] mock_nearby_player_info actor=%u name=%s level=%u scene=%s playerinfo_len=%u resp=%u evidence=JianghuOL.CBE:0x0101A5AA+0x010211A8\n",
+           actorId,
+           targetSeed.roleName ? targetSeed.roleName : "Player",
+           targetSeed.level,
+           scene ? scene : "-",
+           playerInfoLen,
+           pos);
+    vm_autotest_note("mock_nearby_player_info actor=%u level=%u response=10/2 evidence=JianghuOL.CBE:0x0101A5AA+0x010211A8\n",
+                     actorId, targetSeed.level);
+    return pos;
+}
+
+/* HandleEquipInfoResponse(0x010216D6) gets the row count from `num`, then
+ * reads each raw row as u32 itemId, u16 seq, and ParseEquipAttributes data.
+ * Unlike backpack iteminfo, equipinfo has no count byte in its raw stream. */
+static bool vm_net_mock_build_nearby_equipinfo_blob(
+    u8 *out, u32 outCap, const vm_net_mock_scene_role_seed *targetSeed,
+    u32 *blobLenOut, u8 *rowCountOut)
+{
+    const vm_mock_service_client_session *session = NULL;
+    u32 pos = 0;
+    u8 rowCount = 0;
+
+    if (blobLenOut)
+        *blobLenOut = 0;
+    if (rowCountOut)
+        *rowCountOut = 0;
+    if (out == NULL || targetSeed == NULL)
+        return false;
+
+    session = targetSeed->session;
+    for (u8 slot = 0; session != NULL && slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
+    {
+        u32 itemId = session->onlineEquippedItemIds[slot];
+
+        /* The client opens its local equip.dsh for each row.  Do not emit an
+         * unknown id that would leave its visual/slot lookup uninitialized. */
+        if (itemId == 0 || vm_net_mock_find_equipment_catalog_item(itemId) == NULL)
+            continue;
+        if (!vm_net_mock_seq_put_u32(out, outCap, &pos, itemId) ||
+            !vm_net_mock_seq_put_i16(out, outCap, &pos, (u16)(slot + 1)) ||
+            !vm_net_mock_seq_put_item_common_extra(out, outCap, &pos, 0))
+        {
+            return false;
+        }
+        ++rowCount;
+    }
+
+    /* Every newly created role has this weapon.  The fallback also covers a
+     * visible session captured before its first post-upgrade presence refresh. */
+    if (rowCount == 0)
+    {
+        u32 itemId = vm_net_mock_role_default_weapon_for_job(targetSeed->job);
+        if (vm_net_mock_find_equipment_catalog_item(itemId) == NULL ||
+            !vm_net_mock_seq_put_u32(out, outCap, &pos, itemId) ||
+            !vm_net_mock_seq_put_i16(out, outCap, &pos, 1) ||
+            !vm_net_mock_seq_put_item_common_extra(out, outCap, &pos, 0))
+        {
+            return false;
+        }
+        rowCount = 1;
+    }
+
+    if (blobLenOut)
+        *blobLenOut = pos;
+    if (rowCountOut)
+        *rowCountOut = rowCount;
+    return true;
+}
+
+static u32 vm_net_mock_build_nearby_equip_view_response(const u8 *request, u32 requestLen,
+                                                         u8 *out, u32 outCap)
+{
+    vm_net_mock_scene_role_seed targetSeed;
+    u8 equipInfo[VM_NET_MOCK_EQUIP_SLOT_COUNT * 11];
+    u32 objectStart = 0;
+    u32 actorId = 0;
+    u32 pos = 5;
+    u32 equipInfoLen = 0;
+    u8 equipRowCount = 0;
+    u8 workVisualVariant = 0;
+    u8 sexVisualGroup = 1;
+    const char *targetScope = "nearby";
+    const char *scene = vm_net_mock_current_scene_name();
+
+    memset(&targetSeed, 0, sizeof(targetSeed));
+    memset(equipInfo, 0, sizeof(equipInfo));
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_is_nearby_equip_view_request(request, requestLen, &actorId) ||
+        (!vm_net_mock_find_nearby_role_seed_by_actor_id(scene, actorId, &targetSeed) &&
+         (targetScope = "friend",
+          !vm_net_mock_find_friend_role_seed_by_role_id(actorId, &targetSeed))) ||
+        !vm_net_mock_build_nearby_equipinfo_blob(equipInfo, sizeof(equipInfo), &targetSeed,
+                                                  &equipInfoLen, &equipRowCount) ||
+        equipRowCount == 0)
+    {
+        return 0;
+    }
+
+    /* The equipment-view draw path (0x01020C1A -> 0x010206C4) indexes its
+     * role-resource table as 2 * work + sex.  It has three zero-based jobs
+     * and two one-based sex groups.  Persisted jobs are 1..3, so sending one
+     * unchanged shifts every portrait and makes job 3 read past that table. */
+    workVisualVariant = targetSeed.job >= 1 && targetSeed.job <= 3 ?
+                        (u8)(targetSeed.job - 1) : 0;
+    sexVisualGroup = targetSeed.sex <= 1 ? (u8)(targetSeed.sex + 1) : 1;
+
+    /* result=1 enters the equipment viewer. Its renderer requires at least
+     * one valid local equip.dsh row; `num=0` leaves the viewer half-initialized
+     * and reaches DrawMapTileLayer with an invalid tile-layer pointer. */
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 29, 4, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "num", equipRowCount) ||
+        !vm_net_mock_put_object_u16(out, outCap, &pos, "level",
+                                    targetSeed.level ? targetSeed.level : 1) ||
+        !vm_net_mock_put_object_string(out, outCap, &pos, "name",
+                                       targetSeed.roleName ? targetSeed.roleName : "Player") ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "work", workVisualVariant) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "sex", sexVisualGroup) ||
+        !vm_net_mock_put_object_raw(out, outCap, &pos, "equipinfo",
+                                    equipInfo, (u16)equipInfoLen))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    printf("[info][network] mock_nearby_equip_view actor=%u scope=%s name=%s level=%u job=%u sex=%u work=%u sex_group=%u scene=%s entries=%u equipinfo_len=%u resp=%u evidence=JianghuOL.CBE:0x0101A2B6+0x010216D6+0x01020C1A\n",
+           actorId,
+           targetScope,
+           targetSeed.roleName ? targetSeed.roleName : "Player",
+           targetSeed.level,
+           targetSeed.job,
+           targetSeed.sex,
+           workVisualVariant,
+           sexVisualGroup,
+           scene ? scene : "-",
+           equipRowCount,
+           equipInfoLen,
+           pos);
+    vm_autotest_note("mock_nearby_equip_view actor=%u scope=%s work=%u sex_group=%u entries=%u equipinfo_len=%u response=29/4 evidence=JianghuOL.CBE:0x0101A2B6+0x010216D6+0x01020C1A\n",
+                     actorId, targetScope, workVisualVariant, sexVisualGroup,
+                     equipRowCount, equipInfoLen);
+    return pos;
+}
+
+/* The request sender displays its own \"sent\" message.  Its target-facing
+ * notice is queued for the receiver's next normal scene-sync poll. */
+static u32 vm_net_mock_build_nearby_social_action_ack_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap,
+    bool (*isRequest)(const u8 *, u32, u32 *), const char *action,
+    u8 targetNoticeType)
+{
+    vm_net_mock_scene_role_seed targetSeed;
+    vm_mock_service_client_session *sourceSession = vm_mock_service_get_active_client_session();
+    vm_net_mock_role_state *sourceRole = vm_net_mock_active_role();
+    const char *sourceAccountId = g_vm_mock_service_active_account_id;
+    const char *scene = vm_net_mock_current_scene_name();
+    u32 actorId = 0;
+    u32 pos = 5;
+    bool queued = false;
+
+    memset(&targetSeed, 0, sizeof(targetSeed));
+    if (out == NULL || outCap < pos || isRequest == NULL ||
+        !isRequest(request, requestLen, &actorId) ||
+        !vm_net_mock_find_nearby_role_seed_by_actor_id(scene, actorId, &targetSeed))
+    {
+        return 0;
+    }
+    if (targetNoticeType != VM_MOCK_SERVICE_SOCIAL_NOTICE_NONE &&
+        targetSeed.session != NULL && sourceSession != NULL && sourceRole != NULL)
+    {
+        queued = vm_mock_service_session_enqueue_social_notice(
+            targetSeed.session, targetNoticeType, 0, sourceSession, sourceRole, sourceAccountId);
+    }
+    vm_net_mock_finish_wt_packet(out, pos, 0);
+    printf("[info][network] mock_nearby_%s actor=%u target=%s scene=%s queued=%u transport_ack=empty-wt resp=%u\n",
+           action ? action : "action",
+           actorId,
+           targetSeed.roleName ? targetSeed.roleName : "Player",
+           scene ? scene : "-",
+           queued ? 1u : 0u,
+           pos);
+    vm_autotest_note("mock_nearby_%s actor=%u queued=%u response=empty-wt sender-confirmed=1\n",
+                     action ? action : "action", actorId, queued ? 1u : 0u);
+    return pos;
+}
+
+static u32 vm_net_mock_build_nearby_guild_invite_response(const u8 *request, u32 requestLen,
+                                                           u8 *out, u32 outCap)
+{
+    return vm_net_mock_build_nearby_social_action_ack_response(
+        request, requestLen, out, outCap, vm_net_mock_is_nearby_guild_invite_request,
+        "guild-invite", VM_MOCK_SERVICE_SOCIAL_NOTICE_NONE);
+}
+
+static u32 vm_net_mock_build_nearby_trade_request_response(const u8 *request, u32 requestLen,
+                                                            u8 *out, u32 outCap)
+{
+    return vm_net_mock_build_nearby_social_action_ack_response(
+        request, requestLen, out, outCap, vm_net_mock_is_nearby_trade_request,
+        "trade-request", VM_MOCK_SERVICE_SOCIAL_NOTICE_TRADE_INVITE);
+}
+
+static u32 vm_net_mock_build_nearby_team_invite_response(const u8 *request, u32 requestLen,
+                                                          u8 *out, u32 outCap)
+{
+    return vm_net_mock_build_nearby_social_action_ack_response(
+        request, requestLen, out, outCap, vm_net_mock_is_nearby_team_invite_request,
+        "team-invite", VM_MOCK_SERVICE_SOCIAL_NOTICE_NONE);
+}
+
+static u32 vm_net_mock_build_nearby_spar_request_response(const u8 *request, u32 requestLen,
+                                                           u8 *out, u32 outCap)
+{
+    return vm_net_mock_build_nearby_social_action_ack_response(
+        request, requestLen, out, outCap, vm_net_mock_is_nearby_spar_request,
+        "spar-request", VM_MOCK_SERVICE_SOCIAL_NOTICE_NONE);
+}
+
 static bool vm_net_mock_is_friend_add_request(const u8 *request, u32 requestLen,
                                                u32 *actorIdOut)
 {
@@ -15026,13 +15595,13 @@ static u32 vm_net_mock_build_friend_add_response(const u8 *request, u32 requestL
                                                   u8 *out, u32 outCap)
 {
     vm_net_mock_scene_role_seed targetSeed;
+    vm_mock_service_client_session *sourceSession = vm_mock_service_get_active_client_session();
     vm_net_mock_role_state *ownerRole = vm_net_mock_active_role();
     const char *ownerAccountId = g_vm_mock_service_active_account_id;
     const char *scene = vm_net_mock_current_scene_name();
     u32 actorId = 0;
     u32 pos = 5;
-    u8 result = 1;
-    bool created = false;
+    bool queued = false;
 
     memset(&targetSeed, 0, sizeof(targetSeed));
     if (out == NULL || outCap < pos ||
@@ -15041,50 +15610,211 @@ static u32 vm_net_mock_build_friend_add_response(const u8 *request, u32 requestL
         return 0;
     }
     if (ownerRole != NULL && ownerAccountId != NULL && ownerAccountId[0] != 0 &&
+        sourceSession != NULL &&
         vm_net_mock_find_nearby_role_seed_by_actor_id(scene, actorId, &targetSeed) &&
-        targetSeed.session != NULL && targetSeed.session->accountId[0] != 0 &&
-        vm_mock_service_friend_db_add_pair(
-            ownerAccountId,
-            ownerRole->roleId,
-            ownerRole->name,
-            ownerRole->level,
-            ownerRole->job,
-            ownerRole->sex,
-            targetSeed.session->accountId,
-            targetSeed.session->onlineRoleId,
-            targetSeed.session->onlineRoleName,
-            targetSeed.session->onlineLevel,
-            targetSeed.session->onlineJob,
-            targetSeed.session->onlineSex,
-            &created))
+        targetSeed.session != NULL)
     {
-        /* The mock auto-accepts the client's 10/3 invitation. */
-        result = 0;
+        queued = vm_mock_service_session_enqueue_social_notice(
+            targetSeed.session,
+            VM_MOCK_SERVICE_SOCIAL_NOTICE_FRIEND_INVITE,
+            0,
+            sourceSession,
+            ownerRole,
+            ownerAccountId);
     }
 
     /*
      * sub_101A2EA sends 10/3 and immediately displays "invitation sent"; it
-     * does not install a request-specific response callback.  The confirmed
-     * friend response dispatcher at 0x0102FF54 handles 10/1, 10/2 and 10/24,
-     * but not 10/3.  Do not invent a 10/3 downlink object: acknowledge the
-     * transport with an empty WT packet and let the next real 10/1 page query
-     * expose the auto-accepted relationship.
+     * does not install a request-specific response callback.  The target's
+     * normal scene-sync poll receives the separately confirmed 10/4 notice.
      */
     vm_net_mock_finish_wt_packet(out, pos, 0);
 
-    printf("[info][network] mock_friend_add actor=%u result=%u created=%u owner=%s/%u target=%s/%u resp=%u\n",
+    printf("[info][network] mock_friend_add actor=%u queued=%u owner=%s/%u target=%s/%u resp=%u\n",
            actorId,
-           result,
-           created ? 1u : 0u,
+           queued ? 1u : 0u,
            ownerAccountId ? ownerAccountId : "-",
            ownerRole ? ownerRole->roleId : 0,
            targetSeed.session && targetSeed.session->accountId[0] ? targetSeed.session->accountId : "-",
            targetSeed.session ? targetSeed.session->onlineRoleId : 0,
            pos);
-    vm_autotest_note("mock_friend_add actor=%u result=%u created=%u response=empty-wt evidence=JianghuOL.CBE:0x0101A2EA+0x0102FF54 message=invite-sent\n",
+    vm_autotest_note("mock_friend_add actor=%u queued=%u response=empty-wt evidence=JianghuOL.CBE:0x0101A2EA+0x010114FC(subtype4) message=invite-sent\n",
                      actorId,
-                     result,
-                     created ? 1u : 0u);
+                     queued ? 1u : 0u);
+    return pos;
+}
+
+static bool vm_net_mock_is_friend_invite_reply_request(const u8 *request, u32 requestLen,
+                                                        u32 *sourceRoleIdOut, u8 *resultOut)
+{
+    u32 offset = 4;
+    u32 sourceRoleId = 0;
+    u8 result = 0;
+    vm_net_mock_request_object object;
+
+    if (sourceRoleIdOut)
+        *sourceRoleIdOut = 0;
+    if (resultOut)
+        *resultOut = 0;
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        offset != requestLen || object.major != 1 || object.kind != 10 || object.subtype != 5 ||
+        !vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "id", &sourceRoleId) ||
+        !vm_net_mock_get_object_u8_field(object.payload, object.payloadLen, "result", &result) ||
+        sourceRoleId == 0 || (result != 1 && result != 2))
+    {
+        return false;
+    }
+    if (sourceRoleIdOut)
+        *sourceRoleIdOut = sourceRoleId;
+    if (resultOut)
+        *resultOut = result;
+    return true;
+}
+
+static u32 vm_net_mock_build_friend_invite_reply_response(const u8 *request, u32 requestLen,
+                                                           u8 *out, u32 outCap)
+{
+    vm_mock_service_client_session *responderSession = vm_mock_service_get_active_client_session();
+    vm_mock_service_client_session *sourceSession = NULL;
+    vm_net_mock_role_state *responderRole = vm_net_mock_active_role();
+    const char *responderAccountId = g_vm_mock_service_active_account_id;
+    u32 sourceRoleId = 0;
+    u32 pos = 5;
+    u8 result = 0;
+    u8 sourceResult = 2;
+    bool added = false;
+    bool resultQueued = false;
+
+    if (out == NULL || outCap < pos || responderSession == NULL || responderRole == NULL ||
+        !vm_net_mock_is_friend_invite_reply_request(request, requestLen, &sourceRoleId, &result) ||
+        !responderSession->friendInviteReplyActive ||
+        responderSession->friendInviteSourceRoleId != sourceRoleId)
+    {
+        return 0;
+    }
+    sourceSession = vm_mock_service_find_client_session(
+        responderSession->friendInviteSourceClientId);
+    if (result == 1 && sourceSession != NULL && sourceSession->accountId[0] != 0 &&
+        responderAccountId != NULL && responderAccountId[0] != 0 &&
+        vm_mock_service_friend_db_add_pair(
+            sourceSession->accountId,
+            sourceSession->onlineRoleId,
+            sourceSession->onlineRoleName,
+            sourceSession->onlineLevel,
+            sourceSession->onlineJob,
+            sourceSession->onlineSex,
+            responderAccountId,
+            responderRole->roleId,
+            responderRole->name,
+            responderRole->level,
+            responderRole->job,
+            responderRole->sex,
+            &added))
+    {
+        sourceResult = 1;
+    }
+    if (sourceSession != NULL)
+    {
+        resultQueued = vm_mock_service_session_enqueue_social_notice(
+            sourceSession,
+            VM_MOCK_SERVICE_SOCIAL_NOTICE_FRIEND_RESULT,
+            sourceResult,
+            responderSession,
+            responderRole,
+            responderAccountId);
+    }
+    responderSession->friendInviteReplyActive = false;
+    responderSession->friendInviteSourceClientId = 0;
+    responderSession->friendInviteSourceRoleId = 0;
+    vm_net_mock_finish_wt_packet(out, pos, 0);
+    printf("[info][network] mock_friend_invite_reply source=%08x/%u target=%08x/%u result=%u added=%u notify_source=%u resp=%u evidence=JianghuOL.CBE:0x010114A4+0x010114FC\n",
+           sourceSession ? sourceSession->clientId : 0,
+           sourceRoleId,
+           responderSession->clientId,
+           responderRole->roleId,
+           result,
+           added ? 1u : 0u,
+           resultQueued ? 1u : 0u,
+           pos);
+    vm_autotest_note("mock_friend_invite_reply source_role=%u result=%u added=%u notify_source=%u response=empty-wt evidence=JianghuOL.CBE:0x010114A4\n",
+                     sourceRoleId, result, added ? 1u : 0u, resultQueued ? 1u : 0u);
+    return pos;
+}
+
+static bool vm_net_mock_is_trade_invite_reply_request(const u8 *request, u32 requestLen,
+                                                       u32 *sourceRoleIdOut, u8 *resultOut)
+{
+    u32 offset = 4;
+    u32 sourceRoleId = 0;
+    u8 result = 0;
+    vm_net_mock_request_object object;
+
+    if (sourceRoleIdOut)
+        *sourceRoleIdOut = 0;
+    if (resultOut)
+        *resultOut = 0;
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        offset != requestLen || object.major != 1 || object.kind != 21 || object.subtype != 3 ||
+        !vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "id", &sourceRoleId) ||
+        !vm_net_mock_get_object_u8_field(object.payload, object.payloadLen, "result", &result) ||
+        sourceRoleId == 0 || (result != 1 && result != 2))
+    {
+        return false;
+    }
+    if (sourceRoleIdOut)
+        *sourceRoleIdOut = sourceRoleId;
+    if (resultOut)
+        *resultOut = result;
+    return true;
+}
+
+static u32 vm_net_mock_build_trade_invite_reply_response(const u8 *request, u32 requestLen,
+                                                          u8 *out, u32 outCap)
+{
+    vm_mock_service_client_session *responderSession = vm_mock_service_get_active_client_session();
+    vm_mock_service_client_session *sourceSession = NULL;
+    vm_net_mock_role_state *responderRole = vm_net_mock_active_role();
+    const char *responderAccountId = g_vm_mock_service_active_account_id;
+    u32 sourceRoleId = 0;
+    u32 pos = 5;
+    u8 result = 0;
+    bool resultQueued = false;
+
+    if (out == NULL || outCap < pos || responderSession == NULL || responderRole == NULL ||
+        !vm_net_mock_is_trade_invite_reply_request(request, requestLen, &sourceRoleId, &result) ||
+        !responderSession->tradeInviteReplyActive ||
+        responderSession->tradeInviteSourceRoleId != sourceRoleId)
+    {
+        return 0;
+    }
+    sourceSession = vm_mock_service_find_client_session(
+        responderSession->tradeInviteSourceClientId);
+    if (sourceSession != NULL)
+    {
+        resultQueued = vm_mock_service_session_enqueue_social_notice(
+            sourceSession,
+            VM_MOCK_SERVICE_SOCIAL_NOTICE_TRADE_RESULT,
+            result,
+            responderSession,
+            responderRole,
+            responderAccountId);
+    }
+    responderSession->tradeInviteReplyActive = false;
+    responderSession->tradeInviteSourceClientId = 0;
+    responderSession->tradeInviteSourceRoleId = 0;
+    vm_net_mock_finish_wt_packet(out, pos, 0);
+    printf("[info][network] mock_trade_invite_reply source=%08x/%u target=%08x/%u result=%u notify_source=%u resp=%u evidence=JianghuOL.CBE:0x01011076+0x01011132\n",
+           sourceSession ? sourceSession->clientId : 0,
+           sourceRoleId,
+           responderSession->clientId,
+           responderRole->roleId,
+           result,
+           resultQueued ? 1u : 0u,
+           pos);
+    vm_autotest_note("mock_trade_invite_reply source_role=%u result=%u notify_source=%u response=empty-wt evidence=JianghuOL.CBE:0x01011076\n",
+                     sourceRoleId, result, resultQueued ? 1u : 0u);
     return pos;
 }
 
@@ -18072,6 +18802,113 @@ static bool vm_net_mock_scene_role_seeds_contain_client(const vm_net_mock_scene_
     return false;
 }
 
+/*
+ * The remote mock service is request/response TCP, but every live emulator
+ * issues a scene-sync poll on the normal event-7 path.  Use that existing
+ * client-driven poll as the delivery point for social notices rather than
+ * attempting a server-side socket push that the CBE has no listener for.
+ */
+static int vm_net_mock_append_scene_sync_social_notice_object(
+    u8 *out, u32 outCap, u32 *pos, vm_mock_service_client_session *observer,
+    u8 *noticeTypeOut)
+{
+    vm_mock_service_social_notice *notice = NULL;
+    u32 objectStart = 0;
+    u8 noticeType = VM_MOCK_SERVICE_SOCIAL_NOTICE_NONE;
+
+    if (noticeTypeOut)
+        *noticeTypeOut = VM_MOCK_SERVICE_SOCIAL_NOTICE_NONE;
+    if (out == NULL || pos == NULL || observer == NULL)
+        return -1;
+
+    /* A modal invitation remains pending until the target emits 10/5 or
+     * 21/3.  Do not stack another modal over it. */
+    if (observer->friendInviteReplyActive || observer->tradeInviteReplyActive)
+        return 0;
+
+    for (u32 i = 0; i < VM_MOCK_SERVICE_SOCIAL_NOTICE_MAX; ++i)
+    {
+        if (observer->socialNotices[i].type != VM_MOCK_SERVICE_SOCIAL_NOTICE_NONE)
+        {
+            notice = &observer->socialNotices[i];
+            break;
+        }
+    }
+    if (notice == NULL)
+        return 0;
+
+    noticeType = notice->type;
+    switch (noticeType)
+    {
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_FRIEND_INVITE:
+        /* net_handle_role_login_gift_glamour(0x010114FC), subtype 4:
+         * reads id/name and opens the confirm callback that sends 10/5. */
+        if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 10, 4, &objectStart) ||
+            !vm_net_mock_put_object_u32(out, outCap, pos, "id", notice->sourceRoleId) ||
+            !vm_net_mock_put_object_string(out, outCap, pos, "name", notice->sourceName))
+        {
+            return -1;
+        }
+        observer->friendInviteReplyActive = true;
+        observer->friendInviteSourceClientId = notice->sourceClientId;
+        observer->friendInviteSourceRoleId = notice->sourceRoleId;
+        break;
+
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_TRADE_INVITE:
+        /* net_handle_trade_response(0x01011132), subtype 2: id/name then
+         * net_send_trade_invite_reply() emits 21/3. */
+        if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 21, 2, &objectStart) ||
+            !vm_net_mock_put_object_u32(out, outCap, pos, "id", notice->sourceRoleId) ||
+            !vm_net_mock_put_object_string(out, outCap, pos, "name", notice->sourceName))
+        {
+            return -1;
+        }
+        observer->tradeInviteReplyActive = true;
+        observer->tradeInviteSourceClientId = notice->sourceClientId;
+        observer->tradeInviteSourceRoleId = notice->sourceRoleId;
+        break;
+
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_FRIEND_RESULT:
+        /* Same handler, subtype 6: result=1 accepted, non-1 refused. */
+        if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 10, 6, &objectStart) ||
+            !vm_net_mock_put_object_u8(out, outCap, pos, "result", notice->result) ||
+            !vm_net_mock_put_object_string(out, outCap, pos, "name", notice->sourceName))
+        {
+            return -1;
+        }
+        break;
+
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_TRADE_RESULT:
+        /* net_handle_trade_response subtype 4 opens the trade UI on result=1
+         * and renders the peer's refusal on result=2. */
+        if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 21, 4, &objectStart) ||
+            !vm_net_mock_put_object_u8(out, outCap, pos, "result", notice->result) ||
+            !vm_net_mock_put_object_string(out, outCap, pos, "name", notice->sourceName))
+        {
+            return -1;
+        }
+        break;
+
+    default:
+        memset(notice, 0, sizeof(*notice));
+        return 0;
+    }
+
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    printf("[info][mock-service] social_notice_deliver observer=%08x action=%s source=%08x/%u name=%s result=%u age_ticks=%u\n",
+           observer->clientId,
+           vm_mock_service_social_notice_name(noticeType),
+           notice->sourceClientId,
+           notice->sourceRoleId,
+           notice->sourceName,
+           notice->result,
+           g_schedulerTick >= notice->queuedTick ? g_schedulerTick - notice->queuedTick : 0);
+    memset(notice, 0, sizeof(*notice));
+    if (noticeTypeOut)
+        *noticeTypeOut = noticeType;
+    return 1;
+}
+
 static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
 {
     vm_mock_service_client_session *observer = vm_mock_service_get_active_client_session();
@@ -18080,9 +18917,11 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
     u8 roleCount = 0;
     u8 objectCount = 0;
     u8 movementObjectCount = 0;
+    u8 socialNoticeType = VM_MOCK_SERVICE_SOCIAL_NOTICE_NONE;
     u32 pos = 5;
     u32 maxMovementAgeTicks = 0;
     bool needsBaseline = false;
+    int socialAppend = 0;
 
     if (out == NULL || outCap < pos || observer == NULL ||
         !observer->sceneVisibleReady || observer->sceneVisiblePending ||
@@ -18128,12 +18967,19 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
                                                                    &nearbyMoveinfoCount);
         if (objectCount == 0)
             return 0;
+        socialAppend = vm_net_mock_append_scene_sync_social_notice_object(
+            out, outCap, &pos, observer, &socialNoticeType);
+        if (socialAppend < 0)
+            return 0;
+        if (socialAppend > 0)
+            ++objectCount;
         vm_net_mock_finish_wt_packet(out, pos, objectCount);
-        printf("[info][mock-service] scene_sync_poll baseline observer=%08x scene=%s roles=%u moveinfo=%u resp=%u evidence=IDA:0x01012958/0x01012A76\n",
+        printf("[info][mock-service] scene_sync_poll baseline observer=%08x scene=%s roles=%u moveinfo=%u social=%s resp=%u evidence=IDA:0x01012958/0x01012A76\n",
                observer->clientId,
                scene,
                nearbyRoleCount,
                nearbyMoveinfoCount,
+               vm_mock_service_social_notice_name(socialNoticeType),
                pos);
         return pos;
     }
@@ -18187,14 +19033,22 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
         peerSync->visible = false;
     }
 
+    socialAppend = vm_net_mock_append_scene_sync_social_notice_object(
+        out, outCap, &pos, observer, &socialNoticeType);
+    if (socialAppend < 0)
+        return 0;
+    if (socialAppend > 0)
+        ++objectCount;
+
     if (objectCount == 0)
         return 0;
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
-    printf("[info][mock-service] scene_sync_poll delta observer=%08x scene=%s objects=%u movement=%u queue_age_ticks=%u queue_age_ms=%u resp=%u evidence=IDA:0x01012A76\n",
+    printf("[info][mock-service] scene_sync_poll delta observer=%08x scene=%s objects=%u movement=%u social=%s queue_age_ticks=%u queue_age_ms=%u resp=%u evidence=IDA:0x01012A76\n",
            observer->clientId,
            scene,
            objectCount,
            movementObjectCount,
+           vm_mock_service_social_notice_name(socialNoticeType),
            maxMovementAgeTicks,
            maxMovementAgeTicks * VM_SCHED_FRAME_MS,
            pos);
@@ -24985,6 +25839,62 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     if (hookedLen)
     {
         vm_net_log_handled_packet("builtin-scene-ctrl-page", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_nearby_player_info_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-nearby-player-info", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_nearby_equip_view_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-nearby-equip-view", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_nearby_guild_invite_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-nearby-guild-invite", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_trade_invite_reply_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-nearby-trade-invite-reply", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_nearby_trade_request_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-nearby-trade-request", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_nearby_team_invite_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-nearby-team-invite", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_nearby_spar_request_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-nearby-spar-request", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_friend_invite_reply_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-friend-invite-reply", request, requestLen, hookedLen);
         return hookedLen;
     }
 
