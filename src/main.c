@@ -13,6 +13,7 @@
 #include <stdarg.h>
 #include <math.h>
 #include <stdint.h>
+#include <time.h>
 
 #include "main.h"
 #include "lcd.h"
@@ -194,8 +195,11 @@ static int g_vmInputOpen = 0;
 static int g_vmInputPassword = 0;
 static u32 g_vmInputCallback = 0;
 static u32 g_vmInputBuffer = 0;
+static u32 g_vmInputTargetBuffer = 0;
 static u32 g_vmInputMaxLen = 0;
 static u32 g_vmInputInputType = 0;
+static u32 g_vmInputScratchBuffer = 0;
+static u32 g_vmInputScratchBytes = 0;
 static int g_vmInputOverlayX = 12;
 static int g_vmInputOverlayY = 348;
 static int g_vmInputOverlayW = 216;
@@ -203,6 +207,11 @@ static int g_vmInputOverlayH = 22;
 static char g_vmInputComposition[64];
 static int g_vmInputSdlTextInputWanted = 0;
 static int g_vmInputSdlTextInputActive = 0;
+u32 g_vmInputWatchUserBuf = 0;
+u32 g_vmInputWatchUserBufLen = 0;
+u32 g_vmInputWatchCallback = 0;
+u32 g_vmInputWatchCallR9 = 0;
+u32 g_vmInputWatchWriteCount = 0;
 u32 screenStructChange = 0;
 u32 screenStructNotifyLoadRes = 0;
 u32 vmAddedScreen = 0;
@@ -229,6 +238,19 @@ static u32 g_currentScreenDataPackage = 0;
 static u32 g_dlSpBf = 0;
 static u32 g_poolModuleR9s[16];
 static u32 g_poolModuleR9Count = 0;
+typedef struct
+{
+    u16 appId;
+    u16 reserved;
+    u32 buffer;
+    u32 context;
+    u32 spBf;
+} vm_dl_loaded_app;
+static vm_dl_loaded_app g_vmDlLoadedApps[16];
+static u32 g_vmDlLoadedCount = 0;
+static u16 g_vmDlCurrAppId = 0;
+static u16 g_vmDlPreAppId = 0;
+static u8 g_vmDlCurrType = 0;
 static u32 g_screenRootExitArmed = 0;
 static u32 g_screenRootExitPending = 0;
 static u32 g_screenRootExitPendingRoot = 0;
@@ -339,6 +361,12 @@ static u8 g_netLastHandledValid = 0;
 static u32 g_netLastHandledResponseLen = 0;
 static char g_netLastHandledSource[64];
 static char g_netLastHandledSummary[512];
+static u8 g_mockServiceOnly = 0;
+static u8 g_mockServiceWarnedUnavailable = 0;
+static char g_mockServiceHost[64] = "127.0.0.1";
+static char g_mockServiceBindHost[64] = "127.0.0.1";
+static u32 g_mockServiceClientId = 0;
+static u16 g_mockServicePort = 19090;
 static u32 g_battleSubtype8InfoDstWatchBase = 0;
 static u32 g_battleSubtype8InfoDstWatchLen = 0;
 static u32 g_battleSubtype8InfoDstWatchTick = 0;
@@ -377,6 +405,8 @@ static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t
 static uc_err scheduler_dispatch_net_tasks(void);
 static bool vm_net_mock_should_rearm_send_ready(void);
 static uc_err scheduler_flush_post_vm_business_send_ready(const char *reason);
+static u32 vm_dl_current_sp_bf(void);
+static void vm_dl_note_sp_bf(u32 moduleR9, const char *reason);
 
 static bool vm_address_in_range(u32 address, u32 begin, u32 size)
 {
@@ -1291,6 +1321,183 @@ static bool vm_is_pool_entry(u32 entry)
     return pc >= VM_Memory_Pool_ADDRESS && pc < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE;
 }
 
+static void vm_dl_reset_state(void)
+{
+    memset(g_vmDlLoadedApps, 0, sizeof(g_vmDlLoadedApps));
+    g_vmDlLoadedCount = 0;
+    g_vmDlCurrAppId = 0;
+    g_vmDlPreAppId = 0;
+    g_vmDlCurrType = 0;
+    g_dlSpBf = 0;
+}
+
+static int vm_dl_find_loaded_index_by_app_id(u16 appId)
+{
+    for (u32 i = 0; i < g_vmDlLoadedCount; ++i)
+    {
+        if (g_vmDlLoadedApps[i].appId == appId)
+            return (int)i;
+    }
+    return -1;
+}
+
+static int vm_dl_find_loaded_index_by_sp_bf(u32 spBf)
+{
+    if (spBf == 0)
+        return -1;
+    for (u32 i = 0; i < g_vmDlLoadedCount; ++i)
+    {
+        if (g_vmDlLoadedApps[i].spBf == spBf)
+            return (int)i;
+    }
+    return -1;
+}
+
+static int vm_dl_find_loaded_index_by_pc(u32 pc)
+{
+    pc &= ~1u;
+    if (!vm_is_pool_entry(pc))
+        return -1;
+    for (u32 i = 0; i < g_vmDlLoadedCount; ++i)
+    {
+        u32 buffer = g_vmDlLoadedApps[i].buffer;
+        u32 spBf = g_vmDlLoadedApps[i].spBf;
+        if (buffer != 0 && spBf > buffer && pc >= buffer && pc < spBf)
+            return (int)i;
+    }
+    return -1;
+}
+
+static int vm_dl_ensure_loaded_app(u16 appId)
+{
+    int idx = vm_dl_find_loaded_index_by_app_id(appId);
+    if (idx >= 0)
+        return idx;
+    if (g_vmDlLoadedCount >= sizeof(g_vmDlLoadedApps) / sizeof(g_vmDlLoadedApps[0]))
+        return -1;
+    idx = (int)g_vmDlLoadedCount++;
+    memset(&g_vmDlLoadedApps[idx], 0, sizeof(g_vmDlLoadedApps[idx]));
+    g_vmDlLoadedApps[idx].appId = appId;
+    return idx;
+}
+
+static u32 vm_dl_current_sp_bf(void)
+{
+    int idx;
+    if (g_vmDlCurrAppId == 0)
+        return 0;
+    idx = vm_dl_find_loaded_index_by_app_id(g_vmDlCurrAppId);
+    if (idx < 0)
+        return 0;
+    return g_vmDlLoadedApps[idx].spBf;
+}
+
+static void vm_dl_note_sp_bf(u32 moduleR9, const char *reason)
+{
+    static u32 s_traceCount = 0;
+    if (moduleR9 < VM_Memory_Pool_ADDRESS ||
+        moduleR9 >= VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
+    {
+        return;
+    }
+    if (g_dlSpBf == moduleR9)
+        return;
+    g_dlSpBf = moduleR9;
+    if (g_autotestEnabled && s_traceCount < 32)
+    {
+        ++s_traceCount;
+        vm_autotest_note("dl_sp_bf reason=%s r9=%08x count=%u\n",
+                         reason ? reason : "-", moduleR9, s_traceCount);
+    }
+}
+
+static void vm_dl_set_current_app(u16 appId, u8 dlType, const char *reason)
+{
+    if (g_vmDlCurrAppId != appId)
+        g_vmDlPreAppId = g_vmDlCurrAppId;
+    g_vmDlCurrAppId = appId;
+    g_vmDlCurrType = dlType;
+    if (g_vmDlCurrAppId != 0)
+    {
+        u32 spBf = vm_dl_current_sp_bf();
+        if (spBf)
+            vm_dl_note_sp_bf(spBf, reason);
+    }
+}
+
+static void vm_dl_set_loaded_buffer(u16 appId, u32 buffer)
+{
+    int idx = vm_dl_ensure_loaded_app(appId);
+    if (idx < 0)
+        return;
+    g_vmDlLoadedApps[idx].buffer = buffer;
+}
+
+static void vm_dl_set_loaded_sp_bf(u16 appId, u32 spBf)
+{
+    int idx = vm_dl_ensure_loaded_app(appId);
+    if (idx < 0)
+        return;
+    g_vmDlLoadedApps[idx].spBf = spBf;
+    if (g_vmDlCurrAppId == appId && spBf != 0)
+        vm_dl_note_sp_bf(spBf, "dl-set-spbf");
+}
+
+static void vm_dl_set_loaded_context(u16 appId, u32 context)
+{
+    int idx = vm_dl_ensure_loaded_app(appId);
+    if (idx < 0)
+        return;
+    g_vmDlLoadedApps[idx].context = context;
+}
+
+static u32 vm_dl_get_loaded_context(u16 appId)
+{
+    int idx = vm_dl_find_loaded_index_by_app_id(appId);
+    if (idx < 0)
+        return 0;
+    return g_vmDlLoadedApps[idx].context;
+}
+
+static void vm_dl_remove_loaded_index(int idx)
+{
+    u16 removedAppId;
+    if (idx < 0 || (u32)idx >= g_vmDlLoadedCount)
+        return;
+    removedAppId = g_vmDlLoadedApps[idx].appId;
+    if ((u32)idx + 1 < g_vmDlLoadedCount)
+    {
+        memmove(&g_vmDlLoadedApps[idx], &g_vmDlLoadedApps[idx + 1],
+                (g_vmDlLoadedCount - (u32)idx - 1) * sizeof(g_vmDlLoadedApps[0]));
+    }
+    memset(&g_vmDlLoadedApps[g_vmDlLoadedCount - 1], 0, sizeof(g_vmDlLoadedApps[0]));
+    g_vmDlLoadedCount--;
+    if (g_vmDlCurrAppId == removedAppId)
+    {
+        g_vmDlCurrAppId = 0;
+        g_vmDlCurrType = 0;
+        g_dlSpBf = 0;
+    }
+    if (g_vmDlPreAppId == removedAppId)
+        g_vmDlPreAppId = 0;
+}
+
+static void vm_dl_unload_loaded_app(u16 appId)
+{
+    int idx = vm_dl_find_loaded_index_by_app_id(appId);
+    if (idx >= 0)
+        vm_dl_remove_loaded_index(idx);
+}
+
+static u32 vm_read_current_pool_r9(void)
+{
+    u32 r9 = 0;
+    uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+    if (r9 >= VM_Memory_Pool_ADDRESS && r9 < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
+        return r9;
+    return 0;
+}
+
 static bool vm_pool_module_base_has_code(u32 codeBase)
 {
     u8 probe[16];
@@ -1343,50 +1550,22 @@ static bool vm_cbe_api_ptr_looks_callable(u32 target)
 
 static bool vm_pool_module_r9_matches_pc(u32 pc, u32 moduleR9)
 {
-    const u32 moduleR9Delta = 0x14000u;
-    const u32 moduleWindowSize = 0x28000u;
-    u32 codeBase;
-
     pc &= ~1u;
-    if (moduleR9 < VM_Memory_Pool_ADDRESS + moduleR9Delta ||
+    if (moduleR9 < VM_Memory_Pool_ADDRESS ||
         moduleR9 >= VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
     {
         return false;
     }
-
-    codeBase = moduleR9 - moduleR9Delta;
-    if (codeBase < VM_Memory_Pool_ADDRESS ||
-        codeBase + moduleWindowSize > VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
     {
-        return false;
+        int idx = vm_dl_find_loaded_index_by_sp_bf(moduleR9);
+        if (idx >= 0)
+        {
+            u32 buffer = g_vmDlLoadedApps[idx].buffer;
+            u32 spBf = g_vmDlLoadedApps[idx].spBf;
+            return buffer != 0 && spBf > buffer && pc >= buffer && pc < spBf;
+        }
     }
-    if (pc < codeBase || pc >= codeBase + moduleWindowSize)
-        return false;
-    return vm_pool_module_base_has_code(codeBase);
-}
-
-/*
- * Firmware dynamic-module callbacks restore R9 through KEEP_SP by loading the
- * global sp_bf value into R9. We do not execute that loader glue directly, so
- * mirror the active sp_bf on the host and prefer it before structural fallback.
- */
-static void vm_dl_note_sp_bf(u32 moduleR9, const char *reason)
-{
-    static u32 s_traceCount = 0;
-    if (!moduleR9)
-        return;
-    if (!vm_pool_module_r9_matches_pc(moduleR9 - 0x14000u, moduleR9))
-        return;
-    if (g_dlSpBf == moduleR9)
-        return;
-    g_dlSpBf = moduleR9;
-    vm_pool_module_remember_r9(moduleR9);
-    if (g_autotestEnabled && s_traceCount < 32)
-    {
-        ++s_traceCount;
-        vm_autotest_note("dl_sp_bf reason=%s r9=%08x count=%u\n",
-                         reason ? reason : "-", moduleR9, s_traceCount);
-    }
+    return false;
 }
 
 static void vm_pool_module_remember_r9(u32 moduleR9)
@@ -1429,12 +1608,8 @@ static bool vm_pool_battle_chat_context_valid(u32 moduleR9)
 
 static u32 vm_module_r9_for_pool_pc(u32 pc)
 {
-    const u32 moduleR9Delta = 0x14000u;
-    const u32 moduleAlign = 0x80000u;
-    u32 moduleR9 = 0;
     u32 currentR9 = 0;
-    u32 codeBase = 0;
-    bool allowRememberedFallback = false;
+    int idx = -1;
 
     pc &= ~1u;
     if (!vm_is_pool_entry(pc))
@@ -1444,49 +1619,30 @@ static u32 vm_module_r9_for_pool_pc(u32 pc)
     if (currentR9 && vm_pool_module_r9_matches_pc(pc, currentR9))
         return currentR9;
 
+    if (g_currentScreenModuleBase && vm_pool_module_r9_matches_pc(pc, g_currentScreenModuleBase))
+        return g_currentScreenModuleBase;
     if (g_dlSpBf && vm_pool_module_r9_matches_pc(pc, g_dlSpBf))
         return g_dlSpBf;
 
-    if (g_currentScreenModuleBase && vm_pool_module_r9_matches_pc(pc, g_currentScreenModuleBase))
+    idx = vm_dl_find_loaded_index_by_pc(pc);
+    if (idx >= 0)
+    {
+        if (g_vmDlCurrAppId != 0 && g_vmDlLoadedApps[idx].appId == g_vmDlCurrAppId)
+            return g_vmDlLoadedApps[idx].spBf;
+        return g_vmDlLoadedApps[idx].spBf;
+    }
+    if (g_currentScreenModuleBase &&
+        g_currentScreenModuleBase >= VM_Memory_Pool_ADDRESS &&
+        g_currentScreenModuleBase < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
+    {
         return g_currentScreenModuleBase;
-
-    moduleR9 = vm_screen_stack_lookup_module_base(vmAddedScreen);
-    if (moduleR9 && vm_pool_module_r9_matches_pc(pc, moduleR9))
-        return moduleR9;
-
-    for (u32 i = g_screenStackCount; i > 0; --i)
-    {
-        moduleR9 = g_screenStackModuleBase[i - 1];
-        if (moduleR9 && vm_pool_module_r9_matches_pc(pc, moduleR9))
-            return moduleR9;
     }
-
-    /* The screen callback layout used by some pool modules overlaps with non-battle
-       loading/transition screens. A blind battle-style R9 guess here can hijack
-       ordinary mmGame flows, so runtime switching stays with tracked context only. */
-
-    allowRememberedFallback =
-        (currentR9 >= VM_Memory_Pool_ADDRESS && currentR9 < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE) ||
-        (g_currentScreenModuleBase >= VM_Memory_Pool_ADDRESS && g_currentScreenModuleBase < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE) ||
-        (vm_screen_stack_lookup_module_base(vmAddedScreen) >= VM_Memory_Pool_ADDRESS &&
-         vm_screen_stack_lookup_module_base(vmAddedScreen) < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE);
-    if (allowRememberedFallback)
+    if (g_dlSpBf &&
+        g_dlSpBf >= VM_Memory_Pool_ADDRESS &&
+        g_dlSpBf < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
     {
-        for (u32 i = g_poolModuleR9Count; i > 0; --i)
-        {
-            moduleR9 = g_poolModuleR9s[i - 1];
-            if (moduleR9 && vm_pool_module_r9_matches_pc(pc, moduleR9))
-                return moduleR9;
-        }
+        return g_dlSpBf;
     }
-
-    codeBase = pc & ~(moduleAlign - 1u);
-    moduleR9 = codeBase + moduleR9Delta;
-    if (pc >= codeBase + 0xA818u && pc < codeBase + 0xAB1Cu &&
-        vm_pool_module_r9_matches_pc(pc, moduleR9) &&
-        vm_pool_battle_chat_context_valid(moduleR9))
-        return moduleR9;
-
     return 0;
 }
 
@@ -1703,7 +1859,7 @@ static void vm_clear_screen_state_after_quit(void)
     g_currentScreenThis = 0;
     g_currentScreenModuleBase = 0;
     g_currentScreenDataPackage = 0;
-    g_dlSpBf = 0;
+    vm_dl_reset_state();
     memset(g_poolModuleR9s, 0, sizeof(g_poolModuleR9s));
     g_poolModuleR9Count = 0;
     g_screenRootExitArmed = 0;
@@ -1812,24 +1968,27 @@ static uc_err vm_run_host_quit_cleanup(u32 exitAddr, u32 thumbExitAddr)
 
 static void scheduler_prepare_screen_call(u32 screenThisPtr)
 {
+    u32 screenFuncPtr = screenThisPtr ? screenThisPtr + 0x18 : 0;
     if (screenThisPtr != g_currentScreenThis)
     {
         g_currentScreenThis = screenThisPtr;
-        g_currentScreenModuleBase = vm_screen_stack_lookup_module_base(screenThisPtr + 0x18);
+        g_currentScreenModuleBase = vm_screen_stack_lookup_module_base(screenFuncPtr);
     }
     else if (g_currentScreenModuleBase == 0)
     {
-        g_currentScreenModuleBase = vm_screen_stack_lookup_module_base(screenThisPtr + 0x18);
+        g_currentScreenModuleBase = vm_screen_stack_lookup_module_base(screenFuncPtr);
     }
+    if (g_currentScreenModuleBase == 0)
+        g_currentScreenModuleBase = vm_dl_current_sp_bf();
     if (g_currentScreenModuleBase)
         vm_dl_note_sp_bf(g_currentScreenModuleBase, "screen-prepare");
-    u32 dataPackage = vm_screen_stack_lookup_data_package(screenThisPtr + 0x18);
+    u32 dataPackage = vm_screen_stack_lookup_data_package(screenFuncPtr);
     if (dataPackage)
     {
         u32 oldDataPackage = g_currentScreenDataPackage;
         vm_restore_data_package(dataPackage);
         g_currentScreenDataPackage = dataPackage;
-        vm_trace_screen_data_package_change("prepare-stack", screenThisPtr + 0x18,
+        vm_trace_screen_data_package_change("prepare-stack", screenFuncPtr,
                                             oldDataPackage, dataPackage, vm_current_data_package());
     }
     else
@@ -2749,6 +2908,106 @@ static void vm_lcd_update_with_input_overlay(void)
     UpdateLcd();
 }
 
+static void vm_debug_read_guest_cstr(u32 addr, char *out, size_t outCap)
+{
+    u8 ch = 0;
+    size_t i = 0;
+
+    if (out == NULL || outCap == 0)
+        return;
+    out[0] = 0;
+    if (addr == 0)
+        return;
+
+    for (; i + 1 < outCap; ++i)
+    {
+        uc_mem_read(MTK, addr + (u32)i, &ch, 1);
+        out[i] = (char)ch;
+        if (ch == 0)
+            return;
+    }
+    out[outCap - 1] = 0;
+}
+
+static void vm_debug_read_guest_ucs2_as_gbk(u32 addr, char *out, size_t outCap, u32 maxChars)
+{
+    u32 chars = 0;
+    u32 bytes = 0;
+
+    if (out == NULL || outCap == 0)
+        return;
+    out[0] = 0;
+    if (addr == 0 || maxChars == 0)
+        return;
+
+    chars = vm_input_wcslen_limit(addr, maxChars);
+    bytes = (chars + 1) * 2;
+    if (bytes > mySizeOf(cbeTextString))
+        bytes = mySizeOf(cbeTextString) & ~1u;
+    if (bytes < 2)
+        bytes = 2;
+    if (uc_mem_read(MTK, addr, cbeTextString, bytes) != UC_ERR_OK)
+        return;
+    if (ucs2_to_gbk(cbeTextString, bytes, (u8 *)out, (u32)outCap) < 0)
+        out[0] = 0;
+}
+
+static void vm_debug_log_login_input_state(const char *phase, u32 callback, u32 inputBuffer)
+{
+    u32 r9 = 0;
+    u32 loginRecord = 0;
+    u32 displayPassword = 0;
+    u32 displayUser = 0;
+    u32 editPassword = 0;
+    u32 editUser = 0;
+    u8 selected = 0;
+    u8 loginFlag = 0;
+    char displayPasswordText[64];
+    char displayUserText[64];
+    char recordUserText[64];
+    char recordPasswordText[64];
+
+    memset(displayPasswordText, 0, sizeof(displayPasswordText));
+    memset(displayUserText, 0, sizeof(displayUserText));
+    memset(recordUserText, 0, sizeof(recordUserText));
+    memset(recordPasswordText, 0, sizeof(recordPasswordText));
+
+    uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+    if (r9 == 0)
+        return;
+    uc_mem_read(MTK, r9 + 10772, &loginRecord, 4);
+    uc_mem_read(MTK, r9 + 10812, &displayPassword, 4);
+    uc_mem_read(MTK, r9 + 10816, &displayUser, 4);
+    uc_mem_read(MTK, r9 + 10824, &editPassword, 4);
+    uc_mem_read(MTK, r9 + 10828, &editUser, 4);
+    uc_mem_read(MTK, r9 + 10731, &selected, 1);
+    if (loginRecord != 0)
+    {
+        uc_mem_read(MTK, loginRecord, &loginFlag, 1);
+        vm_debug_read_guest_cstr(loginRecord + 16, recordUserText, sizeof(recordUserText));
+        vm_debug_read_guest_cstr(loginRecord + 48, recordPasswordText, sizeof(recordPasswordText));
+    }
+    vm_debug_read_guest_cstr(displayUser, displayUserText, sizeof(displayUserText));
+    vm_debug_read_guest_cstr(displayPassword, displayPasswordText, sizeof(displayPasswordText));
+
+    printf("[debug][vmInput] %s cb=%08x input=%08x target=%08x r9=%08x sel=%u flag=%u dispU=%08x dispP=%08x editU=%08x editP=%08x user='%s' pass='%s' recUser='%s' recPass='%s'\n",
+           phase ? phase : "-",
+           callback,
+           inputBuffer,
+           g_vmInputTargetBuffer,
+           r9,
+           selected,
+           loginFlag,
+           displayUser,
+           displayPassword,
+           editUser,
+           editPassword,
+           displayUserText,
+           displayPasswordText,
+           recordUserText,
+           recordPasswordText);
+}
+
 static void vm_lcd_init_screen_image_struct(void)
 {
     uc_mem_write(MTK, VM_screenImageStruct_ADDRESS, emptyBuff, 24);
@@ -2768,6 +3027,48 @@ static u32 vm_input_wcslen_limit(u32 addr, u32 maxLen)
             return i;
     }
     return maxLen;
+}
+
+static u32 vm_input_buffer_bytes(u32 maxLen)
+{
+    if (maxLen == 0 || maxLen > 0xffff)
+        return 0;
+    return maxLen * 2;
+}
+
+static int vm_input_ensure_scratch_buffer(u32 bytes)
+{
+    if (bytes == 0)
+        return 0;
+
+    if (g_vmInputScratchBuffer && g_vmInputScratchBytes >= bytes)
+        return 1;
+
+    if (g_vmInputScratchBuffer)
+    {
+        vm_free(g_vmInputScratchBuffer);
+        g_vmInputScratchBuffer = 0;
+        g_vmInputScratchBytes = 0;
+    }
+
+    g_vmInputScratchBuffer = vm_malloc(bytes);
+    g_vmInputScratchBytes = bytes;
+    return g_vmInputScratchBuffer != 0;
+}
+
+static void vm_input_copy_guest_bytes(u32 dst, u32 src, u32 bytes)
+{
+    u32 copied = 0;
+
+    while (copied < bytes)
+    {
+        u32 chunk = SDL_min(bytes - copied, (u32)mySizeOf(cbeTextString));
+        if (uc_mem_read(MTK, src + copied, cbeTextString, chunk) != UC_ERR_OK)
+            break;
+        if (uc_mem_write(MTK, dst + copied, cbeTextString, chunk) != UC_ERR_OK)
+            break;
+        copied += chunk;
+    }
 }
 
 static void vm_input_append_char(u32 ch)
@@ -2805,19 +3106,50 @@ static uc_err vm_input_finish(u32 result)
 
     u32 callback = g_vmInputCallback;
     u32 buffer = g_vmInputBuffer;
+    u32 currentR9 = 0;
+    u32 callbackR9 = 0;
+    u32 displayUser = 0;
+    vm_debug_log_login_input_state(result ? "finish-cancel-before" : "finish-ok-before", callback, buffer);
     vm_input_request_sdl_text_input(0);
     g_vmInputOpen = 0;
-    g_vmInputCallback = 0;
-    g_vmInputBuffer = 0;
-    g_vmInputMaxLen = 0;
-    g_vmInputInputType = 0;
-    g_vmInputPassword = 0;
     g_vmInputComposition[0] = 0;
 
     if (!callback)
         return UC_ERR_OK;
 
-    return vm_call4_preserve_regs(callback, result ? 1 : 0, buffer, callback, 0);
+    uc_reg_read(MTK, UC_ARM_REG_R9, &currentR9);
+    if (currentR9 != 0)
+        uc_mem_read(MTK, currentR9 + 10816, &displayUser, 4);
+    callbackR9 = vm_module_r9_for_pool_pc(callback);
+    if (callbackR9 == 0)
+        callbackR9 = vm_is_pool_entry(callback) && g_currentScreenModuleBase ? g_currentScreenModuleBase : Global_R9;
+    g_vmInputWatchUserBuf = displayUser;
+    g_vmInputWatchUserBufLen = displayUser ? 64 : 0;
+    g_vmInputWatchCallback = callback;
+    g_vmInputWatchCallR9 = callbackR9;
+    g_vmInputWatchWriteCount = 0;
+    printf("[debug][vmInput] callback-call cb=%08x pool=%u callR9=%08x curR9=%08x dispU=%08x target=%08x input=%08x\n",
+           callback,
+           vm_is_pool_entry(callback) ? 1u : 0u,
+           callbackR9,
+           currentR9,
+           displayUser,
+           g_vmInputTargetBuffer,
+           buffer);
+    uc_err err = vm_call4_preserve_regs_clear_stack_args(callback, result ? 1 : 0, buffer, callback, 0);
+    g_vmInputWatchUserBuf = 0;
+    g_vmInputWatchUserBufLen = 0;
+    g_vmInputWatchCallback = 0;
+    g_vmInputWatchCallR9 = 0;
+    g_vmInputWatchWriteCount = 0;
+    g_vmInputCallback = 0;
+    g_vmInputBuffer = 0;
+    g_vmInputTargetBuffer = 0;
+    g_vmInputMaxLen = 0;
+    g_vmInputInputType = 0;
+    g_vmInputPassword = 0;
+    vm_debug_log_login_input_state(result ? "finish-cancel-after" : "finish-ok-after", callback, buffer);
+    return err;
 }
 
 static uc_err scheduler_dispatch_input_event(vm_event *evt)
@@ -2850,6 +3182,8 @@ static void vm_input_open(u32 callback, u32 param, int password)
     u32 maxLen = 0;
     u32 prompt = 0;
     u32 inputType = 0;
+    u32 scratchBytes = 0;
+    u32 copyUnits = 0;
     uc_mem_read(MTK, param, &buffer, 4);
     uc_mem_read(MTK, param + 4, &maxLen, 4);
     uc_mem_read(MTK, param + 8, &prompt, 4);
@@ -2864,16 +3198,28 @@ static void vm_input_open(u32 callback, u32 param, int password)
     g_vmInputOpen = 1;
     g_vmInputPassword = password ? 1 : 0;
     g_vmInputCallback = callback;
-    g_vmInputBuffer = buffer;
     g_vmInputMaxLen = maxLen & 0xffff;
     if (g_vmInputMaxLen == 0)
         g_vmInputMaxLen = maxLen;
+    scratchBytes = vm_input_buffer_bytes(g_vmInputMaxLen);
+    if (!vm_input_ensure_scratch_buffer(scratchBytes))
+    {
+        printf("[vmInput] failed to reserve scratch buffer maxLen=%u bytes=%u\n", g_vmInputMaxLen, scratchBytes);
+        assert(0);
+    }
+    vm_try_write_zero(g_vmInputScratchBuffer, scratchBytes);
+    copyUnits = vm_input_wcslen_limit(buffer, g_vmInputMaxLen > 0 ? g_vmInputMaxLen - 1 : 0);
+    if (copyUnits > 0)
+        vm_input_copy_guest_bytes(g_vmInputScratchBuffer, buffer, copyUnits * 2);
+    g_vmInputTargetBuffer = buffer;
+    g_vmInputBuffer = g_vmInputScratchBuffer;
     g_vmInputInputType = inputType & 0xff;
     g_vmInputOverlayX = 12;
     g_vmInputOverlayY = password ? 372 : 344;
     g_vmInputOverlayW = 216;
     g_vmInputOverlayH = 22;
     g_vmInputComposition[0] = 0;
+    vm_debug_log_login_input_state(password ? "open-pass" : "open-text", callback, buffer);
     vm_input_request_sdl_text_input(1);
     vm_set_call_result(1);
 }
@@ -2885,6 +3231,7 @@ static uc_err scheduler_tick(void)
     uc_err err = scheduler_dispatch_timers();
     if (err != UC_ERR_OK)
         return err;
+    vm_net_mock_poll_push_if_due();
     err = scheduler_dispatch_net_tasks();
     if (err != UC_ERR_OK)
         return err;
@@ -3016,6 +3363,43 @@ static int vm_autotest_parse_u32(const char *text, u32 *value)
     if (end == text || *end != 0)
         return 0;
     *value = (u32)parsed;
+    return 1;
+}
+
+static int vm_mock_service_parse_host_port(const char *text, char *host, size_t hostCap, u16 *port)
+{
+    const char *colon = NULL;
+    u32 parsedPort = 0;
+    size_t hostLen = 0;
+
+    if (text == NULL || *text == 0 || host == NULL || hostCap == 0 || port == NULL)
+        return 0;
+
+    colon = strrchr(text, ':');
+    if (colon != NULL)
+    {
+        if (!vm_autotest_parse_u32(colon + 1, &parsedPort) || parsedPort == 0 || parsedPort > 65535u)
+            return 0;
+        hostLen = (size_t)(colon - text);
+        if (hostLen == 0)
+        {
+            snprintf(host, hostCap, "127.0.0.1");
+        }
+        else
+        {
+            if (hostLen >= hostCap)
+                hostLen = hostCap - 1;
+            memcpy(host, text, hostLen);
+            host[hostLen] = 0;
+        }
+        *port = (u16)parsedPort;
+        return 1;
+    }
+
+    if (!vm_autotest_parse_u32(text, &parsedPort) || parsedPort == 0 || parsedPort > 65535u)
+        return 0;
+    snprintf(host, hostCap, "127.0.0.1");
+    *port = (u16)parsedPort;
     return 1;
 }
 
@@ -3187,6 +3571,134 @@ static void vm_autotest_note(const char *fmt, ...)
     vfprintf(g_autotestStateFile, fmt, args);
     va_end(args);
     fflush(g_autotestStateFile);
+}
+
+static void vm_mock_service_init_config(int argc, char *args[])
+{
+    const char *envOnly = getenv("CBE_MOCK_SERVICE_ONLY");
+    const char *envEndpoint = getenv("CBE_MOCK_SERVICE");
+    const char *envBind = getenv("CBE_MOCK_SERVICE_BIND");
+    const char *envLegacyPort = getenv("CBE_MOCK_SERVICE_PORT");
+    const char *envLegacyRemote = getenv("CBE_MOCK_SERVICE_REMOTE");
+    char parsedHost[64];
+    u16 parsedPort = 0;
+
+    if (envOnly && strcmp(envOnly, "0") != 0)
+        g_mockServiceOnly = 1;
+
+    if (envBind && envBind[0] != 0)
+    {
+        snprintf(g_mockServiceBindHost, sizeof(g_mockServiceBindHost), "%s", envBind);
+    }
+
+    if (g_mockServiceClientId == 0)
+    {
+        /* Two emulator processes commonly start within the same second and
+         * are loaded at the same image address. Include the process id so
+         * simultaneous role logins cannot collapse into one service session.
+         */
+        g_mockServiceClientId = (u32)time(NULL) ^
+                                (u32)(uintptr_t)&g_mockServiceClientId ^
+                                ((u32)getpid() * 0x9e3779b9u);
+        if (g_mockServiceClientId == 0)
+            g_mockServiceClientId = 1;
+    }
+
+    if (envEndpoint)
+    {
+        if (vm_mock_service_parse_host_port(envEndpoint, parsedHost, sizeof(parsedHost), &parsedPort))
+        {
+            snprintf(g_mockServiceHost, sizeof(g_mockServiceHost), "%s", parsedHost);
+            g_mockServicePort = parsedPort;
+        }
+        else
+        {
+            printf("[warn][mock-service] invalid CBE_MOCK_SERVICE=%s\n", envEndpoint);
+        }
+    }
+    else if (envLegacyRemote)
+    {
+        if (vm_mock_service_parse_host_port(envLegacyRemote, parsedHost, sizeof(parsedHost), &parsedPort))
+        {
+            snprintf(g_mockServiceHost, sizeof(g_mockServiceHost), "%s", parsedHost);
+            g_mockServicePort = parsedPort;
+        }
+        else
+        {
+            printf("[warn][mock-service] invalid CBE_MOCK_SERVICE_REMOTE=%s\n", envLegacyRemote);
+        }
+    }
+    else if (envLegacyPort)
+    {
+        u32 portValue = 0;
+        if (vm_autotest_parse_u32(envLegacyPort, &portValue) && portValue > 0 && portValue <= 65535u)
+            g_mockServicePort = (u16)portValue;
+        else
+        {
+            printf("[warn][mock-service] invalid CBE_MOCK_SERVICE_PORT=%s\n", envLegacyPort);
+        }
+    }
+
+    for (int i = 1; i < argc; ++i)
+    {
+        if (strcmp(args[i], "--mock-service-only") == 0)
+        {
+            g_mockServiceOnly = 1;
+        }
+        else if (strncmp(args[i], "--mock-service-port=", 20) == 0)
+        {
+            u32 portValue = 0;
+            if (vm_autotest_parse_u32(args[i] + 20, &portValue) && portValue > 0 && portValue <= 65535u)
+                g_mockServicePort = (u16)portValue;
+            else
+                printf("[warn][mock-service] invalid mock-service-port=%s\n", args[i] + 20);
+        }
+        else if (strncmp(args[i], "--mock-service=", 15) == 0)
+        {
+            if (vm_mock_service_parse_host_port(args[i] + 15, parsedHost, sizeof(parsedHost), &parsedPort))
+            {
+                snprintf(g_mockServiceHost, sizeof(g_mockServiceHost), "%s", parsedHost);
+                g_mockServicePort = parsedPort;
+            }
+            else
+            {
+                printf("[warn][mock-service] invalid mock-service=%s\n", args[i] + 15);
+            }
+        }
+        else if (strncmp(args[i], "--mock-service-bind=", 20) == 0)
+        {
+            if (args[i][20] != 0)
+                snprintf(g_mockServiceBindHost, sizeof(g_mockServiceBindHost), "%s", args[i] + 20);
+            else
+                printf("[warn][mock-service] invalid mock-service-bind=<empty>\n");
+        }
+        else if (strncmp(args[i], "--mock-service-remote=", 22) == 0)
+        {
+            if (vm_mock_service_parse_host_port(args[i] + 22, parsedHost, sizeof(parsedHost), &parsedPort))
+            {
+                snprintf(g_mockServiceHost, sizeof(g_mockServiceHost), "%s", parsedHost);
+                g_mockServicePort = parsedPort;
+            }
+            else
+            {
+                printf("[warn][mock-service] invalid mock-service-remote=%s\n", args[i] + 22);
+            }
+        }
+    }
+
+    if (g_mockServiceOnly)
+    {
+        printf("[info][mock-service] mode=server-only bind=%s:%u client-default=%s:%u\n",
+               g_mockServiceBindHost,
+               g_mockServicePort,
+               g_mockServiceHost,
+               g_mockServicePort);
+    }
+    else
+    {
+        printf("[info][mock-service] mode=emulator client=%s:%u auth=packet-driven required=service\n",
+               g_mockServiceHost, g_mockServicePort);
+    }
 }
 
 static void vm_autotest_format_mem_hex(u32 addr, u32 len, char *out, size_t outCap)
@@ -4963,6 +5475,8 @@ void loop()
                 }
                 break;
             case SDL_MOUSEMOTION:
+                if (g_vmInputOpen)
+                    break;
                 if (isMouseDown)
                 {
                     windowMouseEvent(MR_MOUSE_MOVE, ev.motion.x, ev.motion.y);
@@ -4982,6 +5496,11 @@ void loop()
                                LcdGetWindowWidth(), LcdGetWindowHeight());
                     }
                     vm_lcd_update_with_input_overlay();
+                    break;
+                }
+                if (g_vmInputOpen)
+                {
+                    isMouseDown = false;
                     break;
                 }
                 isMouseDown = true;
@@ -5200,7 +5719,7 @@ static void vm_reset_runtime_state_for_restart(void)
     g_currentScreenThis = 0;
     g_currentScreenModuleBase = 0;
     g_currentScreenDataPackage = 0;
-    g_dlSpBf = 0;
+    vm_dl_reset_state();
     g_screenRootExitArmed = 0;
     g_screenRootExitPending = 0;
     g_screenRootExitPendingRoot = 0;
@@ -5223,9 +5742,14 @@ static void vm_reset_runtime_state_for_restart(void)
     g_curKeyDownState = 0;
     g_curKeyState = 0;
     g_vmInputOpen = 0;
+    g_vmInputPassword = 0;
     g_vmInputCallback = 0;
     g_vmInputBuffer = 0;
+    g_vmInputTargetBuffer = 0;
     g_vmInputMaxLen = 0;
+    g_vmInputInputType = 0;
+    g_vmInputScratchBuffer = 0;
+    g_vmInputScratchBytes = 0;
     g_vmInputComposition[0] = 0;
     g_vmInputSdlTextInputWanted = 0;
     g_vmInputSdlTextInputActive = 0;
@@ -5783,15 +6307,37 @@ static void vm_storage_date_build_path(char *path, size_t pathSize, u32 namePtr)
     snprintf(path, pathSize, "nvram/%s_storage_%s.bin", appName, storeName);
 }
 
+static bool vm_storage_date_is_login_record(const char *name)
+{
+    return name != NULL && strcmp(name, "mmorpg_LoginRecord") == 0;
+}
+
 static u32 vm_storage_date(u32 namePtr, u32 buffer, u32 len, u32 isRead)
 {
     if (buffer == 0 || len == 0 || len > 0x100000)
         return vm_set_call_result(0);
 
+    char rawName[96];
     char path[224];
+    vm_storage_read_name(namePtr, rawName, sizeof(rawName));
     vm_storage_date_build_path(path, sizeof(path), namePtr);
+    bool isLoginRecord = vm_storage_date_is_login_record(rawName);
+    u32 effectiveBuffer = buffer;
+    u32 effectiveLen = len;
 
-    u8 *tmp = SDL_malloc(len);
+    if (!isRead && isLoginRecord && len == sizeof(u32))
+    {
+        u32 recordPtr = vm_get_var(buffer);
+        if (vm_is_writable_vm_range(recordPtr, 180))
+        {
+            effectiveBuffer = recordPtr;
+            effectiveLen = 180;
+            printf("[info][storage] compat save %s slot=%08x ptr=%08x len=%u->%u\n",
+                   rawName, buffer, recordPtr, len, effectiveLen);
+        }
+    }
+
+    u8 *tmp = SDL_malloc(effectiveLen);
     if (tmp == NULL)
         return vm_set_call_result(0);
 
@@ -5806,20 +6352,25 @@ static u32 vm_storage_date(u32 namePtr, u32 buffer, u32 len, u32 isRead)
         }
 
         u32 readLen = vm_persist_read_file(path, tmp, len);
+        if (isLoginRecord && len >= 180 && readLen > 0 && readLen < 180)
+        {
+            printf("[warn][storage] ignore truncated %s len=%u path=%s\n", rawName, readLen, path);
+            readLen = 0;
+        }
         if (readLen)
             uc_mem_write(MTK, buffer, tmp, readLen);
         SDL_free(tmp);
         return vm_set_call_result(readLen ? 1 : 0);
     }
 
-    if (uc_mem_read(MTK, buffer, tmp, len) != UC_ERR_OK)
+    if (uc_mem_read(MTK, effectiveBuffer, tmp, effectiveLen) != UC_ERR_OK)
     {
         SDL_free(tmp);
         return vm_set_call_result(0);
     }
-    u32 savedLen = vm_persist_write_file(path, tmp, len);
+    u32 savedLen = vm_persist_write_file(path, tmp, effectiveLen);
     SDL_free(tmp);
-    return vm_set_call_result(savedLen == len ? 1 : 0);
+    return vm_set_call_result(savedLen == effectiveLen ? 1 : 0);
 }
 
 
@@ -6506,40 +7057,55 @@ int main(int argc, char *args[])
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     vm_autotest_init(argc, args);
-    vm_lcd_init_rotation_config(argc, args);
+    vm_mock_service_init_config(argc, args);
+    if (!g_mockServiceOnly)
+        vm_lcd_init_rotation_config(argc, args);
 
     SetConsoleOutputCP(CP_UTF8);
     // while(1);
 
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) < 0)
+    if (SDL_Init((g_mockServiceOnly ? SDL_INIT_TIMER : (SDL_INIT_VIDEO | SDL_INIT_TIMER))) < 0)
     {
         printf("SDL could not initialize! SDL_Error: %s\n", SDL_GetError());
         return -1;
     }
     /* 勿用 SDL_WINDOW_OPENGL：本工程用 GetWindowSurface 直接写像素，OpenGL 窗口下格式/stride 常异常 → 竖条花屏 */
+    if (!g_mockServiceOnly)
+    {
 #ifdef GDI_LAYER_DEBUGf
-    window = SDL_CreateWindow("moral i9 simulato", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, SCREEN_WIDTH * 5, SCREEN_HEIGHT, 0);
+        window = SDL_CreateWindow("moral i9 simulato", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, SCREEN_WIDTH * 5, SCREEN_HEIGHT, 0);
 #else
-    window = SDL_CreateWindow("Cbe Emulator", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                              LcdGetWindowWidth(), LcdGetWindowHeight(), 0);
+        window = SDL_CreateWindow("Cbe Emulator", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                                  LcdGetWindowWidth(), LcdGetWindowHeight(), 0);
 #endif
-    if (window == NULL)
-    {
-        printf("Window could not be created! SDL_Error: %s\n", SDL_GetError());
-        return -1;
-    }
-    LcdApplyWindowSize();
-    SDL_Surface *startupSurface = SDL_GetWindowSurface(window);
-    if (startupSurface)
-    {
-        SDL_FillRect(startupSurface, NULL, SDL_MapRGB(startupSurface->format, 0, 0, 0));
-        SDL_UpdateWindowSurface(window);
+        if (window == NULL)
+        {
+            printf("Window could not be created! SDL_Error: %s\n", SDL_GetError());
+            return -1;
+        }
+        LcdApplyWindowSize();
+        SDL_Surface *startupSurface = SDL_GetWindowSurface(window);
+        if (startupSurface)
+        {
+            SDL_FillRect(startupSurface, NULL, SDL_MapRGB(startupSurface->format, 0, 0, 0));
+            SDL_UpdateWindowSurface(window);
+        }
     }
 
     InitVmEvent();
 
     char nameBuff[64] = LOAD_CBE_PATH;
     utf8_to_gbk(nameBuff, cbeTextString, mySizeOf(cbeTextString));
+    if (!vm_host_file_exists((char *)cbeTextString))
+    {
+        char altPath[128];
+        snprintf(altPath, sizeof(altPath), "bin/%s", cbeTextString);
+        if (vm_host_file_exists(altPath))
+        {
+            chdir("bin");
+            printf("[info][host] runtime cwd adjusted to ./bin\n");
+        }
+    }
     char *fileBuffer = readFile(cbeTextString, &changeTmp1);
     g_cbeFileBuffer = (u8 *)fileBuffer;
     g_cbeFileSize = changeTmp1;
@@ -6573,9 +7139,12 @@ int main(int argc, char *args[])
     uc_mem_map(MTK, PROGRAM_EXIT_ADDR, 0x1000, UC_PROT_ALL);
 
     InitVmMalloc();
-    InitLcd();
-    vm_lcd_update_with_input_overlay();
-    InitFontEngine();
+    if (!g_mockServiceOnly)
+    {
+        InitLcd();
+        vm_lcd_update_with_input_overlay();
+        InitFontEngine();
+    }
 
     if (err)
     {
@@ -6630,6 +7199,14 @@ int main(int argc, char *args[])
         changeTmp2 = STACK_ADDRESS + size_1mb; // 映射栈内存
         uc_reg_write(MTK, UC_ARM_REG_SP, &changeTmp2);
 
+        if (g_mockServiceOnly)
+        {
+            printf("[info][mock-service] loaded cbe=%s entry=%08x data=%08x port=%u\n",
+                   LOAD_CBE_PATH, Program_ROM_Address, Program_Data_Address, g_mockServicePort);
+            vm_net_mock_service_run_forever(g_mockServiceBindHost, g_mockServicePort);
+            return 0;
+        }
+
         // 启动emu线程
         changeTmp1 = Program_ROM_Address;
 
@@ -6640,6 +7217,7 @@ int main(int argc, char *args[])
         printf("Unicorn Engine Initialized\n");
 
         loop();
+        vm_net_mock_service_notify_disconnect("host-loop-exit");
     }
     return 0;
 }
@@ -7455,6 +8033,7 @@ return 4;
         g_vmInputOpen = 0;
         g_vmInputCallback = 0;
         g_vmInputBuffer = 0;
+        g_vmInputTargetBuffer = 0;
         g_vmInputMaxLen = 0;
         g_vmInputInputType = 0;
         g_vmInputPassword = 0;
@@ -7611,7 +8190,7 @@ return 4;
     else if (idx == 75)
     {
         printf("[call]vmDlGetPreAppId\n");
-        assert(0);
+        vm_set_call_result((u32)g_vmDlPreAppId);
     }
     else if (idx == 76)
     {
@@ -7630,7 +8209,9 @@ return 4;
     }
     else if (idx == 79)
     {
-        tmp1 = Global_R9;
+        tmp1 = g_dlSpBf ? g_dlSpBf : vm_dl_current_sp_bf();
+        if (tmp1 == 0)
+            tmp1 = Global_R9;
         vm_set_call_result(tmp1);
     }
     else if (idx == 80)
@@ -8635,6 +9216,17 @@ static bool hook_vm_manager_lcd_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1); // src UCS2
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2); // dst GBK
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3); // dst max bytes
+        if (g_vmInputWatchCallback)
+        {
+            char srcText[64];
+            char dstText[64];
+            memset(srcText, 0, sizeof(srcText));
+            memset(dstText, 0, sizeof(dstText));
+            vm_debug_read_guest_ucs2_as_gbk(tmp1, srcText, sizeof(srcText), 64);
+            vm_debug_read_guest_cstr(tmp2, dstText, sizeof(dstText));
+            printf("[debug][vmInput] lcd40 pc=%08x src=%08x dst=%08x max=%u srcText='%s' dstBefore='%s'\n",
+                   lastAddress, tmp1, tmp2, tmp3, srcText, dstText);
+        }
         if (tmp1 == 0 || tmp2 == 0 || tmp3 == 0 || tmp3 > 0xfff0)
         {
             vm_set_call_result(0);
@@ -8650,13 +9242,24 @@ static bool hook_vm_manager_lcd_func(u32 address)
             u32 outLen = tmp3;
             if (outLen > mySizeOf(sprintfBuff))
                 outLen = mySizeOf(sprintfBuff);
+            memset(sprintfBuff, 0, outLen);
             int conv = ucs2_to_gbk(cbeTextString, srcBytes, sprintfBuff, outLen);
             if (conv < 0)
             {
                 sprintfBuff[0] = 0;
-                outLen = 1;
             }
-            uc_mem_write(MTK, tmp2, sprintfBuff, outLen);
+            u32 writeLen = (u32)strlen((char *)sprintfBuff) + 1;
+            if (writeLen > outLen)
+                writeLen = outLen;
+            uc_mem_write(MTK, tmp2, sprintfBuff, writeLen);
+            if (g_vmInputWatchCallback)
+            {
+                char dstAfter[64];
+                memset(dstAfter, 0, sizeof(dstAfter));
+                vm_debug_read_guest_cstr(tmp2, dstAfter, sizeof(dstAfter));
+                printf("[debug][vmInput] lcd40-write dst=%08x wrote=%u conv=%d dstAfter='%s'\n",
+                       tmp2, writeLen, conv, dstAfter);
+            }
             vm_set_call_result(strlen((char *)sprintfBuff));
         }
     }
@@ -10671,8 +11274,9 @@ static bool hook_vm_manager_screen_func(u32 address)
         }
         if (tmp1 != 0 && acceptChange)
         {
-            if (lastAddress >= VM_Memory_Pool_ADDRESS && lastAddress < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
-                uc_reg_read(MTK, UC_ARM_REG_R9, &moduleBase);
+            moduleBase = vm_read_current_pool_r9();
+            if (!moduleBase)
+                moduleBase = vm_dl_current_sp_bf();
             if (!moduleBase)
                 moduleBase = vm_screen_stack_lookup_module_base(tmp1);
             if (moduleBase)
@@ -10704,8 +11308,9 @@ static bool hook_vm_manager_screen_func(u32 address)
             tmp2 = 0;
             tmp3 = 1;
         }
-        if (lastAddress >= VM_Memory_Pool_ADDRESS && lastAddress < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
-            uc_reg_read(MTK, UC_ARM_REG_R9, &moduleBase);
+        moduleBase = vm_read_current_pool_r9();
+        if (!moduleBase)
+            moduleBase = vm_dl_current_sp_bf();
         if (tmp1 != 0 && tmp1 != vmAddedScreen)
             vm_screen_stack_preserve_active_if_needed();
         if (moduleBase)
@@ -12111,57 +12716,74 @@ static bool hook_vm_dl_load_func(u32 address)
     if (idx == 0)
     {
         printf("[call]vlDlSetCurrContextAddress\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        if (tmp2)
+            vm_dl_set_loaded_context(g_vmDlCurrAppId, tmp1 ? vm_get_var(tmp1) : 0);
+        else if (tmp1)
+            vm_set_var(tmp1, vm_dl_get_loaded_context(g_vmDlCurrAppId));
+        vm_set_call_result(0);
     }
     else if (idx == 1)
     {
         printf("[call]vlDlSetContextAddress\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        if (tmp3)
+            vm_dl_set_loaded_context((u16)tmp1, tmp2 ? vm_get_var(tmp2) : 0);
+        else if (tmp2)
+            vm_set_var(tmp2, vm_dl_get_loaded_context((u16)tmp1));
+        vm_set_call_result(0);
     }
     else if (idx == 2)
     {
         printf("[call]vlDlUnLoadCurrApp\n");
-        assert(0);
+        vm_dl_unload_loaded_app(g_vmDlCurrAppId);
+        vm_set_call_result(0);
     }
     else if (idx == 3)
     {
         printf("[call]vlDlUnLoadApp\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_dl_unload_loaded_app((u16)tmp1);
+        vm_set_call_result(0);
     }
     else if (idx == 4)
     {
         printf("[call]vmDlParseAndCopy\n");
-        assert(0);
+        vm_set_call_result(0xffffffffu);
     }
     else if (idx == 5)
     {
         printf("[call]vlDlLoadApp\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 6)
     {
         printf("[call]vlDlLoadAppEx\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 7)
     {
         printf("[call]vlDlAppIsInDl\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_set_call_result(vm_dl_find_loaded_index_by_app_id((u16)tmp1) >= 0 ? 1 : 0);
     }
     else if (idx == 8)
     {
         printf("[call]vmGetcurrInnerAppId\n");
-        assert(0);
+        vm_set_call_result((u32)g_vmDlCurrAppId);
     }
     else if (idx == 9)
     {
         printf("[call]CBInnerInit_qqIn\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else if (idx == 10)
     {
         printf("[call]VmGetCBEInfoByFileName\n");
-        assert(0);
+        vm_set_call_result(0);
     }
     else
     {

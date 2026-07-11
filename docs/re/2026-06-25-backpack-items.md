@@ -2,8 +2,8 @@
 
 ## Goal
 
-- Player backpack capacity: 40 slots.
-- Initial item: item `800` (`传送石`) at seq `1`, stack count `5`.
+- Player backpack initial capacity: 20 slots.
+- Initial backpack contents: empty.
 - Backpack rows belong to the active local role, not a mock-wide global
   inventory.
 
@@ -19,7 +19,7 @@ For the scene-side `a2 == 0` path:
 - It writes that value to `R9 + 24678`, which is the main item manager at `R9 + 24640` plus offset `38`.
 - `TimerControl_ProcessItem(0x01032EB8)` compares current item count at manager `+36` with this manager `+38` value before it searches for an empty item slot.
 
-Runtime negative evidence: when this actorinfo byte was `0`, item insertion returned before scanning empty slots. Setting it to `40` allowed normal client-side insertion.
+Runtime negative evidence: when this actorinfo byte was `0`, item insertion returned before scanning empty slots. Setting it to a nonzero capacity allowed normal client-side insertion. The current mock default is `20`.
 
 ### Role Item Insert
 
@@ -52,10 +52,10 @@ Observed parser contract:
 `vm_net_mock_build_actor_info()` now writes:
 
 ```text
-actorinfo backpackCapacity = 40
+actorinfo backpackCapacity = activeRole.backpackCapacity
 ```
 
-This value is configurable for experiments through `CBE_ACTOR_BACKPACK_CAPACITY`, defaulting to `40`.
+This value is configurable for experiments through `CBE_ACTOR_BACKPACK_CAPACITY`, defaulting to `20`.
 
 ### Initial Role Grid Items
 
@@ -74,11 +74,7 @@ iteminfo =
     common item-extra block
 ```
 
-Runtime validation showed the main item manager reached:
-
-```text
-item_count=1 item0=800 seq0=1 stack242=5
-```
+Runtime validation showed the main item manager can bootstrap directly from the persisted role rows without any mock-wide starter item.
 
 ### Full Backpack List
 
@@ -95,17 +91,15 @@ iteminfo =
 
 ### Persistence
 
-The role DB file is now version 2. Each role stores:
+The role DB file was later extended beyond version 2, but this phase introduced the per-role backpack fields:
 
 ```text
 backpackItemCount
 nextBackpackSeq
-backpackItems[40] = itemId, seq, count
+backpackItems[...] = itemId, seq, count
 ```
 
-New roles and migrated version-1 roles start with `传送石 x5`. NPC/shop buy
-responses add or stack the purchased item into the active role before returning
-the parser-facing `14/3 { seq, result }`.
+New roles now start with an empty backpack and initial capacity `20`. Legacy role DB files that still carried the old default `40`-slot capacity are migrated forward to the new baseline while preserving occupied rows. NPC/shop buy responses normally add or stack the purchased item into the active role before returning the parser-facing `14/3 { seq, result }`, but the mall `type=2` purchase of item `806` (`背包扩容`) is a confirmed client-side special case and must expand capacity directly instead of inserting an inventory row.
 
 ## Removed Failed Paths
 
@@ -122,5 +116,7 @@ Implemented and validated for the main client item manager:
 - capacity field is packet-driven through `actorinfo`;
 - role backpack rows are inserted through `30/21`;
 - `17/1` full-list rows are generated from the same active role backpack.
+
+Backpack expansion now consumes item `806` (`背包扩容`) and raises the role capacity by `5` per use, up to `200`. Because the item-use success parser (`7/1`) does not read capacity directly, the mock follows a successful expand-card use with a separate `17/1` refresh packet so the client updates slot count through its normal backpack parser path.
 
 The mmGame backpack UI full-list path (`17/1`) is implemented as a server response, but visual inventory-screen confirmation should be handled in a follow-up once the exact UI open automation/parser window is isolated.

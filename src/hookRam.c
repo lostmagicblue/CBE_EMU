@@ -8,6 +8,11 @@ void handleLcdReg(uint64_t address, u32 data, uint64_t value);
 void handleTouchScreenReg(uint64_t address, u32 data, uint64_t value);
 
 extern u8 g_mockBattleOperateSessionArmed;
+extern u32 g_vmInputWatchUserBuf;
+extern u32 g_vmInputWatchUserBufLen;
+extern u32 g_vmInputWatchCallback;
+extern u32 g_vmInputWatchCallR9;
+extern u32 g_vmInputWatchWriteCount;
 
 #ifdef GDB_SERVER_SUPPORT
 /* 前向声明 - 这些在gdb_client.c中定义 */
@@ -37,6 +42,37 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             ;
     }
 #endif
+    if (type == UC_MEM_WRITE && g_vmInputWatchUserBufLen != 0)
+    {
+        u32 start = (u32)address;
+        u32 end = start + size;
+        u32 watchStart = g_vmInputWatchUserBuf;
+        u32 watchEnd = watchStart + g_vmInputWatchUserBufLen;
+        if (start < watchEnd && end > watchStart)
+        {
+            if (g_vmInputWatchWriteCount < 24)
+            {
+                u32 pc = 0;
+                u32 sp = 0;
+                u32 r9 = 0;
+                uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+                uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+                uc_reg_read(uc, UC_ARM_REG_R9, &r9);
+                printf("[debug][vmInput] dispU-write #%u pc=%08x last=%08x addr=%08x size=%u value=%llx r9=%08x sp=%08x cb=%08x callR9=%08x\n",
+                       g_vmInputWatchWriteCount + 1,
+                       pc,
+                       lastAddress,
+                       start,
+                       size,
+                       value,
+                       r9,
+                       sp,
+                       g_vmInputWatchCallback,
+                       g_vmInputWatchCallR9);
+            }
+            ++g_vmInputWatchWriteCount;
+        }
+    }
     // if (type == UC_MEM_WRITE && ((address == 0x10353C0)))
     // {
     //     printf("write[%x:", address);

@@ -143,7 +143,7 @@ u8 backpackItemCount
 u8 reserved
 u16 nextBackpackSeq
 equippedItemIds[8]
-backpackItems[40]:
+backpackItems[200]:
   u32 itemId
   u16 seq
   u16 reserved
@@ -159,19 +159,20 @@ job = 1
 sex = 0
 hp/mp = 120/100
 money = 1000
-backpackCapacity = 40
+backpackCapacity = 20
 scene = c00蓬莱仙岛_01.sce (Penglai TongQueTai)
 position = 216,216
-backpack = item 800 seq 1 count 5
-nextBackpackSeq = 2
+backpack = empty
+nextBackpackSeq = 1
 equippedItemIds[0] = 1001
 ```
 
-Version 1 role DB files are upgraded in-place to version 3 by copying existing
-role fields, seeding each role with the default backpack, and assigning starter
-equipment. Version 2 files migrate to version 3 by keeping the existing
-backpack and adding equipment slots. The old `nvram/jhol_mock_player_pos.bin`
-mirror is no longer read or written.
+Version 1 role DB files are upgraded in-place to version 4 by copying existing
+role fields, keeping an empty backpack for each role, and assigning starter
+equipment. Version 2 and 3 files migrate to version 4 by keeping the existing
+backpack/equipment rows while normalizing the old default `40`-slot backpack to
+the new `20`-slot baseline whenever that does not discard occupied rows. The
+old `nvram/jhol_mock_player_pos.bin` mirror is no longer read or written.
 
 ## Server Behavior
 
@@ -226,8 +227,8 @@ Title role list:
   `scene/x/y` from that active role row.
 - title role create handles request `1/1/7`, appends a persisted role when
   capacity allows it, starts the new role at Penglai TongQueTai
-  `c00蓬莱仙岛_01.sce @ (216,216)` with the default teleport-stone stack, and
-  returns `actorid/result` to the title parser.
+  `c00蓬莱仙岛_01.sce @ (216,216)` with an empty backpack, and returns
+  `actorid/result` to the title parser.
 - role DB load repairs duplicate legacy rows that were previously persisted
   with the default name after a create-payload decode miss. The first default
   role keeps the GBK default name; later duplicate default rows become stable
@@ -237,8 +238,8 @@ Title role list:
 
 Money sync:
 
-- shop `coolmoney`, group/type `money`, and generic game-type `money` read the
-  active role money.
+- shop `coolmoney` reads the active role `wcoin` balance.
+- group/type `money` and generic game-type `money` read the active role money.
 
 Backpack:
 
@@ -247,6 +248,10 @@ Backpack:
 - backpack UI `17/1` emits the active role's backpack rows and capacity.
 - NPC/shop buy `17/2` adds or stacks the purchased item into the active role
   before returning `14/3 { seq, result }`.
+- item `806` (`背包扩容`) consumes one card per use, increases persisted
+  capacity by `5`, and caps at `200`. The server follows the normal item-use
+  success packet with a separate `17/1` refresh so the client re-reads the new
+  capacity through its backpack parser.
 
 Battle:
 

@@ -46,7 +46,7 @@ Status: implemented for shop open, DSH-backed catalog paging, shop-friendly cata
 
 - WT objects:
   - `1/14/14 { result=1, shopinfo="Codex Shop" }`
-  - `1/14/4 { coolmoney=999999, ticket=0 }`
+  - `1/14/4 { coolmoney=<active-role wcoin>, ticket=0 }`
   - `1/14/5 { totalnum=<secret item count>, iteminfo=<秘宝道具 page 0 rows> }`
   - `1/14/6 { totalnum=<weapon item count>, iteminfo=<神兵利器/武器 page 0 rows> }`
   - `1/1/14 { revivetype=0, ruffianflag=0, type=0, actorinfo=<current-role actorinfo blob> }`
@@ -60,6 +60,27 @@ Status: implemented for shop open, DSH-backed catalog paging, shop-friendly cata
 
 - `item.dsh`: 230 rows, parsed from `ID`, `名称`, `形象`, `类别`, `价值`, and `堆叠数`.
 - `equip.dsh`: 1485 rows, parsed from `ID`, `名称`, `价值`, and `类别`.
+- Mall secret items (`类别=14`) also carry a dedicated `酷宝` column. Current
+  runtime rows such as `800 传送石`, `801 复活石`, and `806 背包扩容` show that
+  `价值` is not the premium-shop W-coin price for this page; the mock now uses
+  `酷宝` as the displayed/billed shop price for `14/5`, while equipment pages
+  continue to use `equip.dsh` `价值`.
+- `equip.dsh` has no `酷宝` / `人民币` / `ticket` column. For the
+  `神兵利器` pages, `mmShopMstarWqvga.cbm:sub_7BC(0x7BC)` reads the row `price`
+  directly from the server `iteminfo` stream and does not perform any local
+  `equip.dsh`-based price conversion. That means `1001 木制宽剑 = 675` currently
+  comes from the mock's choice to map equipment-page price to `equip.dsh` `价值`;
+  there is not yet evidence for a second built-in premium-price source.
+- Purchase success for `14/3` `type=2` does not spend a single unified balance.
+  `mmShopMstarWqvga.cbm:sub_9DE(0x9DE)` first applies `ticket`, then deducts any
+  remainder from `coolmoney`. The current mock still reports `ticket=0`, so all
+  successful mall purchases draw from the role-bound `wcoin` balance exposed as
+  `coolmoney`.
+- `806 背包扩容` is a client-local price exception. `sub_7BC` ignores the raw
+  row price for that item and calls `sub_74E(0x74E)`, which maps the local
+  backpack-capacity field to `20 / 40 / 60`. The mock now mirrors that helper
+  when building the row price and when calculating the `14/3` bill, so client
+  display and server deduction stay aligned.
 - Current max catalog capacity: `2048` rows; the local resources load the full `item.dsh` plus the first bounded slice of `equip.dsh`.
 - Runtime DSH visibility matters twice:
   - mock-server loads `JHOnlineData/item.dsh` and `JHOnlineData/equip.dsh` to build `14/5` rows with server-provided names;
@@ -102,7 +123,7 @@ Status: implemented for shop open, DSH-backed catalog paging, shop-friendly cata
   - those build the same kind-14 status/money requests that `sub_9DE` parses.
 - Response:
   - `1/14/14 { result=1, shopinfo="Codex Shop" }`
-  - `1/14/4 { coolmoney=999999, ticket=0 }`
+  - `1/14/4 { coolmoney=<active-role wcoin>, ticket=0 }`
 
 ### NPC Dialog Buy + Shop Combo Request
 
@@ -115,7 +136,7 @@ Status: implemented for shop open, DSH-backed catalog paging, shop-friendly cata
 - Response now returns:
   - requested safe scene/dialog follow-up objects (`2/10`, `27/11`, `27/4`, `7/42`) when present;
   - `1/14/14 { result=1, shopinfo="Codex Shop" }`
-  - `1/14/4 { coolmoney=999999, ticket=0 }`
+  - `1/14/4 { coolmoney=<active-role wcoin>, ticket=0 }`
   - `1/14/5 { totalnum=<secret item count>, iteminfo=<秘宝道具 page index rows> }`
   - `1/14/6 { totalnum=<weapon item count>, iteminfo=<神兵利器/武器 page index rows> }`
 - If `14/5/14/6` are batched in the same request, do not drop them. `mmShop:0x9DE` uses one local response-object counter and clears loading after the full four-object family is parsed.
@@ -137,10 +158,17 @@ Status: implemented for shop open, DSH-backed catalog paging, shop-friendly cata
   - `seq`
   - `result`
 
-- The W-coin `14/3` request is handled by `builtin-shop-buy14`; the server
-  checks the shop W-coin balance, deducts `price * num`, adds the item to the
-  active role backpack, saves the role DB through the normal backpack add path,
-  then returns `seq/result`.
+- The W-coin `14/3` request is handled by `builtin-shop-buy14`; the balance now
+  comes from the active role's persisted `wcoin` field and new roles start at
+  `0`. The normal path checks that balance, deducts `price * num`, adds the
+  item to the active role backpack, saves the role DB, then returns
+  `seq/result`.
+- Special case confirmed in `mmShopMstarWqvga.cbm:sub_9DE`: local purchase
+  `type=2` + `id=806` (`背包扩容`) does not route through the normal backpack
+  add callback. The client handles that success by increasing its local
+  capacity field directly, so the mock must expand persisted backpack capacity
+  immediately, return `14/3 { seq=0, result=1 }`, and avoid arming the
+  one-shot role-backpack sync that is only valid for ordinary purchased items.
 - On successful buy, clear the one-shot shop `17/1` pending flag. That flag is
   only for the shop list sync after open/page requests; leaving it set after a
   completed purchase hijacks the next backpack `17/1`/open request and makes the
