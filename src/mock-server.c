@@ -6286,8 +6286,11 @@ static bool vm_net_mock_scene_name_has_path_separator(const char *scene)
 
 static bool vm_net_mock_scene_name_is_download_key(const char *scene)
 {
-    return false;
-    // return scene != NULL && scene[0] != 0 && !vm_net_mock_scene_name_has_path_separator(scene);
+    /* DSH map names are server-provided resource keys (for example
+     * `01桃花岛_01.sce`), not necessarily the older c-prefixed scene form.
+     * Reject only empty/path-bearing values; the normal resource-existence
+     * check remains the authoritative validation step. */
+    return scene != NULL && scene[0] != 0 && !vm_net_mock_scene_name_has_path_separator(scene);
 }
 
 static bool vm_net_mock_open_server_scene_resource(const char *scene,
@@ -10081,7 +10084,9 @@ static u32 g_vm_mock_service_active_client_id = 0;
 enum
 {
     VM_MOCK_SERVICE_PEER_SYNC_MAX = 16,
-    VM_MOCK_SERVICE_SOCIAL_NOTICE_MAX = 4
+    VM_MOCK_SERVICE_SOCIAL_NOTICE_MAX = 4,
+    VM_MOCK_SERVICE_TEAM_MAX = 16,
+    VM_MOCK_SERVICE_TEAM_MEMBER_MAX = 3
 };
 
 typedef struct
@@ -10098,7 +10103,12 @@ enum
     VM_MOCK_SERVICE_SOCIAL_NOTICE_FRIEND_INVITE = 1,
     VM_MOCK_SERVICE_SOCIAL_NOTICE_TRADE_INVITE = 2,
     VM_MOCK_SERVICE_SOCIAL_NOTICE_FRIEND_RESULT = 3,
-    VM_MOCK_SERVICE_SOCIAL_NOTICE_TRADE_RESULT = 4
+    VM_MOCK_SERVICE_SOCIAL_NOTICE_TRADE_RESULT = 4,
+    VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_INVITE = 5,
+    VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_RESULT = 6,
+    VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_MEMBER_JOIN = 7,
+    VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_LEAVE = 8,
+    VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_HSP = 9
 };
 
 typedef struct
@@ -10164,12 +10174,31 @@ typedef struct vm_mock_service_client_session
     bool tradeInviteReplyActive;
     u32 tradeInviteSourceClientId;
     u32 tradeInviteSourceRoleId;
+    bool teamInviteReplyActive;
+    u32 teamInviteSourceClientId;
+    u32 teamInviteSourceWireId;
     char scenePendingScene[64];
     vm_mock_service_peer_sync peerSync[VM_MOCK_SERVICE_PEER_SYNC_MAX];
     struct vm_mock_service_client_session *next;
 } vm_mock_service_client_session;
 
 static vm_mock_service_client_session *g_vm_mock_service_client_sessions = NULL;
+
+/*
+ * A team is deliberately service-local rather than persisted in the role DB.
+ * The original client receives membership changes as online 1/5 packets and
+ * clears the roster when a member disconnects, so retaining a stale offline
+ * party across a service restart would only create phantom HUD rows.
+ */
+typedef struct
+{
+    bool active;
+    u32 leaderClientId;
+    u8 memberCount;
+    u32 memberClientIds[VM_MOCK_SERVICE_TEAM_MEMBER_MAX];
+} vm_mock_service_team;
+
+static vm_mock_service_team g_vm_mock_service_teams[VM_MOCK_SERVICE_TEAM_MAX];
 
 enum
 {
@@ -10469,6 +10498,16 @@ static const char *vm_mock_service_social_notice_name(u8 type)
         return "friend-result";
     case VM_MOCK_SERVICE_SOCIAL_NOTICE_TRADE_RESULT:
         return "trade-result";
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_INVITE:
+        return "team-invite";
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_RESULT:
+        return "team-result";
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_MEMBER_JOIN:
+        return "team-member-join";
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_LEAVE:
+        return "team-leave";
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_HSP:
+        return "team-hsp";
     default:
         return "unknown";
     }
@@ -10483,9 +10522,31 @@ static bool vm_mock_service_session_enqueue_social_notice(
     const char *sourceAccountId)
 {
     vm_mock_service_social_notice *slot = NULL;
+    u32 sourceRoleId = 0;
+    u16 sourceLevel = 1;
+    u8 sourceJob = 1;
+    u8 sourceSex = 0;
+    const char *sourceName = NULL;
 
-    if (target == NULL || source == NULL || sourceRole == NULL ||
-        type == VM_MOCK_SERVICE_SOCIAL_NOTICE_NONE || sourceRole->roleId == 0)
+    if (sourceRole != NULL)
+    {
+        sourceRoleId = sourceRole->roleId;
+        sourceLevel = (u16)(sourceRole->level ? sourceRole->level : 1);
+        sourceJob = sourceRole->job ? sourceRole->job : 1;
+        sourceSex = sourceRole->sex <= 1 ? sourceRole->sex : 0;
+        sourceName = sourceRole->name;
+    }
+    else if (source != NULL)
+    {
+        sourceRoleId = source->onlineRoleId;
+        sourceLevel = source->onlineLevel ? source->onlineLevel : 1;
+        sourceJob = source->onlineJob ? source->onlineJob : 1;
+        sourceSex = source->onlineSex <= 1 ? source->onlineSex : 0;
+        sourceName = source->onlineRoleName;
+    }
+
+    if (target == NULL || source == NULL ||
+        type == VM_MOCK_SERVICE_SOCIAL_NOTICE_NONE || sourceRoleId == 0)
     {
         return false;
     }
@@ -10493,7 +10554,7 @@ static bool vm_mock_service_session_enqueue_social_notice(
     {
         vm_mock_service_social_notice *entry = &target->socialNotices[i];
         if (entry->type == type && entry->sourceClientId == source->clientId &&
-            entry->sourceRoleId == sourceRole->roleId)
+            entry->sourceRoleId == sourceRoleId)
         {
             /* Duplicate button presses must not create multiple modal prompts. */
             return true;
@@ -10507,7 +10568,7 @@ static bool vm_mock_service_session_enqueue_social_notice(
                target->clientId,
                vm_mock_service_social_notice_name(type),
                source->clientId,
-               sourceRole->roleId);
+               sourceRoleId);
         return false;
     }
 
@@ -10515,24 +10576,194 @@ static bool vm_mock_service_session_enqueue_social_notice(
     slot->type = type;
     slot->result = result;
     slot->sourceClientId = source->clientId;
-    slot->sourceRoleId = sourceRole->roleId;
-    slot->sourceLevel = (u16)(sourceRole->level ? sourceRole->level : 1);
-    slot->sourceJob = sourceRole->job ? sourceRole->job : 1;
-    slot->sourceSex = sourceRole->sex <= 1 ? sourceRole->sex : 0;
+    slot->sourceRoleId = sourceRoleId;
+    slot->sourceLevel = sourceLevel;
+    slot->sourceJob = sourceJob;
+    slot->sourceSex = sourceSex;
     snprintf(slot->sourceAccountId, sizeof(slot->sourceAccountId), "%s",
              sourceAccountId && sourceAccountId[0] ? sourceAccountId : source->accountId);
     snprintf(slot->sourceName, sizeof(slot->sourceName), "%s",
-             sourceRole->name[0] ? sourceRole->name :
+             sourceName && sourceName[0] ? sourceName :
              (source->onlineRoleName[0] ? source->onlineRoleName : "Player"));
     slot->queuedTick = g_schedulerTick;
     printf("[info][mock-service] social_notice_queue target=%08x action=%s source=%08x/%u name=%s result=%u\n",
            target->clientId,
            vm_mock_service_social_notice_name(type),
            source->clientId,
-           sourceRole->roleId,
+           sourceRoleId,
            slot->sourceName,
            result);
     return true;
+}
+
+static vm_mock_service_team *vm_mock_service_team_find_for_client(u32 clientId)
+{
+    if (clientId == 0)
+        return NULL;
+    for (u32 i = 0; i < VM_MOCK_SERVICE_TEAM_MAX; ++i)
+    {
+        vm_mock_service_team *team = &g_vm_mock_service_teams[i];
+        if (!team->active)
+            continue;
+        for (u8 member = 0; member < team->memberCount; ++member)
+        {
+            if (team->memberClientIds[member] == clientId)
+                return team;
+        }
+    }
+    return NULL;
+}
+
+static bool vm_mock_service_team_contains_client(const vm_mock_service_team *team, u32 clientId)
+{
+    if (team == NULL || !team->active || clientId == 0)
+        return false;
+    for (u8 member = 0; member < team->memberCount; ++member)
+    {
+        if (team->memberClientIds[member] == clientId)
+            return true;
+    }
+    return false;
+}
+
+static bool vm_mock_service_team_is_leader(const vm_mock_service_team *team, u32 clientId)
+{
+    return team != NULL && team->active && team->leaderClientId == clientId;
+}
+
+static vm_mock_service_team *vm_mock_service_team_create(vm_mock_service_client_session *leader)
+{
+    vm_mock_service_team *team = NULL;
+
+    if (leader == NULL || leader->clientId == 0 || leader->onlineRoleId == 0)
+        return NULL;
+    team = vm_mock_service_team_find_for_client(leader->clientId);
+    if (team != NULL)
+        return team;
+    for (u32 i = 0; i < VM_MOCK_SERVICE_TEAM_MAX; ++i)
+    {
+        if (!g_vm_mock_service_teams[i].active)
+        {
+            team = &g_vm_mock_service_teams[i];
+            break;
+        }
+    }
+    if (team == NULL)
+    {
+        printf("[warn][mock-service] team_create_drop leader=%08x/%u reason=team-table-full\n",
+               leader->clientId, leader->onlineRoleId);
+        return NULL;
+    }
+    memset(team, 0, sizeof(*team));
+    team->active = true;
+    team->leaderClientId = leader->clientId;
+    team->memberCount = 1;
+    team->memberClientIds[0] = leader->clientId;
+    printf("[info][mock-service] team_create leader=%08x/%u\n",
+           leader->clientId, leader->onlineRoleId);
+    return team;
+}
+
+static bool vm_mock_service_team_add_member(vm_mock_service_team *team,
+                                            vm_mock_service_client_session *member)
+{
+    if (team == NULL || !team->active || member == NULL || member->clientId == 0 ||
+        member->onlineRoleId == 0 || team->memberCount >= VM_MOCK_SERVICE_TEAM_MEMBER_MAX ||
+        vm_mock_service_team_contains_client(team, member->clientId) ||
+        vm_mock_service_team_find_for_client(member->clientId) != NULL)
+    {
+        return false;
+    }
+    team->memberClientIds[team->memberCount++] = member->clientId;
+    printf("[info][mock-service] team_add leader=%08x member=%08x/%u count=%u\n",
+           team->leaderClientId, member->clientId, member->onlineRoleId, team->memberCount);
+    return true;
+}
+
+static void vm_mock_service_team_notify_leave(vm_mock_service_team *team,
+                                              vm_mock_service_client_session *leaver)
+{
+    if (team == NULL || leaver == NULL)
+        return;
+    for (u8 member = 0; member < team->memberCount; ++member)
+    {
+        vm_mock_service_client_session *peer =
+            vm_mock_service_find_client_session(team->memberClientIds[member]);
+        if (peer != NULL && peer->clientId != leaver->clientId)
+        {
+            (void)vm_mock_service_session_enqueue_social_notice(
+                peer, VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_LEAVE, 0,
+                leaver, NULL, leaver->accountId);
+        }
+    }
+}
+
+/* Returns true when the member was part of an active team.  Leader departure
+ * deliberately dissolves the party: group subtype 5/7 clears every client
+ * roster when the removed id is the leader id. */
+static bool vm_mock_service_team_remove_member(vm_mock_service_client_session *leaver,
+                                               const char *reason)
+{
+    vm_mock_service_team *team = NULL;
+    u8 memberIndex = VM_MOCK_SERVICE_TEAM_MEMBER_MAX;
+    bool leaderLeaves = false;
+
+    if (leaver == NULL || leaver->clientId == 0)
+        return false;
+    team = vm_mock_service_team_find_for_client(leaver->clientId);
+    if (team == NULL)
+        return false;
+    for (u8 member = 0; member < team->memberCount; ++member)
+    {
+        if (team->memberClientIds[member] == leaver->clientId)
+        {
+            memberIndex = member;
+            break;
+        }
+    }
+    if (memberIndex >= team->memberCount)
+        return false;
+
+    leaderLeaves = team->leaderClientId == leaver->clientId;
+    vm_mock_service_team_notify_leave(team, leaver);
+    if (leaderLeaves)
+    {
+        printf("[info][mock-service] team_disband leader=%08x/%u reason=%s\n",
+               leaver->clientId, leaver->onlineRoleId, reason ? reason : "-");
+        memset(team, 0, sizeof(*team));
+        return true;
+    }
+
+    for (u8 member = memberIndex + 1; member < team->memberCount; ++member)
+        team->memberClientIds[member - 1] = team->memberClientIds[member];
+    --team->memberCount;
+    team->memberClientIds[team->memberCount] = 0;
+    printf("[info][mock-service] team_remove leader=%08x member=%08x/%u count=%u reason=%s\n",
+           team->leaderClientId, leaver->clientId, leaver->onlineRoleId,
+           team->memberCount, reason ? reason : "-");
+    return true;
+}
+
+static void vm_mock_service_team_enqueue_hsp_for_members(vm_mock_service_client_session *source)
+{
+    vm_mock_service_team *team = NULL;
+
+    if (source == NULL || source->clientId == 0 || source->onlineRoleId == 0)
+        return;
+    team = vm_mock_service_team_find_for_client(source->clientId);
+    if (team == NULL)
+        return;
+    for (u8 member = 0; member < team->memberCount; ++member)
+    {
+        vm_mock_service_client_session *peer =
+            vm_mock_service_find_client_session(team->memberClientIds[member]);
+        if (peer != NULL)
+        {
+            (void)vm_mock_service_session_enqueue_social_notice(
+                peer, VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_HSP, 0,
+                source, NULL, source->accountId);
+        }
+    }
 }
 
 static bool vm_net_mock_is_actor_moveinfo_timeline(const u8 *moveInfo, u16 moveInfoLen);
@@ -10817,6 +11048,9 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     if (session == NULL)
         return;
     wasOnline = session->roleOnline || session->onlinePresenceValid || session->sceneVisibleReady;
+    /* Notify the remaining clients before clearing the departing session's
+     * cached role identity; subtype 5/7 needs that id to remove its HUD row. */
+    (void)vm_mock_service_team_remove_member(session, reason ? reason : "offline");
     if (wasOnline)
     {
         printf("[info][mock-service] session_offline client=%08x account=%s role=%u name=%s scene=%s pos=(%u,%u) reason=%s\n",
@@ -10896,12 +11130,15 @@ static void vm_mock_service_capture_session_presence(u32 clientId)
     u32 mp = 0;
     u32 mpMax = 0;
     bool visiblePosChanged = false;
+    bool hadPresence = false;
+    bool vitalsChanged = false;
 
     if (clientId == 0)
         return;
     session = vm_mock_service_get_or_create_client_session(clientId);
     if (session == NULL)
         return;
+    hadPresence = session->onlinePresenceValid;
     session->onlinePresenceValid = false;
     role = vm_net_mock_active_role();
     if (role == NULL)
@@ -10932,6 +11169,11 @@ static void vm_mock_service_capture_session_presence(u32 clientId)
     }
     if (!vm_net_mock_scene_name_is_safe(scene) || x == 0 || y == 0)
         return;
+    vitalsChanged = hadPresence && session->onlineRoleId == role->roleId &&
+                    (session->onlineHp != hp ||
+                     session->onlineHpMax != hpMax ||
+                     session->onlineMp != mp ||
+                     session->onlineMpMax != mpMax);
     session->onlinePresenceValid = true;
     session->onlineRoleId = role->roleId;
     snprintf(session->onlineRoleName, sizeof(session->onlineRoleName), "%s",
@@ -10945,10 +11187,10 @@ static void vm_mock_service_capture_session_presence(u32 clientId)
     session->onlineLevel = (u16)(role->level ? role->level : 1);
     memcpy(session->onlineEquippedItemIds, role->equippedItemIds,
            sizeof(session->onlineEquippedItemIds));
-    session->onlineHp = role->hp ? role->hp : hp;
-    session->onlineHpMax = role->hpMax ? role->hpMax : hpMax;
-    session->onlineMp = role->mp ? role->mp : mp;
-    session->onlineMpMax = role->mpMax ? role->mpMax : mpMax;
+    session->onlineHp = hp;
+    session->onlineHpMax = hpMax;
+    session->onlineMp = mp;
+    session->onlineMpMax = mpMax;
     snprintf(session->onlineScene, sizeof(session->onlineScene), "%s", scene);
     session->onlineX = x;
     session->onlineY = y;
@@ -10970,6 +11212,13 @@ static void vm_mock_service_capture_session_presence(u32 clientId)
                    session->sceneVisibleX,
                    session->sceneVisibleY);
         }
+    }
+    if (vitalsChanged && session->roleOnline)
+    {
+        /* Group subtype 5/11 is the client-owned HP/MP update path. Queue it
+         * for the next existing poll instead of pushing into an unsolicited
+         * emulator socket. */
+        vm_mock_service_team_enqueue_hsp_for_members(session);
     }
 }
 
@@ -13921,10 +14170,15 @@ static bool vm_net_mock_append_group_info_object(u8 *out, u32 outCap, u32 *pos, 
     u8 templateByte1 = vm_net_mock_env_u8("CBE_GROUPINFO_TEMPLATE_BYTE1", 0);
     u8 templateByte2 = vm_net_mock_env_u8("CBE_GROUPINFO_TEMPLATE_BYTE2", 0);
     const char *templateName = vm_net_mock_env_str("CBE_GROUPINFO_TEMPLATE_NAME", "Monster");
-    bool seedTemplate = vm_net_mock_env_u8("CBE_GROUPINFO_TEMPLATE_SEED", 0) != 0 && templateId != 0;
+    bool seedTemplate = vm_net_mock_env_u8("CBE_GROUPINFO_TEMPLATE_SEED", 0) != 0 &&
+                        templateId != 0;
     u8 num = 0;
     u32 objectStart = 0;
 
+    /* vm_net_mock_put_object_blob prepends a len16 value to the bytes returned
+     * by the client's blob accessor.  stream_read_i32_be_tagged consumes that
+     * len16 as the first row's tag header, so the first id inside the blob is
+     * raw BE32.  All later u32 values remain explicitly tagged. */
     if (seedTemplate)
     {
         if (!vm_net_mock_put_be32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateId))
@@ -13937,13 +14191,13 @@ static bool vm_net_mock_append_group_info_object(u8 *out, u32 outCap, u32 *pos, 
             return false;
         if (!vm_net_mock_seq_put_u8(groupInfo, sizeof(groupInfo), &groupInfoLen, templateByte2))
             return false;
-        if (!vm_net_mock_put_be32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateHp))
+        if (!vm_net_mock_seq_put_u32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateHp))
             return false;
-        if (!vm_net_mock_put_be32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateMaxHp))
+        if (!vm_net_mock_seq_put_u32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateMaxHp))
             return false;
-        if (!vm_net_mock_put_be32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateMp))
+        if (!vm_net_mock_seq_put_u32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateMp))
             return false;
-        if (!vm_net_mock_put_be32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateMaxMp))
+        if (!vm_net_mock_seq_put_u32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateMaxMp))
             return false;
         num = 1;
     }
@@ -13959,6 +14213,276 @@ static bool vm_net_mock_append_group_info_object(u8 *out, u32 outCap, u32 *pos, 
     if (!vm_net_mock_put_object_u32(out, outCap, pos, "leadid", leadId))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
+static u8 vm_mock_service_team_member_job_code(const vm_mock_service_client_session *member)
+{
+    if (member == NULL || member->onlineJob < 1 || member->onlineJob > 3)
+        return 0;
+    return (u8)(member->onlineJob - 1);
+}
+
+static u8 vm_mock_service_team_member_sex_code(const vm_mock_service_client_session *member)
+{
+    return member != NULL && member->onlineSex <= 1 ? (u8)(member->onlineSex + 1) : 1;
+}
+
+/* Group-manager rows are keyed by their id at node+36.  Guest accounts all
+ * start at persistent role id 10001, so each observer must see a colliding
+ * peer through the same 0x6Axxxxxx actor id that its nearby scene node uses.
+ * Keep the observer's own id untouched: the client uses it to hide its own
+ * portrait row and to recognize a local leave. */
+static u32 vm_mock_service_team_member_wire_id(
+    const vm_mock_service_client_session *observer,
+    const vm_mock_service_client_session *member)
+{
+    if (member == NULL || member->onlineRoleId == 0)
+        return 0;
+    if (observer != NULL && observer->clientId != member->clientId &&
+        observer->onlineRoleId == member->onlineRoleId)
+    {
+        return 0x6A000000u | (member->clientId & 0x00FFFFFFu);
+    }
+    return member->onlineRoleId;
+}
+
+/* Full 5/3 and 5/10 roster rows are:
+ * {u32 id, len16 string name, tagged-u8 sexGroup(1..2),
+ *  tagged-u8 jobIndex(0..2), tagged-u8 online,
+ *  tagged-u32 hp, mp, hpmax, mpmax}.  The object blob's own len16 prefix is
+ * the first row id's tag header; later row ids carry an explicit 00/04 tag.
+ * net_handle_group_info first calls the
+ * non-advancing stream_peek_i16_be to retain the upcoming name length, then
+ * stream_read_cstr_len16 consumes that same length and name.  There is no
+ * reserved byte between id and name.  AddRoleToList passes the two visual
+ * bytes to GetMapTileData as (jobIndex, sexGroup).  GetMapTileData and the
+ * team HUD select the six zero-based role-resource slots with
+ * 2 * jobIndex + sexGroup - 1, matching title/actorinfo/equipment visuals. */
+static bool vm_net_mock_append_team_member_full_row(u8 *groupInfo, u32 groupInfoCap,
+                                                    u32 *groupInfoLen,
+                                                    const vm_mock_service_client_session *observer,
+                                                    const vm_mock_service_client_session *member,
+                                                    bool firstRowInBlob)
+{
+    bool encoded = false;
+    u32 hp = 1;
+    u32 hpMax = 1;
+    u32 mp = 0;
+    u32 mpMax = 0;
+    const char *name = NULL;
+
+    u32 wireId = vm_mock_service_team_member_wire_id(observer, member);
+
+    if (groupInfo == NULL || groupInfoLen == NULL || member == NULL || wireId == 0)
+        return false;
+    name = member->onlineRoleName[0] ? member->onlineRoleName : "Player";
+    hpMax = member->onlineHpMax ? member->onlineHpMax : 1;
+    /* Zero is a valid current HP value (dead member), not an unset sentinel. */
+    hp = member->onlineHp;
+    if (hp > hpMax)
+        hp = hpMax;
+    mpMax = member->onlineMpMax;
+    mp = member->onlineMp;
+    if (mp > mpMax)
+        mp = mpMax;
+
+    encoded = (firstRowInBlob
+                   ? vm_net_mock_put_be32(groupInfo, groupInfoCap, groupInfoLen, wireId)
+                   : vm_net_mock_seq_put_u32(groupInfo, groupInfoCap, groupInfoLen, wireId)) &&
+              vm_net_mock_seq_put_string(groupInfo, groupInfoCap, groupInfoLen, name) &&
+              vm_net_mock_seq_put_u8(groupInfo, groupInfoCap, groupInfoLen,
+                                     vm_mock_service_team_member_sex_code(member)) &&
+              vm_net_mock_seq_put_u8(groupInfo, groupInfoCap, groupInfoLen,
+                                     vm_mock_service_team_member_job_code(member)) &&
+              vm_net_mock_seq_put_u8(groupInfo, groupInfoCap, groupInfoLen,
+                                     member->roleOnline ? 1 : 0) &&
+              vm_net_mock_seq_put_u32(groupInfo, groupInfoCap, groupInfoLen, hp) &&
+              vm_net_mock_seq_put_u32(groupInfo, groupInfoCap, groupInfoLen, mp) &&
+              vm_net_mock_seq_put_u32(groupInfo, groupInfoCap, groupInfoLen, hpMax) &&
+              vm_net_mock_seq_put_u32(groupInfo, groupInfoCap, groupInfoLen, mpMax);
+    if (encoded)
+    {
+        printf("[info][network] mock_team_member_row observer=%08x member=%08x/%u "
+               "wire=%u hp=%u/%u mp=%u/%u wire_order=hp-mp-hpmax-mpmax\n",
+               observer ? observer->clientId : 0,
+               member->clientId,
+               member->onlineRoleId,
+               wireId,
+               hp, hpMax, mp, mpMax);
+    }
+    return encoded;
+}
+
+static bool vm_net_mock_append_team_group_info_object(u8 *out, u32 outCap, u32 *pos,
+                                                       const vm_mock_service_team *team,
+                                                       const vm_mock_service_client_session *observer,
+                                                       u8 subtype)
+{
+    u8 groupInfo[512];
+    u32 groupInfoLen = 0;
+    u32 objectStart = 0;
+    u8 memberCount = 0;
+    u32 leaderRoleId = 0;
+
+    if (out == NULL || pos == NULL || team == NULL || !team->active ||
+        (subtype != 3 && subtype != 10))
+    {
+        return false;
+    }
+    for (u8 member = 0; member < team->memberCount; ++member)
+    {
+        vm_mock_service_client_session *session =
+            vm_mock_service_find_client_session(team->memberClientIds[member]);
+        if (session == NULL || session->onlineRoleId == 0)
+            return false;
+        if (member == 0)
+            leaderRoleId = vm_mock_service_team_member_wire_id(observer, session);
+        if (!vm_net_mock_append_team_member_full_row(groupInfo, sizeof(groupInfo),
+                                                     &groupInfoLen, observer, session,
+                                                     memberCount == 0))
+        {
+            return false;
+        }
+        ++memberCount;
+    }
+    if (memberCount == 0 || leaderRoleId == 0)
+        return false;
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 5, subtype, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "result", 1) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "num", memberCount) ||
+        !vm_net_mock_put_object_blob(out, outCap, pos, "groupinfo", groupInfo, groupInfoLen))
+    {
+        return false;
+    }
+    if (subtype == 10 && !vm_net_mock_put_object_u32(out, outCap, pos, "leadid", leaderRoleId))
+        return false;
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    printf("[info][network] mock_team_groupinfo subtype=%u observer=%08x members=%u "
+           "groupinfo_len=%u leader=%u "
+           "layout=blob-prefix-raw-first-id-tagged-next-id-name-sexgroup-jobindex-online-hp-mp-hpmax-mpmax\n",
+           subtype,
+           observer ? observer->clientId : 0,
+           memberCount,
+           groupInfoLen,
+           leaderRoleId);
+    return true;
+}
+
+/* Subtype 5 is the native incremental member-join/update packet.  Unlike the
+ * full 5/3 and 5/10 rows it has no online-state byte:
+ * {raw-u32 id, len16 name, tagged-u8 sexGroup(1..2),
+ *  tagged-u8 jobIndex(0..2), tagged-u32 hp, mp, hpmax, mpmax}. */
+static bool vm_net_mock_append_team_member_join_object(
+    u8 *out, u32 outCap, u32 *pos,
+    const vm_mock_service_client_session *observer,
+    const vm_mock_service_client_session *member)
+{
+    u8 groupInfo[128];
+    u32 groupInfoLen = 0;
+    u32 objectStart = 0;
+    u32 wireId = vm_mock_service_team_member_wire_id(observer, member);
+    u32 hpMax = 1;
+    u32 hp = 1;
+    u32 mpMax = 0;
+    u32 mp = 0;
+    u8 sex = 0;
+    u8 job = 1;
+    const char *name = NULL;
+
+    if (out == NULL || pos == NULL || member == NULL || wireId == 0)
+        return false;
+    name = member->onlineRoleName[0] ? member->onlineRoleName : "Player";
+    hpMax = member->onlineHpMax ? member->onlineHpMax : 1;
+    hp = member->onlineHp;
+    if (hp > hpMax)
+        hp = hpMax;
+    mpMax = member->onlineMpMax;
+    mp = member->onlineMp;
+    if (mp > mpMax)
+        mp = mpMax;
+    sex = vm_mock_service_team_member_sex_code(member);
+    job = vm_mock_service_team_member_job_code(member);
+
+    if (!vm_net_mock_put_be32(groupInfo, sizeof(groupInfo), &groupInfoLen, wireId) ||
+        !vm_net_mock_seq_put_string(groupInfo, sizeof(groupInfo), &groupInfoLen, name) ||
+        !vm_net_mock_seq_put_u8(groupInfo, sizeof(groupInfo), &groupInfoLen, sex) ||
+        !vm_net_mock_seq_put_u8(groupInfo, sizeof(groupInfo), &groupInfoLen, job) ||
+        !vm_net_mock_seq_put_u32(groupInfo, sizeof(groupInfo), &groupInfoLen, hp) ||
+        !vm_net_mock_seq_put_u32(groupInfo, sizeof(groupInfo), &groupInfoLen, mp) ||
+        !vm_net_mock_seq_put_u32(groupInfo, sizeof(groupInfo), &groupInfoLen, hpMax) ||
+        !vm_net_mock_seq_put_u32(groupInfo, sizeof(groupInfo), &groupInfoLen, mpMax) ||
+        !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 5, 5, &objectStart) ||
+        !vm_net_mock_put_object_blob(out, outCap, pos, "groupinfo", groupInfo,
+                                     (u16)groupInfoLen))
+    {
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    printf("[info][network] mock_team_member_join observer=%08x member=%08x/%u "
+           "wire=%u sex_group=%u job_index=%u hp=%u/%u mp=%u/%u groupinfo_len=%u "
+           "layout=blob-prefix-raw-id-name-sexgroup-jobindex-hp-mp-hpmax-mpmax\n",
+           observer ? observer->clientId : 0,
+           member->clientId,
+           member->onlineRoleId,
+           wireId,
+           sex,
+           job,
+           hp,
+           hpMax,
+           mp,
+           mpMax,
+           groupInfoLen);
+    return true;
+}
+
+/* net_handle_group_info subtype 11 consumes hsp as a raw first role id followed
+ * by four tagged big-endian u32 values: HP, max HP, MP, max MP.  The object
+ * blob len16 supplies the first id's tag header.  Unlike subtype 5, this path updates an
+ * existing roster entry in place, which is what keeps party HUD bars current
+ * while a member is fighting. */
+static bool vm_net_mock_append_team_hsp_object(u8 *out, u32 outCap, u32 *pos,
+                                               const vm_mock_service_client_session *observer,
+                                               const vm_mock_service_client_session *member)
+{
+    u8 hsp[32];
+    u32 hspLen = 0;
+    u32 objectStart = 0;
+    u32 hpMax = 1;
+    u32 hp = 1;
+    u32 mpMax = 0;
+    u32 mp = 0;
+
+    u32 wireId = vm_mock_service_team_member_wire_id(observer, member);
+
+    if (out == NULL || pos == NULL || member == NULL || wireId == 0)
+        return false;
+    hpMax = member->onlineHpMax ? member->onlineHpMax : 1;
+    hp = member->onlineHp;
+    if (hp > hpMax)
+        hp = hpMax;
+    mpMax = member->onlineMpMax;
+    mp = member->onlineMp;
+    if (mp > mpMax)
+        mp = mpMax;
+    if (!vm_net_mock_put_be32(hsp, sizeof(hsp), &hspLen, wireId) ||
+        !vm_net_mock_seq_put_u32(hsp, sizeof(hsp), &hspLen, hp) ||
+        !vm_net_mock_seq_put_u32(hsp, sizeof(hsp), &hspLen, hpMax) ||
+        !vm_net_mock_seq_put_u32(hsp, sizeof(hsp), &hspLen, mp) ||
+        !vm_net_mock_seq_put_u32(hsp, sizeof(hsp), &hspLen, mpMax) ||
+        !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 5, 11, &objectStart) ||
+        !vm_net_mock_put_object_blob(out, outCap, pos, "hsp", hsp, (u16)hspLen))
+    {
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    printf("[info][network] mock_team_hsp observer=%08x member=%08x/%u "
+           "wire=%u hsp_len=%u layout=blob-prefix-raw-id-tagged-hsp\n",
+           observer ? observer->clientId : 0,
+           member->clientId,
+           member->onlineRoleId,
+           wireId,
+           hspLen);
     return true;
 }
 
@@ -13982,6 +14506,7 @@ static bool vm_net_mock_append_battle_template_prefill_object_ex(u8 *out, u32 ou
 
     if (!vm_net_mock_put_be32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateId))
         return false;
+    /* Subtype 5 has no online-state byte: id, name, sexGroup, jobIndex, HP/MP. */
     if (!vm_net_mock_seq_put_string(groupInfo, sizeof(groupInfo), &groupInfoLen, templateName))
         return false;
     if (!vm_net_mock_seq_put_u8(groupInfo, sizeof(groupInfo), &groupInfoLen, rowByte34))
@@ -15554,9 +16079,258 @@ static u32 vm_net_mock_build_nearby_trade_request_response(const u8 *request, u3
 static u32 vm_net_mock_build_nearby_team_invite_response(const u8 *request, u32 requestLen,
                                                           u8 *out, u32 outCap)
 {
-    return vm_net_mock_build_nearby_social_action_ack_response(
-        request, requestLen, out, outCap, vm_net_mock_is_nearby_team_invite_request,
-        "team-invite", VM_MOCK_SERVICE_SOCIAL_NOTICE_NONE);
+    vm_net_mock_scene_role_seed targetSeed;
+    vm_mock_service_client_session *sourceSession = vm_mock_service_get_active_client_session();
+    vm_mock_service_team *sourceTeam = NULL;
+    vm_net_mock_role_state *sourceRole = vm_net_mock_active_role();
+    const char *sourceAccountId = g_vm_mock_service_active_account_id;
+    const char *scene = vm_net_mock_current_scene_name();
+    const char *reason = "invalid";
+    u32 actorId = 0;
+    u32 pos = 5;
+    bool queued = false;
+
+    memset(&targetSeed, 0, sizeof(targetSeed));
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_is_nearby_team_invite_request(request, requestLen, &actorId) ||
+        !vm_net_mock_find_nearby_role_seed_by_actor_id(scene, actorId, &targetSeed))
+    {
+        return 0;
+    }
+    if (sourceSession != NULL && sourceRole != NULL && targetSeed.session != NULL &&
+        sourceSession->clientId != targetSeed.session->clientId)
+    {
+        /* `actorId` is the visible scene-node id.  When two accounts use the
+         * same persistent role id, nearby seeding deliberately substitutes a
+         * client-scoped 0x6Axxxxxx id; do not compare that transport id with
+         * session->onlineRoleId after the seed resolver already proved the
+         * target is visible in this scene. */
+        sourceTeam = vm_mock_service_team_find_for_client(sourceSession->clientId);
+        if (sourceTeam != NULL && !vm_mock_service_team_is_leader(sourceTeam, sourceSession->clientId))
+        {
+            reason = "not-leader";
+        }
+        else if (sourceTeam != NULL &&
+                 sourceTeam->memberCount >= VM_MOCK_SERVICE_TEAM_MEMBER_MAX)
+        {
+            reason = "team-full";
+        }
+        else if (vm_mock_service_team_find_for_client(targetSeed.session->clientId) != NULL)
+        {
+            reason = "target-in-team";
+        }
+        else
+        {
+            queued = vm_mock_service_session_enqueue_social_notice(
+                targetSeed.session, VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_INVITE, 0,
+                sourceSession, sourceRole, sourceAccountId);
+            reason = queued ? "queued" : "notice-queue-full";
+        }
+    }
+    else
+    {
+        reason = "target-unavailable";
+    }
+
+    /* CheckBattleJoinCondition already presents its sent/error message on the
+     * initiator.  5/1 only needs a transport ack; the real incoming 5/2 is
+     * delivered to the target through its normal scene-sync poll. */
+    vm_net_mock_finish_wt_packet(out, pos, 0);
+    printf("[info][network] mock_team_invite actor=%u source=%08x/%u target=%08x/%u queued=%u reason=%s resp=%u evidence=JianghuOL.CBE:0x0101BEF4+0x01011F3A(subtype2)\n",
+           actorId,
+           sourceSession ? sourceSession->clientId : 0,
+           sourceRole ? sourceRole->roleId : 0,
+           targetSeed.session ? targetSeed.session->clientId : 0,
+           targetSeed.session ? targetSeed.session->onlineRoleId : 0,
+           queued ? 1u : 0u, reason, pos);
+    return pos;
+}
+
+/* HandleGuildJoinConfirm(0x01011ED0) is named after a stale UI label, but its
+ * actual wire request is the group-invite reply: 1/5/3 { id, result }, where
+ * result=1 accepts and result=0 declines the player named by id.  `id` is the
+ * client-visible remote actor id, not necessarily the persistent role id. */
+static bool vm_net_mock_is_team_invite_reply_request(const u8 *request, u32 requestLen,
+                                                      u32 *sourceWireIdOut, u8 *resultOut)
+{
+    u32 offset = 4;
+    u32 sourceWireId = 0;
+    u8 result = 0;
+    vm_net_mock_request_object object;
+
+    if (sourceWireIdOut)
+        *sourceWireIdOut = 0;
+    if (resultOut)
+        *resultOut = 0;
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        offset != requestLen || object.major != 1 || object.kind != 5 || object.subtype != 3 ||
+        !vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "id", &sourceWireId) ||
+        !vm_net_mock_get_object_u8_field(object.payload, object.payloadLen, "result", &result) ||
+        sourceWireId == 0 || result > 1)
+    {
+        return false;
+    }
+    if (sourceWireIdOut)
+        *sourceWireIdOut = sourceWireId;
+    if (resultOut)
+        *resultOut = result;
+    return true;
+}
+
+static void vm_mock_service_team_enqueue_member_join_for_peers(
+    const vm_mock_service_team *team, u32 exceptClientA, u32 exceptClientB,
+    const vm_mock_service_client_session *joinedMember)
+{
+    if (team == NULL || !team->active || joinedMember == NULL)
+        return;
+    for (u8 member = 0; member < team->memberCount; ++member)
+    {
+        vm_mock_service_client_session *peer =
+            vm_mock_service_find_client_session(team->memberClientIds[member]);
+        if (peer != NULL && peer->clientId != exceptClientA && peer->clientId != exceptClientB)
+        {
+            (void)vm_mock_service_session_enqueue_social_notice(
+                peer, VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_MEMBER_JOIN, 0,
+                joinedMember, NULL, joinedMember->accountId);
+        }
+    }
+}
+
+static u32 vm_net_mock_build_team_invite_reply_response(const u8 *request, u32 requestLen,
+                                                         u8 *out, u32 outCap)
+{
+    vm_mock_service_client_session *responder = vm_mock_service_get_active_client_session();
+    vm_mock_service_client_session *source = NULL;
+    vm_mock_service_team *team = NULL;
+    vm_net_mock_role_state *responderRole = vm_net_mock_active_role();
+    u32 sourceWireId = 0;
+    u32 pos = 5;
+    u32 objectCount = 0;
+    u32 objectStart = 0;
+    u8 result = 0;
+    bool accepted = false;
+    bool sourceNotified = false;
+
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_is_team_invite_reply_request(request, requestLen, &sourceWireId, &result))
+    {
+        return 0;
+    }
+    if (responder == NULL || responderRole == NULL || !responder->teamInviteReplyActive ||
+        responder->teamInviteSourceWireId != sourceWireId)
+    {
+        /* This remains a narrow 1/5/3 acknowledgement, but make a stale or
+         * mismatched confirmation observable instead of falling through to a
+         * generic unhandled-packet assertion. */
+        vm_net_mock_finish_wt_packet(out, pos, 0);
+        printf("[warn][network] mock_team_invite_reply_reject target=%08x id=%u result=%u pending=%u pending_source=%u reason=stale-or-id-mismatch\n",
+               responder ? responder->clientId : 0, sourceWireId, result,
+               responder && responder->teamInviteReplyActive ? 1u : 0u,
+               responder ? responder->teamInviteSourceWireId : 0);
+        return pos;
+    }
+    source = vm_mock_service_find_client_session(responder->teamInviteSourceClientId);
+    if (result == 1 && source != NULL && source->roleOnline &&
+        source->clientId != responder->clientId &&
+        vm_mock_service_team_find_for_client(responder->clientId) == NULL)
+    {
+        team = vm_mock_service_team_find_for_client(source->clientId);
+        if (team == NULL)
+            team = vm_mock_service_team_create(source);
+        if (team != NULL && vm_mock_service_team_is_leader(team, source->clientId) &&
+            vm_mock_service_team_add_member(team, responder))
+        {
+            accepted = true;
+            vm_mock_service_team_enqueue_member_join_for_peers(
+                team, source->clientId, responder->clientId, responder);
+        }
+    }
+
+    if (source != NULL)
+    {
+        sourceNotified = vm_mock_service_session_enqueue_social_notice(
+            source, VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_RESULT, accepted ? 1 : 0,
+            responder, responderRole, g_vm_mock_service_active_account_id);
+    }
+    responder->teamInviteReplyActive = false;
+    responder->teamInviteSourceClientId = 0;
+    responder->teamInviteSourceWireId = 0;
+
+    /* net_handle_group_info(0x01011F3A) cases 3/10 share the full-roster
+     * parser.  For subtype 3, result=1 falls straight through to num and
+     * groupinfo; returning result alone is therefore a truncated success and
+     * cannot create the party UI.  A refused/failed reply has no roster. */
+    if (accepted && team != NULL)
+    {
+        if (!vm_net_mock_append_team_group_info_object(out, outCap, &pos,
+                                                       team, responder, 3))
+        {
+            return 0;
+        }
+    }
+    else if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 5, 3, &objectStart) ||
+             !vm_net_mock_put_object_u8(out, outCap, &pos, "result", 0))
+    {
+        return 0;
+    }
+    else
+    {
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+    }
+    objectCount = 1;
+    vm_net_mock_finish_wt_packet(out, pos, (u8)objectCount);
+    printf("[info][network] mock_team_invite_reply source=%08x/%u target=%08x/%u result=%u accepted=%u notify_source=%u roster=%s members=%u resp=%u evidence=JianghuOL.CBE:0x0101216A(subtype3-full)\n",
+           source ? source->clientId : 0, sourceWireId,
+           responder->clientId, responderRole->roleId,
+           result, accepted ? 1u : 0u, sourceNotified ? 1u : 0u,
+           accepted ? "inline-5/3" : "none",
+           team ? team->memberCount : 0, pos);
+    return pos;
+}
+
+/* The CBE uses 1/5/6 as its local leave request.  The actual roster mutation
+ * is conveyed to every client, including the sender, by subtype 7 { id }. */
+static bool vm_net_mock_is_team_leave_request(const u8 *request, u32 requestLen)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+
+    return request != NULL && requestLen >= 9 && request[0] == 'W' && request[1] == 'T' &&
+           vm_net_mock_next_request_object(request, requestLen, &offset, &object) &&
+           offset == requestLen && object.major == 1 && object.kind == 5 && object.subtype == 6;
+}
+
+static u32 vm_net_mock_build_team_leave_response(const u8 *request, u32 requestLen,
+                                                  u8 *out, u32 outCap)
+{
+    vm_mock_service_client_session *leaver = vm_mock_service_get_active_client_session();
+    u32 pos = 5;
+    u32 objectStart = 0;
+    bool removed = false;
+
+    if (out == NULL || outCap < pos || !vm_net_mock_is_team_leave_request(request, requestLen))
+        return 0;
+    if (leaver != NULL && leaver->onlineRoleId != 0)
+        removed = vm_mock_service_team_remove_member(leaver, "leave-request");
+    if (removed)
+    {
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 5, 7, &objectStart) ||
+            !vm_net_mock_put_object_u32(out, outCap, &pos, "id", leaver->onlineRoleId))
+        {
+            return 0;
+        }
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        vm_net_mock_finish_wt_packet(out, pos, 1);
+    }
+    else
+    {
+        vm_net_mock_finish_wt_packet(out, pos, 0);
+    }
+    printf("[info][network] mock_team_leave client=%08x role=%u removed=%u resp=%u evidence=JianghuOL.CBE:0x01011F3A(subtype7)\n",
+           leaver ? leaver->clientId : 0, leaver ? leaver->onlineRoleId : 0,
+           removed ? 1u : 0u, pos);
+    return pos;
 }
 
 static u32 vm_net_mock_build_nearby_spar_request_response(const u8 *request, u32 requestLen,
@@ -16043,7 +16817,10 @@ static u32 vm_net_mock_build_group_type1_response(const u8 *request, u32 request
         return 0;
     u32 pos = 5;
     u8 objectCount = 0;
-    if (!vm_net_mock_append_group_info_object(out, outCap, &pos, leadId))
+    vm_mock_service_client_session *session = vm_mock_service_get_active_client_session();
+    vm_mock_service_team *team = session ? vm_mock_service_team_find_for_client(session->clientId) : NULL;
+    if ((team != NULL && !vm_net_mock_append_team_group_info_object(out, outCap, &pos, team, session, 10)) ||
+        (team == NULL && !vm_net_mock_append_group_info_object(out, outCap, &pos, leadId)))
         return 0;
     objectCount += 1;
     if (hasType1 && !vm_net_mock_append_type1_object(out, outCap, &pos, sceneNpcNum))
@@ -18821,9 +19598,10 @@ static int vm_net_mock_append_scene_sync_social_notice_object(
     if (out == NULL || pos == NULL || observer == NULL)
         return -1;
 
-    /* A modal invitation remains pending until the target emits 10/5 or
-     * 21/3.  Do not stack another modal over it. */
-    if (observer->friendInviteReplyActive || observer->tradeInviteReplyActive)
+    /* A modal invitation remains pending until the target emits 10/5, 21/3,
+     * or 5/3.  Do not stack another modal over it. */
+    if (observer->friendInviteReplyActive || observer->tradeInviteReplyActive ||
+        observer->teamInviteReplyActive)
         return 0;
 
     for (u32 i = 0; i < VM_MOCK_SERVICE_SOCIAL_NOTICE_MAX; ++i)
@@ -18888,6 +19666,134 @@ static int vm_net_mock_append_scene_sync_social_notice_object(
             return -1;
         }
         break;
+
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_INVITE:
+    {
+        vm_mock_service_client_session *source =
+            vm_mock_service_find_client_session(notice->sourceClientId);
+        u32 sourceWireId = 0;
+
+        if (source == NULL || !source->roleOnline ||
+            source->onlineRoleId != notice->sourceRoleId ||
+            (sourceWireId = vm_mock_service_team_member_wire_id(observer, source)) == 0)
+        {
+            printf("[warn][mock-service] team_invite_drop observer=%08x source=%08x/%u reason=source-unavailable\n",
+                   observer->clientId, notice->sourceClientId, notice->sourceRoleId);
+            memset(notice, 0, sizeof(*notice));
+            return 0;
+        }
+        /* net_handle_group_info subtype 2 reads id/name and invokes
+         * HandleGuildJoinConfirm(0x01011ED0), which sends 1/5/3.  Use the
+         * exact actor id that represents this remote player to `observer`;
+         * guest persistent role ids collide with the observer's own 10001. */
+        if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 5, 2, &objectStart) ||
+            !vm_net_mock_put_object_u32(out, outCap, pos, "id", sourceWireId) ||
+            !vm_net_mock_put_object_string(out, outCap, pos, "name", notice->sourceName))
+        {
+            return -1;
+        }
+        observer->teamInviteReplyActive = true;
+        observer->teamInviteSourceClientId = notice->sourceClientId;
+        observer->teamInviteSourceWireId = sourceWireId;
+        break;
+    }
+
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_RESULT:
+    {
+        vm_mock_service_client_session *source =
+            vm_mock_service_find_client_session(notice->sourceClientId);
+        u32 sourceWireId = source ? vm_mock_service_team_member_wire_id(observer, source)
+                                  : notice->sourceRoleId;
+        int appendedObjects = notice->result == 1 ? 2 : 1;
+
+        /* Subtype 4 reports the target's answer.  On success the native
+         * incremental follow-up is subtype 5 for the newly joined member;
+         * subtype 10 is a full query/refresh and must not replace this join
+         * notification. */
+        if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 5, 4, &objectStart) ||
+            sourceWireId == 0 ||
+            !vm_net_mock_put_object_u32(out, outCap, pos, "id", sourceWireId) ||
+            !vm_net_mock_put_object_u8(out, outCap, pos, "result", notice->result) ||
+            !vm_net_mock_put_object_string(out, outCap, pos, "name", notice->sourceName))
+        {
+            return -1;
+        }
+        vm_net_mock_finish_wt_object(out, objectStart, *pos);
+        if (notice->result == 1)
+        {
+            if (source == NULL || source->onlineRoleId != notice->sourceRoleId ||
+                !vm_net_mock_append_team_member_join_object(out, outCap, pos,
+                                                            observer, source))
+            {
+                return -1;
+            }
+        }
+        printf("[info][mock-service] team_result_deliver observer=%08x result=%u member_update=%s\n",
+               observer->clientId, notice->result,
+               notice->result == 1 ? "5/5" : "none");
+        memset(notice, 0, sizeof(*notice));
+        if (noticeTypeOut)
+            *noticeTypeOut = noticeType;
+        return appendedObjects;
+    }
+
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_MEMBER_JOIN:
+    {
+        vm_mock_service_client_session *source =
+            vm_mock_service_find_client_session(notice->sourceClientId);
+        if (source == NULL || source->onlineRoleId != notice->sourceRoleId ||
+            !vm_net_mock_append_team_member_join_object(out, outCap, pos,
+                                                        observer, source))
+        {
+            memset(notice, 0, sizeof(*notice));
+            return 0;
+        }
+        printf("[info][mock-service] team_member_join_deliver observer=%08x member=%08x/%u update=5/5\n",
+               observer->clientId, source->clientId, source->onlineRoleId);
+        memset(notice, 0, sizeof(*notice));
+        if (noticeTypeOut)
+            *noticeTypeOut = noticeType;
+        return 1;
+    }
+
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_LEAVE:
+    {
+        vm_mock_service_client_session *source =
+            vm_mock_service_find_client_session(notice->sourceClientId);
+        u32 leaveWireId = source ? vm_mock_service_team_member_wire_id(observer, source)
+                                 : notice->sourceRoleId;
+        if (leaveWireId == 0)
+        {
+            memset(notice, 0, sizeof(*notice));
+            return 0;
+        }
+        if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 5, 7, &objectStart) ||
+            !vm_net_mock_put_object_u32(out, outCap, pos, "id", leaveWireId))
+        {
+            return -1;
+        }
+        break;
+    }
+
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_HSP:
+    {
+        vm_mock_service_client_session *source =
+            vm_mock_service_find_client_session(notice->sourceClientId);
+        if (source == NULL || source->onlineRoleId != notice->sourceRoleId ||
+            !vm_net_mock_append_team_hsp_object(out, outCap, pos, observer, source))
+        {
+            memset(notice, 0, sizeof(*notice));
+            return 0;
+        }
+        printf("[info][mock-service] team_hsp_deliver observer=%08x member=%08x/%u hp=%u/%u mp=%u/%u\n",
+               observer->clientId, source->clientId, source->onlineRoleId,
+               source->onlineHp, source->onlineHpMax,
+               source->onlineMp, source->onlineMpMax);
+        memset(notice, 0, sizeof(*notice));
+        if (noticeTypeOut)
+            *noticeTypeOut = noticeType;
+        return 1;
+    }
 
     default:
         memset(notice, 0, sizeof(*notice));
@@ -18972,7 +19878,7 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
         if (socialAppend < 0)
             return 0;
         if (socialAppend > 0)
-            ++objectCount;
+            objectCount = (u8)(objectCount + socialAppend);
         vm_net_mock_finish_wt_packet(out, pos, objectCount);
         printf("[info][mock-service] scene_sync_poll baseline observer=%08x scene=%s roles=%u moveinfo=%u social=%s resp=%u evidence=IDA:0x01012958/0x01012A76\n",
                observer->clientId,
@@ -19038,7 +19944,7 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
     if (socialAppend < 0)
         return 0;
     if (socialAppend > 0)
-        ++objectCount;
+        objectCount = (u8)(objectCount + socialAppend);
 
     if (objectCount == 0)
         return 0;
@@ -19142,6 +20048,10 @@ static bool vm_net_mock_parse_actor_moveinfo_pos(const u8 *moveInfo,
 static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 requestLen,
                                                          u8 *out, u32 outCap)
 {
+    u32 timingStartMs = scheduler_get_tick_ms();
+    u32 timingFieldMs = timingStartMs;
+    u32 timingPositionMs = timingStartMs;
+    u32 timingSessionMs = timingStartMs;
     u32 pos = 5;
     u8 objectCount = 0;
     const u8 *moveInfo = NULL;
@@ -19173,6 +20083,7 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
     {
         moveinfoFieldKind = "entry";
     }
+    timingFieldMs = scheduler_get_tick_ms();
     parsedUploadedPos = vm_net_mock_parse_actor_moveinfo_pos(moveInfo, moveInfoLen,
                                                              &uploadedX, &uploadedY);
     if (parsedUploadedPos &&
@@ -19270,6 +20181,7 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
             }
         }
     }
+    timingPositionMs = scheduler_get_tick_ms();
     vm_net_mock_reset_scene_moveinfo_npc_seed_if_needed(scene);
     if (vm_net_mock_scene_name_is_safe(scene) && gridX != 0 && gridY != 0)
     {
@@ -19282,6 +20194,7 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
                                                gridY,
                                                posSource);
     }
+    timingSessionMs = scheduler_get_tick_ms();
 
     /*
      * Fallback only. Runtime evidence showed that post-scene 2/1 moveinfo arrives
@@ -19334,6 +20247,20 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
            pos,
            scene ? scene : "-");
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    {
+        u32 timingEndMs = scheduler_get_tick_ms();
+        if (timingEndMs - timingStartMs >= 50)
+        {
+            printf("[warn][network] actor_moveinfo_stage field_ms=%u position_ms=%u session_ms=%u finish_ms=%u total_ms=%u source=%s scene=%s\n",
+                   timingFieldMs - timingStartMs,
+                   timingPositionMs - timingFieldMs,
+                   timingSessionMs - timingPositionMs,
+                   timingEndMs - timingSessionMs,
+                   timingEndMs - timingStartMs,
+                   posSource,
+                   scene ? scene : "-");
+        }
+    }
     return pos;
 }
 
@@ -19856,6 +20783,23 @@ static void vm_net_mock_battle_commit_skill_mp(u32 mpAfter)
     {
         vm_net_mock_battle_set_role_mp_current(mpAfter);
     }
+}
+
+/* Battle action builders advance their own authoritative HP/MP counters before
+ * the response is returned.  Publish those current values into the active role
+ * immediately so the normal post-request presence capture can broadcast group
+ * subtype 5/11 during the battle, instead of waiting for terminal settlement. */
+static void vm_net_mock_battle_publish_role_vitals(void)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+
+    if (role == NULL)
+        return;
+    vm_net_mock_role_sync_derived_vitals(role);
+    if (g_mockBattleRoleHpMax != 0)
+        role->hp = vm_net_mock_min_u32(g_mockBattleRoleHpCurrent, role->hpMax);
+    if (g_mockBattleRoleMpMax != 0)
+        role->mp = vm_net_mock_min_u32(g_mockBattleRoleMpCurrent, role->mpMax);
 }
 
 static bool vm_net_mock_append_battle_actioninfo_child(u8 *actionInfo, u32 actionInfoCap,
@@ -22590,13 +23534,17 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
     if (playerOnRight && !useSceneMonsterStart)
         enemyWireId = requestedEnemyId;
     prefillEnemyTemplate = !playerOnRight &&
-                           vm_net_mock_env_u8("CBE_BATTLE_PREFILL_ENEMY_TEMPLATE", 1) != 0 &&
+                           vm_net_mock_env_u8("CBE_BATTLE_PREFILL_ENEMY_TEMPLATE", 0) != 0 &&
                            requestedEnemyId != 0 &&
                            (enemyWireId != requestedEnemyId || requestedEnemyId != id);
     if (prefillEnemyTemplate)
         enemyWireId = requestedEnemyId;
+    /* A late 5/5 here is parsed by the scene group handler before battle
+     * transition completes and can expose a transient row to the team HUD.
+     * Login 5/10 also stays empty for a role that is not actually in a team;
+     * keep this experiment off until a battle-only template contract exists. */
     prefillPlayerTemplate = playerOnRight &&
-                            vm_net_mock_env_u8("CBE_BATTLE_PREFILL_PLAYER_TEMPLATE", 1) != 0 &&
+                            vm_net_mock_env_u8("CBE_BATTLE_PREFILL_PLAYER_TEMPLATE", 0) != 0 &&
                             roleId != 0;
     if (useSceneMonsterStart)
     {
@@ -22624,8 +23572,12 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
     }
     if (prefillPlayerTemplate)
     {
-        u8 playerTemplateByte34 = vm_net_mock_env_u8("CBE_BATTLE_PLAYER_TEMPLATE_BYTE34", 1);
-        u8 playerTemplateByte35 = vm_net_mock_env_u8("CBE_BATTLE_PLAYER_TEMPLATE_BYTE35", 0);
+        u8 playerTemplateByte34 = vm_net_mock_env_u8(
+            "CBE_BATTLE_PLAYER_TEMPLATE_BYTE34",
+            role != NULL && role->sex <= 1 ? (u8)(role->sex + 1) : 1);
+        u8 playerTemplateByte35 = vm_net_mock_env_u8(
+            "CBE_BATTLE_PLAYER_TEMPLATE_BYTE35",
+            role != NULL && role->job >= 1 && role->job <= 3 ? (u8)(role->job - 1) : 0);
         const char *playerTemplateName = vm_net_mock_env_str("CBE_BATTLE_PLAYER_TEMPLATE_NAME", roleName);
 
         if (!vm_net_mock_append_battle_template_prefill_object_ex(out, outCap, &pos,
@@ -22699,7 +23651,7 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
         if (perEnemyMaxHp < perEnemyHp)
             perEnemyMaxHp = perEnemyHp;
         vm_net_mock_battle_reset_enemy_hp_from_stats(requestedEnemyId);
-        printf("[info][network] mock_challenge_battle_start id=%u requested=%u roleid=%u enemies=%u rolehp=%u/%u rolemp=%u/%u enemyhp=%u/%u per_enemy_hp=%u/%u enemymp=%u subtype=%u side=%u scene_start=%u index=%u pos=(%u,%u)\n",
+        printf("[info][network] mock_challenge_battle_start id=%u requested=%u roleid=%u enemies=%u rolehp=%u/%u rolemp=%u/%u enemyhp=%u/%u per_enemy_hp=%u/%u enemymp=%u subtype=%u side=%u scene_start=%u index=%u pos=(%u,%u) prefill_player=%u prefill_enemy=%u objects=%u\n",
                id, requestedEnemyId,
                g_vm_net_mock_battle_role_id_current,
                vm_net_mock_battle_enemy_count_current(),
@@ -22713,7 +23665,10 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
                perEnemyMaxHp,
                vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MP", stats.mp),
                battleStartSubtype, battleSide, useSceneMonsterStart ? 1 : 0,
-               sceneMonsterIndex, sceneMonsterPosX, sceneMonsterPosY);
+               sceneMonsterIndex, sceneMonsterPosX, sceneMonsterPosY,
+               prefillPlayerTemplate ? 1u : 0u,
+               prefillEnemyTemplate ? 1u : 0u,
+               responseObjectCount);
         vm_autotest_note("mock_challenge_battle_start id=%u requested=%u roleid=%u enemies=%u wire=%u level=%u hp=%u/%u perhp=%u/%u rolemp=%u/%u enemymp=%u atk=%u def=%u exp=%u gold=%u index=%u pos=(%u,%u) reqIndex=%u reqPos=(%u,%u) subtype=%u side=%u scene_start=%u table=%08x ids=%u/%u/%u/%u\n",
                          id, requestedEnemyId,
                          g_vm_net_mock_battle_role_id_current,
@@ -25877,6 +26832,20 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_team_invite_reply_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-team-invite-reply", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_team_leave_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-team-leave", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
     hookedLen = vm_net_mock_build_nearby_team_invite_response(request, requestLen, out, outCap);
     if (hookedLen)
     {
@@ -26165,6 +27134,7 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     hookedLen = vm_net_mock_build_battle_item_use_response(request, requestLen, out, outCap);
     if (hookedLen)
     {
+        vm_net_mock_battle_publish_role_vitals();
         vm_net_log_handled_packet("builtin-battle-item-use", request, requestLen, hookedLen);
         return hookedLen;
     }
@@ -26172,6 +27142,7 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     hookedLen = vm_net_mock_build_battle_escape_response(request, requestLen, out, outCap);
     if (hookedLen)
     {
+        vm_net_mock_battle_publish_role_vitals();
         vm_net_log_handled_packet("builtin-battle-escape", request, requestLen, hookedLen);
         return hookedLen;
     }
@@ -26179,12 +27150,14 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     hookedLen = vm_net_mock_build_battle_operate_response(request, requestLen, out, outCap);
     if (hookedLen)
     {
+        vm_net_mock_battle_publish_role_vitals();
         vm_net_log_handled_packet("builtin-battle-operate", request, requestLen, hookedLen);
         return hookedLen;
     }
     hookedLen = vm_net_mock_build_battle_operate_response_fallback(request, requestLen, out, outCap);
     if (hookedLen)
     {
+        vm_net_mock_battle_publish_role_vitals();
         vm_net_log_handled_packet("builtin-battle-operate-fallback", request, requestLen, hookedLen);
         return hookedLen;
     }
@@ -26355,12 +27328,14 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         hookedLen = vm_net_mock_build_battle_operate_response_fallback(request, requestLen, out, outCap);
         if (hookedLen)
         {
+            vm_net_mock_battle_publish_role_vitals();
             vm_net_log_handled_packet("builtin-battle-operate-lastchance-fallback", request, requestLen, hookedLen);
             return hookedLen;
         }
         hookedLen = vm_net_mock_build_battle_operate_response_raw82(request, requestLen, out, outCap);
         if (hookedLen)
         {
+            vm_net_mock_battle_publish_role_vitals();
             vm_net_log_handled_packet("builtin-battle-operate-raw82", request, requestLen, hookedLen);
             return hookedLen;
         }

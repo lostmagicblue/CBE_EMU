@@ -548,6 +548,25 @@ stone targets must come from server-visible request fields plus `wMap.dsh` /
 `sMap.dsh`; directory names are not an authoritative substitute for server map
 data.
 
+### 2026-07-11 桃花岛 `16/4` unresolved/assert
+
+Runtime request: `1/16/4`, length `37`, fields `curid=1`, `objid=2`.
+`SendItemUseReq(0x0103573A)` confirms those are the only two serialized map
+selection fields. Local authoritative DSH rows resolve the request as:
+
+```text
+wMap teleportID=2 -> lower_map=40, scene_count=4
+sMap row=40 -> 01桃花岛_01.sce @ (96,120)
+```
+
+The file and landing position were valid, but
+`vm_net_mock_scene_name_is_download_key()` had been left as an unconditional
+`false`. That rejected every DSH scene name before the normal resource check,
+made `mock_teleport_stone_map_unresolved` return zero bytes, and exposed the
+client's unhandled `16/4` assertion. The guard now accepts non-empty resource
+keys without path separators; `vm_net_mock_scene_resource_exists()` remains the
+subsequent authority for a real server resource.
+
 ### Post-enter Combo
 
 Runtime negative evidence after `16/2`:

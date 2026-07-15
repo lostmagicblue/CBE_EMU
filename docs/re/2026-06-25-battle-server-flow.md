@@ -199,9 +199,21 @@ first record / left: scene monster selected by challenge index/posx/posy
 second record / right: role id 10001, hp 120
 ```
 
-The right-side record still goes through `sub_66A4(0x66A4)` template lookup, so
-the mock sends a preceding `1/5/5 groupinfo` template seed for role id `10001`
-when `CBE_BATTLE_PLAYER_ON_RIGHT=1`.
+The right-side record still goes through `sub_66A4(0x66A4)` template lookup.
+There is not yet a safe packet contract for seeding that battle-only template.
+The login-time `1/5/10` response must remain an empty roster while the role is
+not actually in a team; using it as a solo battle-template cache creates a live
+scene HUD row before any team exists.
+
+2026-07-15 negative runtime evidence showed why a battle-time seed is wrong:
+the `4/1` challenge response had `resp=248` and included a preceding `1/5/5`
+player row.  The main CBE parsed that object through `net_handle_group_info`
+before the battle transition completed, exposed it to
+  `scene_draw_team_member_status_list`, and reached a null callback at
+  `0x01014388`.  A later login-time solo-roster experiment failed at the same
+  callback before scene entry. `CBE_BATTLE_PREFILL_PLAYER_TEMPLATE` and
+`CBE_BATTLE_PREFILL_ENEMY_TEMPLATE` therefore default to `0`; they remain only
+as explicit legacy experiment switches.
 
 `sub_66A4(0x66A4)` matches ids against four local template rows at
 `*(R9 + 13472)`, row stride `0x4C`, id at row offset `0x24`. If a scene
@@ -590,8 +602,9 @@ Minimum server fix:
   `CBE_BATTLE_SCENE_MONSTER_MOVEINFO=1` and send `1/2/2 moveinfo` for the same
   scene row so subtype 5 copies nonzero HP/MP from `node+0xB4..0xC0`
 - keep subtype `1/4/10` only as a fallback/experiment path for non-scene starts
-- prefill a right-side role template with `1/5/5 groupinfo` so the second
-  record can pass `sub_66A4`
+- keep login `1/5/10` empty when the role has no team and do not inject `5/5`
+  into the battle-start response by default; recover a dedicated battle-side
+  player-template contract before enabling the right-side lookup path
 - default `CBE_BATTLE_ACTION_TYPE` to `0`, keeping type 1 and 2 available by env
   override for later skill experiments
 - encode action type 0 records without effect tail fields
@@ -613,6 +626,10 @@ Minimum server fix:
 - include `itemnum/iteminfo` for displayed ordinary item drops after the reward
   roll inserts the item into the role backpack.
 - use negative two's-complement HP deltas in subtype `4/6`; positive values heal
+- after each successful battle operation/item/escape response, publish the
+  authoritative battle HP/MP counters to the active role before the service's
+  presence capture runs; this drives the already recovered group subtype
+  `5/11 { hsp }` path on every real change rather than only after settlement
 
 ## unknowns
 
@@ -651,3 +668,10 @@ result: touched actor id 105, entered battle without crash, monster row uses nam
 The key-only script is still unreliable for producing `4/1`/`4/2`; mixed
 tap+key scripts are more repeatable until a dedicated battle-entry automation
 helper exists.
+
+Team-vitals smoke (`tmp/team-hsp-latency-validation/service.log`, 2026-07-15):
+two online sessions formed a two-member team, client A sent a skill `4/2`, MP
+changed from `100` to `90`, and the next normal scene polls delivered one
+`5/11` to A and one to B with `hp=99/120 mp=90/100`. The local update used
+wire id `10001`; the colliding remote role used that observer's `0x6Axxxxxx`
+wire id.
